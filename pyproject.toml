@@ -12,8 +12,14 @@ license = { text = "MIT" }
 authors = [{ name = "Jaskaran Singh" }]
 dependencies = ["plotext>=5.3,<6"]
 
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
 [project.scripts]
 subbench = "subbench.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/subbench"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
