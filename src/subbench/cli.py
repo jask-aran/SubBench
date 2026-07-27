@@ -10,6 +10,8 @@ from typing import Sequence
 
 from .ccusage import CcusageSchemaError, normalise_payload
 from .charts import render_value_history
+from .doctor import exit_code as doctor_exit_code
+from .doctor import run_doctor
 from .regression import robust_estimates
 from .store import connect, estimate_windows, list_imports, regression_points, save_import
 from .timeseries import detect_regime_changes, rolling_values, window_history
@@ -23,6 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE, help=f"SQLite database path (default: {DEFAULT_DATABASE})")
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("init", help="Create the SQLite database")
+
+    doctor = subcommands.add_parser("doctor", help="Check local dependencies, logs, database and observation freshness")
+    doctor.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
+    doctor.add_argument("--json", action="store_true", dest="as_json")
 
     watch_parser = subcommands.add_parser("watch", help="Watch local agent logs and collect after changes")
     watch_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
@@ -66,18 +72,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "init":
         print(args.database)
         return 0
+    if args.command == "doctor":
+        providers = ("claude", "codex") if args.provider == "all" else (args.provider,)
+        checks = run_doctor(db, args.database, providers)
+        if args.as_json:
+            print(json.dumps([check.as_dict() for check in checks], indent=2))
+        else:
+            print("status\tcheck\tdetail")
+            for check in checks:
+                print(f"{check.status}\t{check.name}\t{check.detail}")
+        return doctor_exit_code(checks)
     if args.command == "imports":
         return _print_imports(db)
     if args.command == "chart":
         estimates = robust_estimates(regression_points(db, None if args.provider == "all" else args.provider))
         rows = [row for row in window_history(estimates) if row["quota_span_percent"] >= args.min_quota_span]
-        ok = render_value_history(
-            rows,
-            provider=None if args.provider == "all" else args.provider,
-            window=None if args.window == "all" else args.window,
-            width=args.width,
-            height=args.height,
-        )
+        ok = render_value_history(rows, provider=None if args.provider == "all" else args.provider, window=None if args.window == "all" else args.window, width=args.width, height=args.height)
         if not ok:
             print("No sufficiently informative reset-window estimates to chart.")
         return 0
@@ -86,15 +96,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _print_report(db, provider=provider, as_json=args.as_json, intervals=args.intervals, history=args.history, min_quota_span=args.min_quota_span)
     if args.command == "watch":
         providers = ("claude", "codex") if args.provider == "all" else (args.provider,)
-        return watch(
-            db,
-            targets=[WatchTarget(provider=p) for p in providers],
-            runner=args.runner,
-            interval_seconds=args.interval,
-            debounce_seconds=args.debounce,
-            reconcile_seconds=args.reconcile,
-            once=args.once,
-        )
+        return watch(db, targets=[WatchTarget(provider=p) for p in providers], runner=args.runner, interval_seconds=args.interval, debounce_seconds=args.debounce, reconcile_seconds=args.reconcile, once=args.once)
     if args.command == "ingest":
         raw = sys.stdin.buffer.read() if args.path == "-" else Path(args.path).read_bytes()
         return _ingest(db, raw=raw, provider=args.provider, report=args.report, source_command=None)
