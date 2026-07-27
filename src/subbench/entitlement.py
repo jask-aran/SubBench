@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import subprocess
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+
+@dataclass(frozen=True)
+class EntitlementWindow:
+    provider: str
+    window: str
+    used_percent: float
+    resets_at: str | None
+    duration_minutes: int | None
+    source: str
+
+
+def collect_entitlements(provider: str) -> list[EntitlementWindow]:
+    if provider == "codex":
+        return collect_codex()
+    if provider == "claude":
+        return collect_claude()
+    raise ValueError(f"unsupported provider: {provider}")
+
+
+def collect_codex() -> list[EntitlementWindow]:
+    process = subprocess.Popen(
+        ["codex", "app-server"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        requests = (
+            {"method": "initialize", "id": 1, "params": {"clientInfo": {"name": "subbench", "title": "SubBench", "version": "0.1.0"}, "capabilities": {}}},
+            {"method": "initialized", "params": {}},
+            {"method": "account/rateLimits/read", "id": 2},
+        )
+        for request in requests:
+            process.stdin.write(json.dumps(request) + "\n")
+            process.stdin.flush()
+        for line in process.stdout:
+            message = json.loads(line)
+            if message.get("id") == 2:
+                return _normalise_codex(message.get("result", {}))
+        raise RuntimeError("codex app-server ended before returning rate limits")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+def collect_claude() -> list[EntitlementWindow]:
+    command = os.environ.get("SUBBENCH_CLAUDE_USAGE_COMMAND")
+    if not command:
+        raise RuntimeError(
+            "Claude entitlement collection requires SUBBENCH_CLAUDE_USAGE_COMMAND; "
+            "set it to a local command that prints the OAuth usage response as JSON"
+        )
+    result = subprocess.run(shlex.split(command), check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"Claude usage command exited {result.returncode}")
+    return _normalise_claude(json.loads(result.stdout))
+
+
+def _normalise_codex(payload: dict[str, Any]) -> list[EntitlementWindow]:
+    limits = payload.get("rateLimits") or payload
+    rows: list[EntitlementWindow] = []
+    for name, key in (("primary", "primary"), ("secondary", "secondary")):
+        window = limits.get(key)
+        if not isinstance(window, dict) or window.get("usedPercent") is None:
+            continue
+        duration = _int_or_none(window.get("windowDurationMins"))
+        label = "five_hour" if duration and 240 <= duration <= 360 else "weekly" if duration and duration >= 6 * 24 * 60 else name
+        rows.append(EntitlementWindow("codex", label, float(window["usedPercent"]), _epoch_iso(window.get("resetsAt")), duration, "codex-app-server"))
+    return rows
+
+
+def _normalise_claude(payload: dict[str, Any]) -> list[EntitlementWindow]:
+    aliases = {
+        "five_hour": "five_hour",
+        "fiveHour": "five_hour",
+        "seven_day": "weekly",
+        "sevenDay": "weekly",
+        "weekly": "weekly",
+    }
+    rows: list[EntitlementWindow] = []
+    for key, label in aliases.items():
+        value = payload.get(key)
+        if not isinstance(value, dict):
+            continue
+        utilisation = value.get("utilization", value.get("usedPercent"))
+        if utilisation is None:
+            continue
+        used = float(utilisation)
+        if 0 <= used <= 1:
+            used *= 100
+        reset = value.get("resets_at", value.get("resetsAt"))
+        rows.append(EntitlementWindow("claude", label, used, _time_iso(reset), None, "claude-oauth-usage"))
+    return rows
+
+
+def _epoch_iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(float(value), timezone.utc).isoformat()
+
+
+def _time_iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return _epoch_iso(value)
+    return str(value)
+
+
+def _int_or_none(value: Any) -> int | None:
+    return None if value is None else int(value)
