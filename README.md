@@ -20,7 +20,17 @@ subbench watch --provider codex --once
 subbench watch
 ```
 
-SubBench samples cumulative local usage every 60 seconds, so it does not proxy or modify Codex/Claude requests. Changed ccusage payloads and entitlement snapshots are retained in `~/.local/share/subbench/subbench.sqlite3`; identical usage snapshots are discarded by hash.
+The watcher is event-driven. It scans only file metadata every two seconds, waits five seconds for a burst of log writes to settle, then runs ccusage and captures entitlement. A full ccusage reconciliation runs every six hours even if no change was detected. This keeps ccusage as the pricing and schema authority without launching Node processes every minute.
+
+Changed ccusage payloads and entitlement snapshots are retained in `~/.local/share/subbench/subbench.sqlite3`; identical usage snapshots are discarded by hash.
+
+Useful controls:
+
+```bash
+subbench watch --interval 1       # filesystem metadata scan cadence
+subbench watch --debounce 10      # wait for logs to settle
+subbench watch --reconcile 3600   # maximum time between full reconciliations
+```
 
 ### Automatic startup on Linux or WSL
 
@@ -33,6 +43,20 @@ journalctl --user -u subbench -f
 ```
 
 The service assumes `subbench` is installed at `~/.local/bin/subbench`. Adjust `ExecStart` where necessary. WSL must have systemd enabled.
+
+## Terminal charts
+
+SubBench uses `plotext` to draw charts directly in a normal terminal. It remains a CLI rather than becoming an interactive TUI.
+
+```bash
+subbench chart
+subbench chart --provider codex
+subbench chart --provider codex --window weekly
+subbench chart --width 120 --height 32
+subbench chart --min-quota-span 10
+```
+
+The chart plots one robust API-equivalent value estimate per informative reset window. Separate series are drawn for each provider and quota window. It is intended for quick on-demand inspection; `subbench report --json` remains the stable machine-readable interface.
 
 ## Entitlement collection
 
@@ -96,17 +120,10 @@ subbench report --provider codex
 subbench report --json
 subbench report --history
 subbench report --intervals
+subbench chart
 ```
 
-Typical output:
-
-```text
-Current API-equivalent entitlement value
-provider  window     estimate  recent range      windows  quota evidence
-codex     weekly     US$96.40  US$89.10–US$103  8        412%
-```
-
-`--history` shows one robust estimate per reset window. `--intervals` retains the raw adjacent-snapshot calculations for debugging.
+`--history` shows one robust estimate per reset window. `--intervals` retains raw adjacent-snapshot calculations for debugging. `chart` renders the same reset-window history visually.
 
 ## Detecting changed limit regimes
 
@@ -118,56 +135,55 @@ SubBench compares the latest three informative reset windows with the preceding 
 
 A change is labelled `developing` with three or four baseline windows and `likely` once at least five baseline windows support the old regime.
 
-```text
-Possible backend limit changes
-provider  window  status  first observed  baseline  recent   change
-codex     weekly  likely  2026-08-24      US$95.10  US$143.20 +50.6%
-```
-
 The date means the first reset window in which SubBench observed the new level. It is not necessarily the exact backend-change date, particularly if the harness was unused around the transition.
 
-A sustained jump is evidence of a changed **effective API-equivalent entitlement under the observed workload**. It does not by itself prove that every subscriber received a fixed token increase. A provider may change model weights, temporary multipliers or account segmentation, and a major change in the user's model/workload mix can also move the estimate. SubBench therefore reports a possible regime change rather than asserting its cause.
+A sustained jump is evidence of a changed **effective API-equivalent entitlement under the observed workload**. It does not by itself prove that every subscriber received a fixed token increase. A provider may change model weights, temporary multipliers or account segmentation, and a major change in model/workload mix can also move the estimate.
 
 ## Architecture
 
 ```text
 Codex CLI / Claude Code
-        │ write provider-reported local usage
+        │ append local JSONL logs
+        ▼
+metadata-only file watcher
+        │ change burst + debounce
         ▼
       ccusage ──────────────┐
                             │
-Codex app-server ───────────┤ every minute
+Codex app-server ───────────┤ on change or reconciliation
 Claude usage helper ────────┘
                             ▼
-                    SubBench watcher
-                    - raw usage evidence
-                    - normalised token classes
-                    - quota/reset snapshots
-                            ▼
-                          SQLite
+                    SQLite evidence store
                             ▼
               reset-separated robust regression
                             ▼
-               one estimate per reset window
+               time series + terminal charts
                             ▼
-             rolling value + regime detection
+              rolling value + regime detection
 ```
 
-Snapshot collection is recoverable: the coding CLIs retain cumulative usage, so token activity generated during brief SubBench downtime is captured on the next successful sample. Finer entitlement movement during that downtime cannot be reconstructed.
+The filesystem watcher does not parse or modify agent logs. It only notices new, appended, replaced or removed JSONL files. ccusage remains responsible for interpreting those logs and calculating API-equivalent cost. Periodic reconciliation recovers missed filesystem events and usage generated while SubBench was offline.
 
 ## Commands
 
 ```bash
-subbench watch                          # continuous usage + entitlement collection
+subbench watch                          # incremental continuous collection
 subbench watch --provider codex --once # diagnostic snapshot
+subbench chart                          # terminal value history
+subbench chart --window weekly          # one quota-window type
 subbench report                         # rolling current value and regime changes
 subbench report --history               # one estimate per reset window
 subbench report --intervals             # raw adjacent-interval diagnostics
-subbench report --min-quota-span 10     # require stronger windows
 subbench collect codex --report daily  # manual/backfill usage snapshot
 subbench ingest payload.json --provider claude --report daily
 subbench imports                        # audit raw usage imports
 ```
+
+## Overhead
+
+While idle, SubBench performs recursive directory scans of file names and metadata only; it does not open every JSONL file. CPU use should remain near zero and the Python process should remain in the tens-of-megabytes memory range. The heavier Node/ccusage and entitlement subprocesses now run only after relevant log changes or at the six-hour reconciliation boundary.
+
+A very large archive containing hundreds of thousands of session files would still make metadata scans non-trivial. A future platform-native filesystem notification backend could remove even that scan, but the current approach stays dependency-light and works consistently across Linux, WSL and macOS-style filesystems.
 
 ## Evidence model
 
