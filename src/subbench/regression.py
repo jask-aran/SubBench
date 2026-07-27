@@ -24,8 +24,11 @@ class RegressionEstimate:
 
 
 def robust_estimates(points: Iterable[Mapping[str, Any]]) -> list[RegressionEstimate]:
-    groups: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
-    for point in points:
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for source_point in points:
+        # sqlite3.Row implements the mapping protocol but does not provide .get().
+        # Normalising once also gives the rest of the estimator a stable input type.
+        point = dict(source_point)
         reset_key = str(point.get("resets_at") or "unknown")
         key = (str(point["provider"]), str(point["window"]), reset_key)
         groups.setdefault(key, []).append(point)
