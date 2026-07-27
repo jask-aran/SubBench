@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from typing import Callable, Sequence
 
 from .ccusage import CcusageSchemaError, normalise_payload
-from .store import save_import
+from .entitlement import collect_entitlements
+from .store import save_entitlements, save_import
 
 
 @dataclass(frozen=True)
@@ -29,38 +30,38 @@ def ccusage_command(*, runner: str, provider: str, report: str) -> list[str]:
     return [*prefix, provider, report, "--json"]
 
 
-def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
-    command = ccusage_command(
-        runner=runner,
-        provider=target.provider,
-        report=target.report,
-    )
+def collect_target(db, *, target: WatchTarget, runner: str, observed_at: str) -> tuple[bool, str]:
+    messages: list[str] = []
+    failed = False
+    command = ccusage_command(runner=runner, provider=target.provider, report=target.report)
     result = subprocess.run(command, check=False, capture_output=True)
     if result.returncode != 0:
         error = result.stderr.decode("utf-8", errors="replace").strip()
-        return False, error or f"ccusage exited with status {result.returncode}"
+        messages.append(error or f"ccusage exited with status {result.returncode}")
+        failed = True
+    else:
+        try:
+            payload = json.loads(result.stdout)
+            rows = normalise_payload(payload, provider=target.provider, report=target.report)
+            import_id, row_count, created = save_import(
+                db, raw=result.stdout, payload=payload, rows=rows,
+                provider=target.provider, report=target.report,
+                command=" ".join(command),
+            )
+            state = "recorded" if created else "unchanged"
+            messages.append(f"usage {state} import {import_id} ({row_count} rows)")
+        except (json.JSONDecodeError, UnicodeDecodeError, CcusageSchemaError, ValueError) as error:
+            messages.append(f"usage error: {error}")
+            failed = True
 
     try:
-        payload = json.loads(result.stdout)
-        rows = normalise_payload(
-            payload,
-            provider=target.provider,
-            report=target.report,
-        )
-    except (json.JSONDecodeError, UnicodeDecodeError, CcusageSchemaError, ValueError) as error:
-        return False, str(error)
+        entitlements = collect_entitlements(target.provider)
+        count = save_entitlements(db, entitlements, observed_at)
+        messages.append(f"entitlement {count} window(s)")
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        messages.append(f"entitlement unavailable: {error}")
 
-    import_id, row_count, created = save_import(
-        db,
-        raw=result.stdout,
-        payload=payload,
-        rows=rows,
-        provider=target.provider,
-        report=target.report,
-        command=" ".join(command),
-    )
-    state = "recorded" if created else "unchanged"
-    return True, f"{target.provider}: {state} import {import_id} ({row_count} rows)"
+    return not failed, f"{target.provider}: " + "; ".join(messages)
 
 
 def watch(
@@ -79,13 +80,12 @@ def watch(
         failed = False
         timestamp = datetime.now(timezone.utc).isoformat()
         for target in targets:
-            ok, message = collect_target(db, target=target, runner=runner)
+            ok, message = collect_target(db, target=target, runner=runner, observed_at=timestamp)
             emit(f"{timestamp} {message}")
             failed = failed or not ok
 
         if once:
             return 1 if failed else 0
-
         try:
             time.sleep(interval_seconds)
         except KeyboardInterrupt:
