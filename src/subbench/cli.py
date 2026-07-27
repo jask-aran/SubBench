@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Sequence
 
 from .ccusage import CcusageSchemaError, normalise_payload
-from .store import connect, estimate_windows, list_imports, save_import
+from .regression import robust_estimates
+from .store import connect, estimate_windows, list_imports, regression_points, save_import
 from .watcher import WatchTarget, ccusage_command, watch
 
 DEFAULT_DATABASE = Path(os.environ.get("SUBBENCH_DATABASE", Path.home() / ".local" / "share" / "subbench" / "subbench.sqlite3"))
@@ -30,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser = subcommands.add_parser("report", help="Estimate API-equivalent value of observed quota windows")
     report_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
     report_parser.add_argument("--json", action="store_true", dest="as_json")
+    report_parser.add_argument("--intervals", action="store_true", help="Show raw adjacent-interval estimates instead of robust regression")
 
     ingest = subcommands.add_parser("ingest", help="Import ccusage JSON from a file or stdin")
     ingest.add_argument("path", type=str)
@@ -55,7 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _print_imports(db)
     if args.command == "report":
         provider = None if args.provider == "all" else args.provider
-        return _print_report(db, provider=provider, as_json=args.as_json)
+        return _print_report(db, provider=provider, as_json=args.as_json, intervals=args.intervals)
     if args.command == "watch":
         providers = ("claude", "codex") if args.provider == "all" else (args.provider,)
         return watch(db, targets=[WatchTarget(provider=p) for p in providers], runner=args.runner, interval_seconds=args.interval, once=args.once)
@@ -85,17 +87,33 @@ def _ingest(db, *, raw: bytes, provider: str, report: str, source_command: str |
     return 0
 
 
-def _print_report(db, *, provider: str | None, as_json: bool) -> int:
-    rows = [dict(row) for row in estimate_windows(db, provider)]
+def _print_report(db, *, provider: str | None, as_json: bool, intervals: bool) -> int:
+    if intervals:
+        rows = [dict(row) for row in estimate_windows(db, provider)]
+    else:
+        rows = [estimate.as_dict() for estimate in robust_estimates(regression_points(db, provider))]
+
     if as_json:
         print(json.dumps(rows, indent=2))
         return 0
     if not rows:
-        print("No usable intervals yet. Keep `subbench watch` running until quota and cost both increase within one reset window.")
+        print("No usable estimates yet. Keep `subbench watch` running until quota and ccusage cost both increase within one reset window.")
         return 0
-    print("provider\twindow\tquota delta\tAPI value\timplied full window\tinterval end")
+
+    if intervals:
+        print("provider\twindow\tquota delta\tAPI value\timplied full window\tinterval end")
+        for row in rows:
+            print(f"{row['provider']}\t{row['window']}\t{row['quota_delta_percent']:.2f}%\tUS${row['api_value_usd']:.4f}\tUS${row['implied_full_window_usd']:.2f}\t{row['observed_at']}")
+        return 0
+
+    print("provider\twindow\testimate\t80% slope range\tobservations\tquota span\tlatest")
     for row in rows:
-        print(f"{row['provider']}\t{row['window']}\t{row['quota_delta_percent']:.2f}%\tUS${row['api_value_usd']:.4f}\tUS${row['implied_full_window_usd']:.2f}\t{row['observed_at']}")
+        print(
+            f"{row['provider']}\t{row['window']}\tUS${row['estimate_usd']:.2f}\t"
+            f"US${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t"
+            f"{row['observation_count']} ({row['slope_count']} slopes)\t"
+            f"{row['quota_span_percent']:.2f}%\t{row['latest_observed_at']}"
+        )
     return 0
 
 
