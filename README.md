@@ -75,18 +75,58 @@ slope(i, j) = (api_value_j - api_value_i)
               / ((usage_j - usage_i) / 100)
 ```
 
-SubBench reports the median of all valid pairwise slopes. This Theil–Sen-style estimate is resistant to rounded quota percentages and isolated anomalous intervals. As more observations and a wider quota span accumulate, the number of usable slopes grows and the estimate generally stabilises.
+SubBench reports the median of all valid pairwise slopes. This Theil–Sen-style estimate is resistant to rounded quota percentages and isolated anomalous intervals. The 10th–90th percentile slope range is an empirical stability range, not a formal confidence interval.
 
-The report also shows the 10th–90th percentile range of observed slopes. This is an empirical stability range, not a formal confidence interval.
+A regression is never combined across different reported reset timestamps. Points with unchanged rounded quota do not create slopes, but remain useful once a later snapshot moves the meter.
+
+## Current value over time
+
+Each reset timestamp produces a separate robust estimate. SubBench then treats those reset-window estimates as a time series rather than fitting one permanent regression across all history.
+
+The default report calculates a rolling current value using recent informative windows:
+
+- up to 10 weekly windows;
+- up to 30 five-hour windows;
+- only windows with at least 5 percentage points of observed quota movement by default;
+- weighted by observed quota span, capped at one full entitlement.
 
 ```bash
 subbench report
 subbench report --provider codex
 subbench report --json
-subbench report --intervals  # raw adjacent-interval diagnostics
+subbench report --history
+subbench report --intervals
 ```
 
-A regression is never combined across different reported reset timestamps. Points with unchanged rounded quota do not create slopes, but remain useful once a later snapshot moves the meter.
+Typical output:
+
+```text
+Current API-equivalent entitlement value
+provider  window     estimate  recent range      windows  quota evidence
+codex     weekly     US$96.40  US$89.10–US$103  8        412%
+```
+
+`--history` shows one robust estimate per reset window. `--intervals` retains the raw adjacent-snapshot calculations for debugging.
+
+## Detecting changed limit regimes
+
+SubBench compares the latest three informative reset windows with the preceding baseline. It reports a possible regime change only when:
+
+- the recent median differs from the baseline median by at least 20%;
+- all three recent estimates lie on the same side of the baseline;
+- at least three earlier informative windows exist.
+
+A change is labelled `developing` with three or four baseline windows and `likely` once at least five baseline windows support the old regime.
+
+```text
+Possible backend limit changes
+provider  window  status  first observed  baseline  recent   change
+codex     weekly  likely  2026-08-24      US$95.10  US$143.20 +50.6%
+```
+
+The date means the first reset window in which SubBench observed the new level. It is not necessarily the exact backend-change date, particularly if the harness was unused around the transition.
+
+A sustained jump is evidence of a changed **effective API-equivalent entitlement under the observed workload**. It does not by itself prove that every subscriber received a fixed token increase. A provider may change model weights, temporary multipliers or account segmentation, and a major change in the user's model/workload mix can also move the estimate. SubBench therefore reports a possible regime change rather than asserting its cause.
 
 ## Architecture
 
@@ -108,7 +148,9 @@ Claude usage helper ────────┘
                             ▼
               reset-separated robust regression
                             ▼
-              API-equivalent entitlement value
+               one estimate per reset window
+                            ▼
+             rolling value + regime detection
 ```
 
 Snapshot collection is recoverable: the coding CLIs retain cumulative usage, so token activity generated during brief SubBench downtime is captured on the next successful sample. Finer entitlement movement during that downtime cannot be reconstructed.
@@ -118,8 +160,10 @@ Snapshot collection is recoverable: the coding CLIs retain cumulative usage, so 
 ```bash
 subbench watch                          # continuous usage + entitlement collection
 subbench watch --provider codex --once # diagnostic snapshot
-subbench report                         # robust full-window estimates
-subbench report --intervals             # raw interval estimates
+subbench report                         # rolling current value and regime changes
+subbench report --history               # one estimate per reset window
+subbench report --intervals             # raw adjacent-interval diagnostics
+subbench report --min-quota-span 10     # require stronger windows
 subbench collect codex --report daily  # manual/backfill usage snapshot
 subbench ingest payload.json --provider claude --report daily
 subbench imports                        # audit raw usage imports
@@ -131,9 +175,9 @@ SubBench keeps three layers separate:
 
 1. **Usage and pricing evidence:** provider-reported token classes and ccusage's API-equivalent USD calculation.
 2. **Entitlement evidence:** usage percentage, reset time and window identity sampled from account interfaces.
-3. **Inference:** reset-separated robust regression over cumulative observations.
+3. **Inference:** reset-separated robust regression, rolling current value and conservative structural-break detection.
 
-Raw ccusage JSON is preserved so parser changes can be audited and historical observations rebuilt.
+Raw ccusage JSON is preserved so parser changes can be audited and historical observations rebuilt. Derived estimates are recomputed from that evidence rather than treated as irreversible source data.
 
 ## Measurement limits
 
