@@ -38,18 +38,18 @@ The service assumes `subbench` is installed at `~/.local/bin/subbench`. Adjust `
 
 Codex uses the supported local app-server interface. SubBench starts `codex app-server`, performs the JSON-RPC handshake, calls `account/rateLimits/read`, and stores each returned window's used percentage, duration and reset timestamp.
 
-Claude Code does not currently provide an equivalent supported local RPC. SubBench therefore keeps Claude entitlement access replaceable rather than embedding credentials or a private endpoint. Set `SUBBENCH_CLAUDE_USAGE_COMMAND` to a local command that prints the Claude OAuth usage response as JSON:
+Claude Code does not currently provide an equivalent supported local RPC. Set `SUBBENCH_CLAUDE_USAGE_COMMAND` to a local command that prints the Claude usage response as JSON:
 
 ```bash
 export SUBBENCH_CLAUDE_USAGE_COMMAND='your-local-claude-usage-helper --json'
 subbench watch --provider claude --once
 ```
 
-Expected fields are `five_hour` and `seven_day` (or `weekly`), each containing `utilization` and optionally `resets_at`. Utilisation may be represented as either 0–1 or 0–100. Claude token collection continues when this command is absent or fails; only entitlement inference is unavailable.
+Expected fields are `five_hour` and `seven_day` (or `weekly`), each containing `utilization` and optionally `resets_at`. Claude token collection continues when this command is unavailable; only entitlement inference is skipped.
 
 ## Method
 
-For Codex:
+SubBench relies on ccusage's model identification, token classes and API-cost calculation. For Codex:
 
 ```text
 V = (T_input - T_cached) × P_input
@@ -68,29 +68,25 @@ V = T_input × P_input
 
 Reasoning or thinking tokens are retained separately where exposed, but are not added again when already included in billed output tokens.
 
-Between two snapshots in the same reset window:
+Within each reset window, every pair of cumulative observations with increasing quota and non-decreasing API value implies a full-window value:
 
 ```text
-quota_delta = usage_end - usage_start
-api_value_delta = cumulative_api_value_end - cumulative_api_value_start
-implied_full_entitlement = api_value_delta / (quota_delta / 100)
+slope(i, j) = (api_value_j - api_value_i)
+              / ((usage_j - usage_i) / 100)
 ```
 
-For example, US$4.80 of API-equivalent usage moving a five-hour meter from 21% to 37% implies:
+SubBench reports the median of all valid pairwise slopes. This Theil–Sen-style estimate is resistant to rounded quota percentages and isolated anomalous intervals. As more observations and a wider quota span accumulate, the number of usable slopes grows and the estimate generally stabilises.
 
-```text
-US$4.80 / 0.16 = US$30.00
-```
-
-Run:
+The report also shows the 10th–90th percentile range of observed slopes. This is an empirical stability range, not a formal confidence interval.
 
 ```bash
 subbench report
 subbench report --provider codex
 subbench report --json
+subbench report --intervals  # raw adjacent-interval diagnostics
 ```
 
-The estimator rejects intervals that cross a reported reset, have decreasing quota utilisation, or have decreasing cumulative cost. It currently uses ccusage's per-model API-cost calculation. Historical first-party pricing tables and robust multi-interval regression remain planned.
+A regression is never combined across different reported reset timestamps. Points with unchanged rounded quota do not create slopes, but remain useful once a later snapshot moves the meter.
 
 ## Architecture
 
@@ -110,19 +106,20 @@ Claude usage helper ────────┘
                             ▼
                           SQLite
                             ▼
-                 reset-safe interval estimator
+              reset-separated robust regression
                             ▼
               API-equivalent entitlement value
 ```
 
-Snapshot collection is deliberately recoverable: the coding CLIs retain cumulative usage, so token activity generated during brief SubBench downtime is captured on the next successful sample. Finer entitlement movement during that downtime cannot be reconstructed.
+Snapshot collection is recoverable: the coding CLIs retain cumulative usage, so token activity generated during brief SubBench downtime is captured on the next successful sample. Finer entitlement movement during that downtime cannot be reconstructed.
 
 ## Commands
 
 ```bash
 subbench watch                          # continuous usage + entitlement collection
 subbench watch --provider codex --once # diagnostic snapshot
-subbench report                         # inferred full-window values
+subbench report                         # robust full-window estimates
+subbench report --intervals             # raw interval estimates
 subbench collect codex --report daily  # manual/backfill usage snapshot
 subbench ingest payload.json --provider claude --report daily
 subbench imports                        # audit raw usage imports
@@ -130,18 +127,17 @@ subbench imports                        # audit raw usage imports
 
 ## Evidence model
 
-SubBench keeps four layers separate:
+SubBench keeps three layers separate:
 
-1. **Usage evidence:** exact provider-reported token classes and model identifiers, normalised from ccusage JSON.
-2. **Pricing evidence:** currently ccusage's model pricing and reported USD cost; timestamped independent pricing is planned.
-3. **Entitlement evidence:** usage percentage, reset time and window identity sampled from account interfaces.
-4. **Inference:** interval joins that never intentionally cross a reset boundary.
+1. **Usage and pricing evidence:** provider-reported token classes and ccusage's API-equivalent USD calculation.
+2. **Entitlement evidence:** usage percentage, reset time and window identity sampled from account interfaces.
+3. **Inference:** reset-separated robust regression over cumulative observations.
 
 Raw ccusage JSON is preserved so parser changes can be audited and historical observations rebuilt.
 
 ## Measurement limits
 
-Token valuation can be exact to the retained provider telemetry and applicable public price table. Entitlement inference remains empirical: meters may be rounded, limits may roll, providers may apply model-specific weights, and allowance multipliers may change. Results are workload-specific API-equivalent allowance estimates, not contractual quotas.
+Token valuation is only as accurate as the retained provider telemetry and ccusage pricing. Entitlement inference remains empirical: meters may be rounded, limits may roll, providers may apply model-specific weights, and allowance multipliers may change. Results are workload-specific API-equivalent allowance estimates, not contractual quotas.
 
 ## Licence
 
