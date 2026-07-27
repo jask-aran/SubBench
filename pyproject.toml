@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "subbench"
-version = "0.1.0"
+version = "0.2.0"
 description = "Estimate API-equivalent entitlement value from coding-agent subscriptions"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Jaskaran Singh" }]
-dependencies = []
+dependencies = ["plotext>=5.3,<6"]
 
 [project.scripts]
 subbench = "subbench.cli:main"
