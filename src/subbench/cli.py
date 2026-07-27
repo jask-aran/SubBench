@@ -10,6 +10,7 @@ from typing import Sequence
 
 from .ccusage import CcusageSchemaError, normalise_payload
 from .store import connect, list_imports, save_import
+from .watcher import WatchTarget, ccusage_command, watch
 
 DEFAULT_DATABASE = Path(
     os.environ.get(
@@ -22,7 +23,7 @@ DEFAULT_DATABASE = Path(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="subbench",
-        description="Measure API-equivalent value delivered by coding-agent subscriptions.",
+        description="Continuously measure API-equivalent value delivered by coding-agent subscriptions.",
     )
     parser.add_argument(
         "--database",
@@ -34,12 +35,40 @@ def build_parser() -> argparse.ArgumentParser:
 
     subcommands.add_parser("init", help="Create the SQLite database")
 
+    watch_parser = subcommands.add_parser(
+        "watch",
+        help="Continuously collect Claude Code and Codex usage while you work",
+    )
+    watch_parser.add_argument(
+        "--provider",
+        choices=("all", "claude", "codex"),
+        default="all",
+        help="Provider to monitor (default: both)",
+    )
+    watch_parser.add_argument(
+        "--interval",
+        type=float,
+        default=60.0,
+        help="Seconds between snapshots (default: 60)",
+    )
+    watch_parser.add_argument(
+        "--runner",
+        choices=("npx", "bunx", "pnpm"),
+        default="npx",
+        help="Package runner used to invoke ccusage",
+    )
+    watch_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Take one snapshot and exit; intended for service testing",
+    )
+
     ingest = subcommands.add_parser("ingest", help="Import ccusage JSON from a file or stdin")
     ingest.add_argument("path", type=str, help="JSON file path, or '-' for stdin")
     ingest.add_argument("--provider", choices=("claude", "codex"), required=True)
     ingest.add_argument("--report", default="daily")
 
-    collect = subcommands.add_parser("collect", help="Run ccusage and import its JSON output")
+    collect = subcommands.add_parser("collect", help="Take one ccusage snapshot")
     collect.add_argument("provider", choices=("claude", "codex"))
     collect.add_argument("--report", default="daily")
     collect.add_argument(
@@ -67,6 +96,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "imports":
         return _print_imports(db)
+    if args.command == "watch":
+        providers = ("claude", "codex") if args.provider == "all" else (args.provider,)
+        targets = [WatchTarget(provider=provider) for provider in providers]
+        return watch(
+            db,
+            targets=targets,
+            runner=args.runner,
+            interval_seconds=args.interval,
+            once=args.once,
+        )
     if args.command == "ingest":
         raw = sys.stdin.buffer.read() if args.path == "-" else Path(args.path).read_bytes()
         return _ingest(
@@ -98,14 +137,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _ccusage_command(*, runner: str, provider: str, report: str, extra: list[str]) -> list[str]:
-    if runner == "npx":
-        prefix = ["npx", "--yes", "ccusage@latest"]
-    elif runner == "bunx":
-        prefix = ["bunx", "ccusage"]
-    else:
-        prefix = ["pnpm", "dlx", "ccusage"]
     passthrough = extra[1:] if extra and extra[0] == "--" else extra
-    return [*prefix, provider, report, "--json", *passthrough]
+    return [*ccusage_command(runner=runner, provider=provider, report=report), *passthrough]
 
 
 def _ingest(db, *, raw: bytes, provider: str, report: str, source_command: str | None) -> int:
