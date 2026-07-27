@@ -1,10 +1,10 @@
 [Unit]
-Description=SubBench continuous coding-agent usage collector
+Description=SubBench incremental coding-agent usage collector
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/subbench watch --provider all --interval 60
+ExecStart=%h/.local/bin/subbench watch --provider all
 Restart=on-failure
 RestartSec=10
 
