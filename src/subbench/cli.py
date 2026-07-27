@@ -11,6 +11,7 @@ from typing import Sequence
 from .ccusage import CcusageSchemaError, normalise_payload
 from .regression import robust_estimates
 from .store import connect, estimate_windows, list_imports, regression_points, save_import
+from .timeseries import detect_regime_changes, rolling_values, window_history
 from .watcher import WatchTarget, ccusage_command, watch
 
 DEFAULT_DATABASE = Path(os.environ.get("SUBBENCH_DATABASE", Path.home() / ".local" / "share" / "subbench" / "subbench.sqlite3"))
@@ -28,10 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("--runner", choices=("npx", "bunx", "pnpm"), default="npx")
     watch_parser.add_argument("--once", action="store_true")
 
-    report_parser = subcommands.add_parser("report", help="Estimate API-equivalent value of observed quota windows")
+    report_parser = subcommands.add_parser("report", help="Report current plan value, window history and regime changes")
     report_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
     report_parser.add_argument("--json", action="store_true", dest="as_json")
-    report_parser.add_argument("--intervals", action="store_true", help="Show raw adjacent-interval estimates instead of robust regression")
+    report_parser.add_argument("--intervals", action="store_true", help="Show raw adjacent-interval estimates")
+    report_parser.add_argument("--history", action="store_true", help="Show one robust estimate per reset window")
+    report_parser.add_argument("--min-quota-span", type=float, default=5.0, help="Minimum observed quota movement for rolling estimates (default: 5)")
 
     ingest = subcommands.add_parser("ingest", help="Import ccusage JSON from a file or stdin")
     ingest.add_argument("path", type=str)
@@ -57,7 +60,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _print_imports(db)
     if args.command == "report":
         provider = None if args.provider == "all" else args.provider
-        return _print_report(db, provider=provider, as_json=args.as_json, intervals=args.intervals)
+        return _print_report(
+            db,
+            provider=provider,
+            as_json=args.as_json,
+            intervals=args.intervals,
+            history=args.history,
+            min_quota_span=args.min_quota_span,
+        )
     if args.command == "watch":
         providers = ("claude", "codex") if args.provider == "all" else (args.provider,)
         return watch(db, targets=[WatchTarget(provider=p) for p in providers], runner=args.runner, interval_seconds=args.interval, once=args.once)
@@ -87,33 +97,65 @@ def _ingest(db, *, raw: bytes, provider: str, report: str, source_command: str |
     return 0
 
 
-def _print_report(db, *, provider: str | None, as_json: bool, intervals: bool) -> int:
+def _print_report(db, *, provider: str | None, as_json: bool, intervals: bool, history: bool, min_quota_span: float) -> int:
     if intervals:
         rows = [dict(row) for row in estimate_windows(db, provider)]
-    else:
-        rows = [estimate.as_dict() for estimate in robust_estimates(regression_points(db, provider))]
-
-    if as_json:
-        print(json.dumps(rows, indent=2))
-        return 0
-    if not rows:
-        print("No usable estimates yet. Keep `subbench watch` running until quota and ccusage cost both increase within one reset window.")
-        return 0
-
-    if intervals:
+        if as_json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print("No usable adjacent intervals yet.")
+            return 0
         print("provider\twindow\tquota delta\tAPI value\timplied full window\tinterval end")
         for row in rows:
             print(f"{row['provider']}\t{row['window']}\t{row['quota_delta_percent']:.2f}%\tUS${row['api_value_usd']:.4f}\tUS${row['implied_full_window_usd']:.2f}\t{row['observed_at']}")
         return 0
 
-    print("provider\twindow\testimate\t80% slope range\tobservations\tquota span\tlatest")
-    for row in rows:
+    estimates = robust_estimates(regression_points(db, provider))
+    if history:
+        rows = window_history(estimates)
+        if as_json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print("No usable reset-window estimates yet.")
+            return 0
+        print("provider\twindow\treset\testimate\t80% slope range\tquota span\tobservations")
+        for row in rows:
+            print(
+                f"{row['provider']}\t{row['window']}\t{row['reset_key']}\tUS${row['estimate_usd']:.2f}\t"
+                f"US${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['quota_span_percent']:.2f}%\t"
+                f"{row['observation_count']}"
+            )
+        return 0
+
+    current = [row.as_dict() for row in rolling_values(estimates, min_quota_span=min_quota_span)]
+    changes = [row.as_dict() for row in detect_regime_changes(estimates, min_quota_span=min_quota_span)]
+    payload = {"current": current, "regime_changes": changes}
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    if not current:
+        print("No usable current estimates yet. Keep `subbench watch` running until at least one reset window has meaningful quota movement.")
+        return 0
+
+    print("Current API-equivalent entitlement value")
+    print("provider\twindow\testimate\trecent range\twindows\tquota evidence\tlatest reset")
+    for row in current:
         print(
             f"{row['provider']}\t{row['window']}\tUS${row['estimate_usd']:.2f}\t"
-            f"US${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t"
-            f"{row['observation_count']} ({row['slope_count']} slopes)\t"
-            f"{row['quota_span_percent']:.2f}%\t{row['latest_observed_at']}"
+            f"US${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['window_count']}\t"
+            f"{row['quota_span_percent']:.2f}%\t{row['latest_reset']}"
         )
+
+    if changes:
+        print("\nPossible backend limit changes")
+        print("provider\twindow\tstatus\tfirst observed\tbaseline\trecent\tchange")
+        for row in changes:
+            print(
+                f"{row['provider']}\t{row['window']}\t{row['status']}\t{row['first_observed_reset']}\t"
+                f"US${row['baseline_usd']:.2f}\tUS${row['recent_usd']:.2f}\t{row['change_percent']:+.1f}%"
+            )
     return 0
 
 
