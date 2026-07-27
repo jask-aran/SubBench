@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .ccusage import CcusageSchemaError, normalise_payload
+from .charts import render_value_history
 from .regression import robust_estimates
 from .store import connect, estimate_windows, list_imports, regression_points, save_import
 from .timeseries import detect_regime_changes, rolling_values, window_history
@@ -23,9 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("init", help="Create the SQLite database")
 
-    watch_parser = subcommands.add_parser("watch", help="Continuously collect usage and entitlement while you work")
+    watch_parser = subcommands.add_parser("watch", help="Watch local agent logs and collect after changes")
     watch_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
-    watch_parser.add_argument("--interval", type=float, default=60.0)
+    watch_parser.add_argument("--interval", type=float, default=2.0, help="Filesystem scan interval in seconds (default: 2)")
+    watch_parser.add_argument("--debounce", type=float, default=5.0, help="Wait after the latest log write before collecting (default: 5)")
+    watch_parser.add_argument("--reconcile", type=float, default=21600.0, help="Maximum seconds between full ccusage reconciliations (default: 21600)")
     watch_parser.add_argument("--runner", choices=("npx", "bunx", "pnpm"), default="npx")
     watch_parser.add_argument("--once", action="store_true")
 
@@ -35,6 +38,13 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--intervals", action="store_true", help="Show raw adjacent-interval estimates")
     report_parser.add_argument("--history", action="store_true", help="Show one robust estimate per reset window")
     report_parser.add_argument("--min-quota-span", type=float, default=5.0, help="Minimum observed quota movement for rolling estimates (default: 5)")
+
+    chart_parser = subcommands.add_parser("chart", help="Plot entitlement-value history in the terminal")
+    chart_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
+    chart_parser.add_argument("--window", choices=("all", "five_hour", "weekly"), default="all")
+    chart_parser.add_argument("--width", type=int)
+    chart_parser.add_argument("--height", type=int)
+    chart_parser.add_argument("--min-quota-span", type=float, default=5.0)
 
     ingest = subcommands.add_parser("ingest", help="Import ccusage JSON from a file or stdin")
     ingest.add_argument("path", type=str)
@@ -58,19 +68,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "imports":
         return _print_imports(db)
+    if args.command == "chart":
+        estimates = robust_estimates(regression_points(db, None if args.provider == "all" else args.provider))
+        rows = [row for row in window_history(estimates) if row["quota_span_percent"] >= args.min_quota_span]
+        ok = render_value_history(
+            rows,
+            provider=None if args.provider == "all" else args.provider,
+            window=None if args.window == "all" else args.window,
+            width=args.width,
+            height=args.height,
+        )
+        if not ok:
+            print("No sufficiently informative reset-window estimates to chart.")
+        return 0
     if args.command == "report":
         provider = None if args.provider == "all" else args.provider
-        return _print_report(
-            db,
-            provider=provider,
-            as_json=args.as_json,
-            intervals=args.intervals,
-            history=args.history,
-            min_quota_span=args.min_quota_span,
-        )
+        return _print_report(db, provider=provider, as_json=args.as_json, intervals=args.intervals, history=args.history, min_quota_span=args.min_quota_span)
     if args.command == "watch":
         providers = ("claude", "codex") if args.provider == "all" else (args.provider,)
-        return watch(db, targets=[WatchTarget(provider=p) for p in providers], runner=args.runner, interval_seconds=args.interval, once=args.once)
+        return watch(
+            db,
+            targets=[WatchTarget(provider=p) for p in providers],
+            runner=args.runner,
+            interval_seconds=args.interval,
+            debounce_seconds=args.debounce,
+            reconcile_seconds=args.reconcile,
+            once=args.once,
+        )
     if args.command == "ingest":
         raw = sys.stdin.buffer.read() if args.path == "-" else Path(args.path).read_bytes()
         return _ingest(db, raw=raw, provider=args.provider, report=args.report, source_command=None)
@@ -122,11 +146,7 @@ def _print_report(db, *, provider: str | None, as_json: bool, intervals: bool, h
             return 0
         print("provider\twindow\treset\testimate\t80% slope range\tquota span\tobservations")
         for row in rows:
-            print(
-                f"{row['provider']}\t{row['window']}\t{row['reset_key']}\tUS${row['estimate_usd']:.2f}\t"
-                f"US${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['quota_span_percent']:.2f}%\t"
-                f"{row['observation_count']}"
-            )
+            print(f"{row['provider']}\t{row['window']}\t{row['reset_key']}\tUS${row['estimate_usd']:.2f}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['quota_span_percent']:.2f}%\t{row['observation_count']}")
         return 0
 
     current = [row.as_dict() for row in rolling_values(estimates, min_quota_span=min_quota_span)]
@@ -142,20 +162,13 @@ def _print_report(db, *, provider: str | None, as_json: bool, intervals: bool, h
     print("Current API-equivalent entitlement value")
     print("provider\twindow\testimate\trecent range\twindows\tquota evidence\tlatest reset")
     for row in current:
-        print(
-            f"{row['provider']}\t{row['window']}\tUS${row['estimate_usd']:.2f}\t"
-            f"US${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['window_count']}\t"
-            f"{row['quota_span_percent']:.2f}%\t{row['latest_reset']}"
-        )
+        print(f"{row['provider']}\t{row['window']}\tUS${row['estimate_usd']:.2f}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['window_count']}\t{row['quota_span_percent']:.2f}%\t{row['latest_reset']}")
 
     if changes:
         print("\nPossible backend limit changes")
         print("provider\twindow\tstatus\tfirst observed\tbaseline\trecent\tchange")
         for row in changes:
-            print(
-                f"{row['provider']}\t{row['window']}\t{row['status']}\t{row['first_observed_reset']}\t"
-                f"US${row['baseline_usd']:.2f}\tUS${row['recent_usd']:.2f}\t{row['change_percent']:+.1f}%"
-            )
+            print(f"{row['provider']}\t{row['window']}\t{row['status']}\t{row['first_observed_reset']}\tUS${row['baseline_usd']:.2f}\tUS${row['recent_usd']:.2f}\t{row['change_percent']:+.1f}%")
     return 0
 
 
