@@ -30,7 +30,7 @@ def ccusage_command(*, runner: str, provider: str, report: str) -> list[str]:
     return [*prefix, provider, report, "--json"]
 
 
-def collect_target(db, *, target: WatchTarget, runner: str, observed_at: str) -> tuple[bool, str]:
+def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
     messages: list[str] = []
     failed = False
     command = ccusage_command(runner=runner, provider=target.provider, report=target.report)
@@ -56,6 +56,7 @@ def collect_target(db, *, target: WatchTarget, runner: str, observed_at: str) ->
 
     try:
         entitlements = collect_entitlements(target.provider)
+        observed_at = datetime.now(timezone.utc).isoformat()
         count = save_entitlements(db, entitlements, observed_at)
         messages.append(f"entitlement {count} window(s)")
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
@@ -78,10 +79,9 @@ def watch(
 
     while True:
         failed = False
-        timestamp = datetime.now(timezone.utc).isoformat()
         for target in targets:
-            ok, message = collect_target(db, target=target, runner=runner, observed_at=timestamp)
-            emit(f"{timestamp} {message}")
+            ok, message = collect_target(db, target=target, runner=runner)
+            emit(f"{datetime.now(timezone.utc).isoformat()} {message}")
             failed = failed or not ok
 
         if once:
