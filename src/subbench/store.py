@@ -113,6 +113,31 @@ def save_entitlements(db: sqlite3.Connection, rows: Iterable[EntitlementWindow],
     return len(values)
 
 
+def regression_points(db: sqlite3.Connection, provider: str | None = None) -> list[sqlite3.Row]:
+    where = "WHERE e.provider = ?" if provider else ""
+    params = (provider,) if provider else ()
+    return list(db.execute(
+        f"""WITH costs AS (
+            SELECT i.id, i.provider, i.imported_at,
+                   SUM(CAST(COALESCE(u.reported_cost_usd, '0') AS REAL)) AS cost_usd
+            FROM imports i JOIN usage_rows u ON u.import_id = i.id
+            GROUP BY i.id
+        )
+        SELECT e.provider, e.window, e.observed_at, e.used_percent,
+               e.resets_at, e.duration_minutes,
+               c.cost_usd
+        FROM entitlement_snapshots e
+        JOIN costs c ON c.id = (
+            SELECT id FROM costs
+            WHERE provider = e.provider AND imported_at <= e.observed_at
+            ORDER BY imported_at DESC LIMIT 1
+        )
+        {where}
+        ORDER BY e.provider, e.window, e.resets_at, e.observed_at""",
+        params,
+    ))
+
+
 def estimate_windows(db: sqlite3.Connection, provider: str | None = None) -> list[sqlite3.Row]:
     where = "WHERE e.provider = ?" if provider else ""
     params = (provider,) if provider else ()
