@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "subbench"
+version = "0.1.0"
+description = "Estimate API-equivalent entitlement value from coding-agent subscriptions"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Jaskaran Singh" }]
+dependencies = []
+
+[project.scripts]
+subbench = "subbench.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/subbench"]
