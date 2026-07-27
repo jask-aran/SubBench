@@ -9,6 +9,7 @@ from typing import Callable, Sequence
 
 from .ccusage import CcusageSchemaError, normalise_payload
 from .entitlement import collect_entitlements
+from .incremental import LogChangeDetector
 from .store import save_entitlements, save_import
 
 
@@ -72,17 +73,34 @@ def watch(
     runner: str,
     interval_seconds: float,
     once: bool = False,
+    debounce_seconds: float = 5.0,
+    reconcile_seconds: float = 21600.0,
     emit: Callable[[str], None] = print,
 ) -> int:
-    if interval_seconds <= 0:
-        raise ValueError("interval must be greater than zero")
+    """Watch local logs cheaply and run ccusage only after changes or reconciliation."""
+    if interval_seconds <= 0 or debounce_seconds < 0 or reconcile_seconds <= 0:
+        raise ValueError("watch intervals must be positive")
+
+    detectors = {target.provider: LogChangeDetector(target.provider) for target in targets}
+    pending_since: dict[str, float] = {}
+    last_collected: dict[str, float] = {target.provider: 0.0 for target in targets}
 
     while True:
         failed = False
+        now = time.monotonic()
         for target in targets:
-            ok, message = collect_target(db, target=target, runner=runner)
-            emit(f"{datetime.now(timezone.utc).isoformat()} {message}")
-            failed = failed or not ok
+            provider = target.provider
+            if detectors[provider].scan():
+                pending_since.setdefault(provider, now)
+
+            due_to_change = provider in pending_since and now - pending_since[provider] >= debounce_seconds
+            due_to_reconcile = now - last_collected[provider] >= reconcile_seconds
+            if once or due_to_change or due_to_reconcile:
+                ok, message = collect_target(db, target=target, runner=runner)
+                emit(f"{datetime.now(timezone.utc).isoformat()} {message}")
+                failed = failed or not ok
+                last_collected[provider] = now
+                pending_since.pop(provider, None)
 
         if once:
             return 1 if failed else 0
