@@ -1,14 +1,54 @@
 # SubBench
 
-SubBench estimates the **API-equivalent entitlement value** delivered by coding-agent subscriptions. It joins exact token usage reported by tools such as Codex CLI and Claude Code with observed changes in their subscription usage windows.
+SubBench continuously estimates the **API-equivalent entitlement value** delivered by coding-agent subscriptions. It joins exact token usage reported by Codex CLI and Claude Code with observed changes in their subscription usage windows.
 
-It is not an estimate of OpenAI or Anthropic's internal cost. It answers a narrower and more reproducible question:
+It does not estimate OpenAI or Anthropic's internal cost. It answers:
 
 > At public API prices, how much usage did this subscription entitlement deliver under the observed model mix and workload?
 
+## Continuous collection
+
+SubBench is intended to run in the background while Codex CLI and Claude Code are used. It periodically asks ccusage for the current cumulative usage records, preserves changed payloads, and normalises token counts into SQLite. Identical snapshots are discarded by content hash.
+
+```bash
+# Python 3.11+
+pip install -e .
+
+# Foreground test: collect both providers once
+subbench watch --once
+
+# Continuous collection of Claude Code and Codex
+subbench watch
+
+# Or one provider only
+subbench watch --provider codex --interval 60
+```
+
+The default database is `~/.local/share/subbench/subbench.sqlite3`. Override it with `--database` or `SUBBENCH_DATABASE`.
+
+### Start automatically on Linux or WSL
+
+The repository includes a systemd user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp packaging/systemd/subbench.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now subbench
+journalctl --user -u subbench -f
+```
+
+The service assumes the `subbench` executable is at `~/.local/bin/subbench`. Adjust `ExecStart` when installed elsewhere. On WSL, systemd must be enabled. Other service managers can run the same long-lived command:
+
+```bash
+subbench watch --provider all --interval 60
+```
+
+The manual `collect` and `ingest` commands remain available for debugging and backfills; they are not the normal operating mode.
+
 ## Method
 
-For each model and interval, SubBench values the provider-reported token classes at the API prices that applied when the usage occurred.
+For each model and interval, SubBench values provider-reported token classes at the public API prices that applied when the usage occurred.
 
 For Codex:
 
@@ -18,7 +58,7 @@ V = (T_input - T_cached) × P_input
   + T_output × P_output
 ```
 
-`reasoning_output_tokens`, when exposed separately, is retained for analysis but is not added again: it is a subset of billed output tokens.
+`reasoning_output_tokens`, where separately exposed, is retained for analysis but not added again because it is a subset of billed output tokens.
 
 For Claude Code:
 
@@ -29,7 +69,7 @@ V = T_input × P_input
   + T_output × P_output
 ```
 
-Claude thinking tokens are billed as output. They do not need a separate price class to calculate API equivalence, although SubBench will retain a separate thinking count where the source exposes one.
+Claude thinking tokens are billed as output. A separate thinking count is useful analytically but is unnecessary for API-equivalent pricing when already included in output tokens.
 
 Between two entitlement snapshots:
 
@@ -38,112 +78,88 @@ quota_delta = usage_end - usage_start
 implied_full_entitlement = api_value_between_snapshots / quota_delta
 ```
 
-For example, if A$4.80 of API-equivalent usage moves a five-hour meter from 21% to 37%, the implied value of a complete window is:
+If US$4.80 of API-equivalent usage moves a five-hour meter from 21% to 37%, the implied value of a complete window is:
 
 ```text
-A$4.80 / 0.16 = A$30.00
+US$4.80 / 0.16 = US$30.00
 ```
 
-Actual records are stored in USD because the source API price tables are denominated in USD. Reporting currencies can be added later without changing the underlying observation.
-
-A single interval is noisy because usage meters may be rounded and limits may be rolling or dynamically weighted. SubBench will therefore estimate the slope of cumulative API-equivalent value against cumulative quota utilisation across many intervals, segmented by provider, model, window and workload where necessary.
+A single interval is noisy because meters may be rounded and limits may be rolling or dynamically weighted. SubBench should estimate the slope of cumulative API-equivalent value against cumulative quota utilisation across many intervals, segmented by provider, model and limit window where necessary.
 
 ## Architecture
 
 ```text
-Codex CLI / Claude Code
-        │
-        ▼
-provider-reported local usage logs
-        │
-        ▼
-ccusage --json
-        │
-        ▼
-SubBench ccusage adapter
-  - preserves raw payload
-  - normalises token classes
-  - records model and time bounds
-        │
-        ▼
-SQLite observation store
-        │
-        ├── historical API pricing
-        ├── entitlement snapshots
-        └── interval estimator
-                │
-                ▼
-API-equivalent entitlement value
-and subscription yield reports
+Codex CLI / Claude Code write local session logs
+                    │
+                    ▼
+          ccusage reads cumulative logs
+                    │
+          every minute while SubBench runs
+                    ▼
+          SubBench background watcher
+          - preserves changed raw JSON
+          - normalises exact token classes
+          - records model and time bounds
+                    │
+                    ▼
+             SQLite evidence store
+                    │
+                    ├── historical API prices
+                    ├── entitlement snapshots
+                    └── interval estimator
+                            │
+                            ▼
+          API-equivalent entitlement value
+             and subscription yield
 ```
 
-The system deliberately separates four layers:
+Collection is snapshot-based rather than request-proxy-based. Codex and Claude Code already persist provider-reported token usage locally, so SubBench does not need to sit between the agent and provider. Polling cumulative logs also lets it recover usage generated while the watcher was briefly offline.
+
+The system separates four evidence layers:
 
 1. **Usage evidence** — exact token counts and model identifiers produced by the coding CLI and normalised by ccusage.
 2. **Pricing evidence** — timestamped prices by provider, model and token class.
-3. **Entitlement evidence** — percentage used/remaining, window type and reset timestamp obtained from the provider account interfaces.
+3. **Entitlement evidence** — percentage used or remaining, window type and reset timestamp from provider account interfaces.
 4. **Inference** — joins usage value to quota movement and reports estimates with sample size and uncertainty.
 
-Raw ccusage JSON is retained alongside normalised rows. This makes imports auditable and allows future parser versions to rebuild the database when ccusage changes its output schema.
+Raw ccusage JSON is retained alongside normalised rows so imports remain auditable and future parser versions can rebuild the database after schema changes.
 
-## Current state
-
-The initial implementation imports Claude Code and Codex JSON produced by ccusage into SQLite. It supports a saved file, standard input, or running ccusage directly.
+## Current commands
 
 ```bash
-# Python 3.11+
-python -m subbench init
+# Continuous default
+subbench watch
 
-# Run ccusage and ingest its JSON output
-python -m subbench collect claude --report daily
-python -m subbench collect codex --report daily
+# One snapshot
+subbench collect claude --report daily
+subbench collect codex --report daily
 
-# Import an existing payload
-npx ccusage@latest claude daily --json > claude.json
-python -m subbench ingest claude.json --provider claude --report daily
+# Import existing JSON
+subbench ingest claude.json --provider claude --report daily
 
-# Pipe JSON directly
-npx ccusage@latest codex daily --json \
-  | python -m subbench ingest - --provider codex --report daily
-
-python -m subbench imports
+# Inspect stored snapshots
+subbench imports
 ```
-
-By default the database is stored at `~/.local/share/subbench/subbench.sqlite3`. Override it with `--database` or `SUBBENCH_DATABASE`.
 
 ## Normalised usage schema
 
-Each imported row records:
+Each usage row records provider, report type, period bounds, model, uncached and cached input, cache-write and cache-read tokens, output tokens, reasoning output tokens when available, ccusage-reported cost, and the raw import identifier.
 
-```text
-provider
-report type
-period start / end
-model
-input tokens
-cached input tokens
-cache-write tokens
-cache-read tokens
-output tokens
-reasoning output tokens
-reported API-equivalent cost, when ccusage supplies it
-raw import identifier
-```
+The importer prefers per-model breakdowns. Aggregate rows are retained only when the payload has no usable model breakdown, because applying model-specific prices to a mixed aggregate would be incorrect.
 
-The importer prefers per-model breakdowns. Aggregate rows are retained only when the ccusage payload does not contain a usable model breakdown, because applying model-specific prices to a mixed aggregate would be incorrect.
+## Next work
 
-## Planned work
-
-- Verify and fixture the current ccusage JSON variants for Claude and Codex.
+- Fixture current Claude and Codex ccusage JSON variants from real histories.
+- Replace periodic full ccusage scans with incremental adapters where useful, while retaining backfill recovery.
 - Add timestamped model pricing and independently recomputed API-equivalent value.
-- Poll Codex entitlement through `codex app-server` and Claude entitlement through its account usage interface.
-- Match quota snapshots to token events without crossing reset boundaries.
-- Estimate full-window value using robust regression rather than isolated divisions.
+- Snapshot Codex entitlement through `codex app-server` and Claude entitlement through its account usage interface.
+- Match quota snapshots to usage without crossing reset boundaries.
+- Estimate full-window value using robust regression.
 - Report subscription yield: API-equivalent value consumed divided by subscription price.
 
 ## Measurement limits
 
-SubBench can make token valuation exact to the telemetry and public price table, but the entitlement inference remains empirical. Providers may round displayed percentages, use rolling windows, apply model-specific weights, change limits temporarily, or maintain separate pools for different features. Results should therefore be described as workload-specific API-equivalent allowance estimates, not fixed contractual quotas.
+Token valuation can be exact to provider telemetry and the public price table. Entitlement inference remains empirical: providers may round displayed percentages, use rolling windows, apply model-specific weights, temporarily change limits, or maintain separate pools. Results are workload-specific API-equivalent allowance estimates, not contractual quotas.
 
 ## Licence
 
