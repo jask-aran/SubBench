@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import shlex
 import subprocess
+import threading
+import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TextIO
+
+
+APP_SERVER_RESPONSE_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -36,27 +43,52 @@ def collect_codex() -> list[EntitlementWindow]:
         text=True,
         bufsize=1,
     )
-    assert process.stdin is not None and process.stdout is not None
+    assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+    messages: queue.Queue[str | None] = queue.Queue()
+    stderr_lines: deque[str] = deque(maxlen=20)
+    stdout_thread = threading.Thread(target=_read_stdout, args=(process.stdout, messages), daemon=True)
+    stderr_thread = threading.Thread(target=_read_stderr, args=(process.stderr, stderr_lines), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
     try:
-        requests = (
-            {"method": "initialize", "id": 1, "params": {"clientInfo": {"name": "subbench", "title": "SubBench", "version": "0.1.0"}, "capabilities": {}}},
-            {"method": "initialized", "params": {}},
-            {"method": "account/rateLimits/read", "id": 2},
+        _send_request(
+            process.stdin,
+            {
+                "method": "initialize",
+                "id": 1,
+                "params": {
+                    "clientInfo": {
+                        "name": "subbench",
+                        "title": "SubBench",
+                        "version": "0.2.0",
+                    },
+                    "capabilities": {},
+                },
+            },
         )
-        for request in requests:
-            process.stdin.write(json.dumps(request) + "\n")
-            process.stdin.flush()
-        for line in process.stdout:
-            message = json.loads(line)
-            if message.get("id") == 2:
-                return _normalise_codex(message.get("result", {}))
-        raise RuntimeError("codex app-server ended before returning rate limits")
+        _read_response(messages, request_id=1, operation="initialization", stderr_lines=stderr_lines)
+        _send_request(process.stdin, {"method": "initialized", "params": {}})
+        _send_request(process.stdin, {"method": "account/rateLimits/read", "id": 2})
+        result = _read_response(
+            messages,
+            request_id=2,
+            operation="rate-limit request",
+            stderr_lines=stderr_lines,
+        )
+        windows = _normalise_codex(result)
+        if not windows:
+            raise RuntimeError("codex app-server returned no usable rate-limit windows")
+        return windows
     finally:
-        process.terminate()
+        if process.poll() is None:
+            process.terminate()
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             process.kill()
+            process.wait(timeout=2)
+        stdout_thread.join(timeout=0.2)
+        stderr_thread.join(timeout=0.2)
 
 
 def collect_claude() -> list[EntitlementWindow]:
@@ -73,7 +105,15 @@ def collect_claude() -> list[EntitlementWindow]:
 
 
 def _normalise_codex(payload: dict[str, Any]) -> list[EntitlementWindow]:
-    limits = payload.get("rateLimits") or payload
+    limits = payload.get("rateLimits")
+    if not isinstance(limits, dict) or not any(limits.get(key) for key in ("primary", "secondary")):
+        buckets = payload.get("rateLimitsByLimitId")
+        if isinstance(buckets, dict):
+            preferred = buckets.get("codex")
+            if isinstance(preferred, dict):
+                limits = preferred
+    if not isinstance(limits, dict):
+        limits = payload
     rows: list[EntitlementWindow] = []
     for name, key in (("primary", "primary"), ("secondary", "secondary")):
         window = limits.get(key)
@@ -125,3 +165,65 @@ def _time_iso(value: Any) -> str | None:
 
 def _int_or_none(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def _send_request(stdin: TextIO, request: dict[str, Any]) -> None:
+    stdin.write(json.dumps(request) + "\n")
+    stdin.flush()
+
+
+def _read_stdout(stdout: TextIO, messages: queue.Queue[str | None]) -> None:
+    try:
+        for line in stdout:
+            messages.put(line)
+    finally:
+        messages.put(None)
+
+
+def _read_stderr(stderr: TextIO, lines: deque[str]) -> None:
+    for line in stderr:
+        stripped = line.strip()
+        if stripped:
+            lines.append(stripped)
+
+
+def _read_response(
+    messages: queue.Queue[str | None],
+    *,
+    request_id: int,
+    operation: str,
+    stderr_lines: deque[str],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + APP_SERVER_RESPONSE_TIMEOUT_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            detail = _stderr_detail(stderr_lines)
+            raise RuntimeError(f"codex app-server timed out during {operation}{detail}")
+        try:
+            line = messages.get(timeout=remaining)
+        except queue.Empty as error:
+            detail = _stderr_detail(stderr_lines)
+            raise RuntimeError(f"codex app-server timed out during {operation}{detail}") from error
+        if line is None:
+            detail = _stderr_detail(stderr_lines)
+            raise RuntimeError(f"codex app-server ended during {operation}{detail}")
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"codex app-server returned invalid JSON during {operation}") from error
+        if message.get("id") != request_id:
+            continue
+        rpc_error = message.get("error")
+        if isinstance(rpc_error, dict):
+            code = rpc_error.get("code")
+            text = rpc_error.get("message") or "unknown JSON-RPC error"
+            raise RuntimeError(f"codex app-server {operation} failed ({code}): {text}")
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(f"codex app-server returned an invalid {operation} response")
+        return result
+
+
+def _stderr_detail(lines: deque[str]) -> str:
+    return f": {' | '.join(lines)}" if lines else ""

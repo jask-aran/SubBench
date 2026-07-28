@@ -62,6 +62,7 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
         messages.append(f"entitlement {count} window(s)")
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         messages.append(f"entitlement unavailable: {error}")
+        failed = True
 
     return not failed, f"{target.provider}: " + "; ".join(messages)
 
