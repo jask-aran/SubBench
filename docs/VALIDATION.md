@@ -2,6 +2,27 @@
 
 Most of SubBench is covered by deterministic unit and synthetic database tests. The remaining risk is integration with live Codex CLI, Claude Code, ccusage, terminal capabilities and platform-specific log locations.
 
+## Deterministic ccusage contract
+
+`tests/fixtures/codex` contains a minimal synthetic Codex rollout with two turns
+on one model and a third turn on another. It contains no real prompt or response
+text. Regenerate the committed ccusage contract fixture and run it through
+SubBench with:
+
+```bash
+CODEX_HOME="$PWD/tests/fixtures/codex" \
+  npx --yes ccusage@20.0.19 codex daily --json --offline --timezone UTC \
+  > /tmp/subbench-ccusage.json
+subbench --database /tmp/subbench-contract.sqlite3 ingest \
+  /tmp/subbench-ccusage.json --provider codex --report daily
+```
+
+Compare the generated payload with
+`tests/fixtures/ccusage/codex-daily-v20.0.19.json` before updating the pinned
+fixture. The normal test suite simulates the same stdout at SubBench's subprocess
+boundary, then exercises normalisation and SQLite persistence without network,
+Codex authentication or access to private session logs.
+
 ## Local diagnostics
 
 Run:
