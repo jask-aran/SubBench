@@ -1,6 +1,11 @@
+import json
+from decimal import Decimal
+from pathlib import Path
 from unittest import TestCase
 
 from subbench.ccusage import CcusageSchemaError, normalise_payload
+
+FIXTURES = Path(__file__).parent / "fixtures" / "ccusage"
 
 
 class CcusageNormaliserTests(TestCase):
@@ -57,3 +62,25 @@ class CcusageNormaliserTests(TestCase):
         payload = {"data": [{"inputTokens": 10, "cachedInputTokens": 11}]}
         with self.assertRaises(CcusageSchemaError):
             normalise_payload(payload, provider="codex", report="daily")
+
+    def test_current_codex_contract_keeps_period_cost_once(self) -> None:
+        payload = json.loads((FIXTURES / "codex-daily-v20.0.19.json").read_text())
+
+        rows = normalise_payload(payload, provider="codex", report="daily")
+        model_rows = [row for row in rows if row.model is not None]
+        cost_rows = [row for row in rows if row.reported_cost_usd is not None]
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(
+            {row.model for row in model_rows},
+            {"gpt-5.1-codex-mini", "gpt-5.2-codex"},
+        )
+        self.assertEqual(sum(row.input_tokens for row in model_rows), 1300)
+        self.assertEqual(sum(row.cache_read_tokens for row in model_rows), 2000)
+        self.assertEqual(sum(row.reasoning_output_tokens for row in model_rows), 270)
+        self.assertEqual(len(cost_rows), 1)
+        self.assertIsNone(cost_rows[0].model)
+        self.assertEqual(
+            sum(Decimal(row.reported_cost_usd or "0") for row in rows),
+            Decimal("0.006364999999999999"),
+        )

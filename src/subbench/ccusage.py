@@ -70,17 +70,52 @@ def normalise_payload(payload: Any, *, provider: str, report: str) -> list[Usage
     seen: set[tuple[Any, ...]] = set()
 
     for path, candidate in _walk_candidates(payload):
-        breakdowns = _get_breakdowns(candidate)
-        if breakdowns:
-            for index, breakdown in enumerate(breakdowns):
-                merged = {**candidate, **breakdown}
+        breakdown = _get_breakdowns(candidate)
+        if breakdown:
+            costs = [_first_decimal_text(item, COST_KEYS) for _, item in breakdown]
+            if any(cost is not None for cost in costs) and not all(
+                cost is not None for cost in costs
+            ):
+                raise CcusageSchemaError(
+                    f"only some model breakdowns contain cost at {path}; "
+                    "refusing to create an ambiguous valuation"
+                )
+
+            parent_without_cost = {
+                key: item for key, item in candidate.items() if key not in COST_KEYS
+            }
+            for breakdown_path, breakdown_item in breakdown:
+                merged = {**parent_without_cost, **breakdown_item}
                 row = _normalise_row(
                     merged,
                     provider=provider,
                     report=report,
-                    source_path=f"{path}.modelBreakdowns[{index}]",
+                    source_path=f"{path}.{breakdown_path}",
                 )
                 _append_unique(rows, seen, row)
+
+            # Current ccusage Codex JSON exposes per-model token counts but only
+            # one cost for the enclosing period. Keep that cost in a token-free
+            # aggregate row so model detail is retained without multiplying the
+            # period cost by the number of models.
+            parent_cost = _first_decimal_text(candidate, COST_KEYS)
+            if parent_cost is not None and all(cost is None for cost in costs):
+                aggregate = UsageRow(
+                    provider=provider,
+                    report=report,
+                    period_start=_first_text(candidate, PERIOD_START_KEYS),
+                    period_end=_first_text(candidate, PERIOD_END_KEYS),
+                    model=None,
+                    input_tokens=0,
+                    cached_input_tokens=0,
+                    cache_write_tokens=0,
+                    cache_read_tokens=0,
+                    output_tokens=0,
+                    reasoning_output_tokens=0,
+                    reported_cost_usd=parent_cost,
+                    source_path=f"{path}.{_first_key(candidate, COST_KEYS)}",
+                )
+                _append_unique(rows, seen, aggregate)
             continue
 
         row = _normalise_row(candidate, provider=provider, report=report, source_path=path)
@@ -129,8 +164,9 @@ def _normalise_row(
     if not any(tokens.values()):
         return None
 
-    # Codex cached input is included in total input. Claude cache read/write are
-    # reported as separate API token classes, so cached_input_tokens is normally zero.
+    # Preserve the token classes emitted by ccusage. Current Codex reports use
+    # inputTokens for uncached input and cacheReadTokens for cached input. Older
+    # payloads may instead expose cachedInputTokens inside total input.
     if provider == "codex" and tokens["cached_input_tokens"] > tokens["input_tokens"]:
         raise CcusageSchemaError(
             f"cached input exceeds total input at {source_path}; refusing to create an invalid valuation row"
@@ -162,17 +198,20 @@ def _append_unique(rows: list[UsageRow], seen: set[tuple[Any, ...]], row: UsageR
         rows.append(row)
 
 
-def _get_breakdowns(value: dict[str, Any]) -> list[dict[str, Any]]:
+def _get_breakdowns(value: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     for key in BREAKDOWN_KEYS:
         candidate = value.get(key)
         if isinstance(candidate, list) and candidate and all(isinstance(item, dict) for item in candidate):
             if any(_has_tokens(item) for item in candidate):
-                return candidate
+                return [
+                    (f"{key}[{index}]", item)
+                    for index, item in enumerate(candidate)
+                ]
         if isinstance(candidate, dict):
-            expanded: list[dict[str, Any]] = []
+            expanded: list[tuple[str, dict[str, Any]]] = []
             for model, item in candidate.items():
                 if isinstance(item, dict) and _has_tokens(item):
-                    expanded.append({"model": model, **item})
+                    expanded.append((f"{key}[{model!r}]", {"model": model, **item}))
             if expanded:
                 return expanded
     return []
@@ -203,6 +242,13 @@ def _first_text(value: dict[str, Any], keys: tuple[str, ...]) -> str | None:
         if raw is not None and str(raw).strip():
             return str(raw)
     return None
+
+
+def _first_key(value: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        if key in value:
+            return key
+    raise AssertionError("expected one of the requested keys")
 
 
 def _first_decimal_text(value: dict[str, Any], keys: tuple[str, ...]) -> str | None:
