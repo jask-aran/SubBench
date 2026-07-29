@@ -2,7 +2,7 @@ from subbench.regression import RegressionEstimate
 from subbench.timeseries import detect_regime_changes, rolling_values
 
 
-def estimate(reset: str, value: float, span: float = 40.0) -> RegressionEstimate:
+def estimate(reset: str, value: float, span: float = 40.0, account_id: str | None = None) -> RegressionEstimate:
     return RegressionEstimate(
         provider="codex",
         window="weekly",
@@ -15,6 +15,7 @@ def estimate(reset: str, value: float, span: float = 40.0) -> RegressionEstimate
         quota_span_percent=span,
         api_value_span_usd=value * span / 100,
         latest_observed_at=reset,
+        account_id=account_id,
     )
 
 
@@ -66,3 +67,27 @@ def test_low_information_windows_are_excluded() -> None:
     current = rolling_values(rows)
     assert current[0].estimate_usd == 100
     assert current[0].window_count == 1
+
+
+def test_per_account_and_plan_pooled_rollups_both_returned() -> None:
+    rows = [
+        estimate("2026-07-01", 80, span=30, account_id="A"),
+        estimate("2026-07-08", 100, span=80, account_id="A"),
+        estimate("2026-07-01", 90, span=30, account_id="B"),
+        estimate("2026-07-08", 110, span=80, account_id="B"),
+    ]
+    current = rolling_values(rows)
+    scopes = {(row.account_scope, row.account_id) for row in current}
+    assert ("account", "A") in scopes
+    assert ("account", "B") in scopes
+    assert ("plan", None) in scopes
+
+
+def test_pooled_rollup_skipped_when_only_one_account() -> None:
+    rows = [
+        estimate("2026-07-01", 80, span=30, account_id="A"),
+        estimate("2026-07-08", 100, span=80, account_id="A"),
+    ]
+    current = rolling_values(rows)
+    scopes = {row.account_scope for row in current}
+    assert scopes == {"account"}

@@ -8,12 +8,13 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from . import account
 from .ccusage import CcusageSchemaError, normalise_payload
 from .charts import render_value_history
 from .doctor import exit_code as doctor_exit_code
 from .doctor import run_doctor
 from .regression import robust_estimates
-from .store import connect, estimate_windows, list_imports, regression_points, save_import
+from .store import connect, estimate_windows, list_accounts, list_imports, regression_points, save_import
 from .timeseries import detect_regime_changes, rolling_values, window_history
 from .watcher import WatchTarget, ccusage_command, watch
 
@@ -40,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     report_parser = subcommands.add_parser("report", help="Report current plan value, window history and regime changes")
     report_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
+    report_parser.add_argument("--account", default=None, help="Restrict to one account_id (use `subbench accounts` to list)")
+    report_parser.add_argument("--scope", choices=("all", "account", "plan"), default="all", help="Rolling/regime scope (default: all)")
     report_parser.add_argument("--json", action="store_true", dest="as_json")
     report_parser.add_argument("--intervals", action="store_true", help="Show raw adjacent-interval estimates")
     report_parser.add_argument("--history", action="store_true", help="Show one robust estimate per reset window")
@@ -47,10 +50,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     chart_parser = subcommands.add_parser("chart", help="Plot entitlement-value history in the terminal")
     chart_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
+    chart_parser.add_argument("--account", default=None, help="Restrict to one account_id")
     chart_parser.add_argument("--window", choices=("all", "five_hour", "weekly"), default="all")
     chart_parser.add_argument("--width", type=int)
     chart_parser.add_argument("--height", type=int)
     chart_parser.add_argument("--min-quota-span", type=float, default=5.0)
+
+    accounts_parser = subcommands.add_parser("accounts", help="List discovered accounts")
+    accounts_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
 
     ingest = subcommands.add_parser("ingest", help="Import ccusage JSON from a file or stdin")
     ingest.add_argument("path", type=str)
@@ -85,15 +92,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "imports":
         return _print_imports(db)
     if args.command == "chart":
-        estimates = robust_estimates(regression_points(db, None if args.provider == "all" else args.provider))
+        provider = None if args.provider == "all" else args.provider
+        estimates = robust_estimates(regression_points(db, provider=provider, account_id=args.account))
         rows = [row for row in window_history(estimates) if row["quota_span_percent"] >= args.min_quota_span]
-        ok = render_value_history(rows, provider=None if args.provider == "all" else args.provider, window=None if args.window == "all" else args.window, width=args.width, height=args.height)
+        ok = render_value_history(rows, provider=provider, account_id=args.account, window=None if args.window == "all" else args.window, width=args.width, height=args.height)
         if not ok:
             print("No sufficiently informative reset-window estimates to chart.")
         return 0
+    if args.command == "accounts":
+        return _print_accounts(db, args.provider)
     if args.command == "report":
         provider = None if args.provider == "all" else args.provider
-        return _print_report(db, provider=provider, as_json=args.as_json, intervals=args.intervals, history=args.history, min_quota_span=args.min_quota_span)
+        return _print_report(db, provider=provider, account_id=args.account, scope=args.scope, as_json=args.as_json, intervals=args.intervals, history=args.history, min_quota_span=args.min_quota_span)
     if args.command == "watch":
         providers = ("claude", "codex") if args.provider == "all" else (args.provider,)
         return watch(db, targets=[WatchTarget(provider=p) for p in providers], runner=args.runner, interval_seconds=args.interval, debounce_seconds=args.debounce, reconcile_seconds=args.reconcile, once=args.once)
@@ -118,26 +128,44 @@ def _ingest(db, *, raw: bytes, provider: str, report: str, source_command: str |
     except (json.JSONDecodeError, UnicodeDecodeError, CcusageSchemaError, ValueError) as error:
         print(f"invalid ccusage data: {error}", file=sys.stderr)
         return 2
-    import_id, row_count, created = save_import(db, raw=raw, payload=payload, rows=rows, provider=provider, report=report, command=source_command)
-    print(f"{'imported' if created else 'already present'}: import {import_id}, {row_count} normalised rows")
+    account_id = account.active_account_id() if provider == "codex" else None
+    import_id, row_count, created = save_import(
+        db, raw=raw, payload=payload, rows=rows, provider=provider, report=report,
+        command=source_command, account_id=account_id,
+    )
+    label = account.account_label(account_id) if account_id else "-"
+    print(f"{'imported' if created else 'already present'}: import {import_id}, account {label}, {row_count} normalised rows")
     return 0
 
 
-def _print_report(db, *, provider: str | None, as_json: bool, intervals: bool, history: bool, min_quota_span: float) -> int:
+def _print_accounts(db, provider_arg: str) -> int:
+    provider = None if provider_arg == "all" else provider_arg
+    rows = list_accounts(db, provider=provider)
+    if not rows:
+        print("No accounts recorded yet. Run `subbench watch --once` after ensuring each Codex account is active.")
+        return 0
+    print("account_id\tprovider_or_alias\temail\tplan")
+    for row in rows:
+        label = row["email"] or row["alias"] or (row["account_id"] or "")[:8]
+        print(f"{row['account_id']}\t{label or '-'}\t{row['email'] or '-'}\t{row['plan'] or '-'}")
+    return 0
+
+
+def _print_report(db, *, provider: str | None, account_id: str | None, scope: str, as_json: bool, intervals: bool, history: bool, min_quota_span: float) -> int:
     if intervals:
-        rows = [dict(row) for row in estimate_windows(db, provider)]
+        rows = [dict(row) for row in estimate_windows(db, provider=provider, account_id=account_id)]
         if as_json:
             print(json.dumps(rows, indent=2))
             return 0
         if not rows:
             print("No usable adjacent intervals yet.")
             return 0
-        print("provider\twindow\tquota delta\tAPI value\timplied full window\tinterval end")
+        print("provider\taccount\twindow\tquota delta\tAPI value\timplied full window\tinterval end")
         for row in rows:
-            print(f"{row['provider']}\t{row['window']}\t{row['quota_delta_percent']:.2f}%\tUS${row['api_value_usd']:.4f}\tUS${row['implied_full_window_usd']:.2f}\t{row['observed_at']}")
+            print(f"{row['provider']}\t{account.account_label(row.get('account_id'))}\t{row['window']}\t{row['quota_delta_percent']:.2f}%\tUS${row['api_value_usd']:.4f}\tUS${row['implied_full_window_usd']:.2f}\t{row['observed_at']}")
         return 0
 
-    estimates = robust_estimates(regression_points(db, provider))
+    estimates = robust_estimates(regression_points(db, provider=provider, account_id=account_id))
     if history:
         rows = window_history(estimates)
         if as_json:
@@ -146,13 +174,15 @@ def _print_report(db, *, provider: str | None, as_json: bool, intervals: bool, h
         if not rows:
             print("No usable reset-window estimates yet.")
             return 0
-        print("provider\twindow\treset\testimate\t80% slope range\tquota span\tobservations")
+        print("provider\taccount\twindow\treset\testimate\t80% slope range\tquota span\tobservations")
         for row in rows:
-            print(f"{row['provider']}\t{row['window']}\t{row['reset_key']}\tUS${row['estimate_usd']:.2f}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['quota_span_percent']:.2f}%\t{row['observation_count']}")
+            print(f"{row['provider']}\t{account.account_label(row.get('account_id'))}\t{row['window']}\t{row['reset_key']}\tUS${row['estimate_usd']:.2f}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['quota_span_percent']:.2f}%\t{row['observation_count']}")
         return 0
 
-    current = [row.as_dict() for row in rolling_values(estimates, min_quota_span=min_quota_span)]
-    changes = [row.as_dict() for row in detect_regime_changes(estimates, min_quota_span=min_quota_span)]
+    all_current = [row.as_dict() for row in rolling_values(estimates, min_quota_span=min_quota_span)]
+    all_changes = [row.as_dict() for row in detect_regime_changes(estimates, min_quota_span=min_quota_span)]
+    current = [row for row in all_current if _matches_scope(row, scope)]
+    changes = [row for row in all_changes if _matches_scope(row, scope)]
     payload = {"current": current, "regime_changes": changes}
     if as_json:
         print(json.dumps(payload, indent=2))
@@ -162,16 +192,31 @@ def _print_report(db, *, provider: str | None, as_json: bool, intervals: bool, h
         return 0
 
     print("Current API-equivalent entitlement value")
-    print("provider\twindow\testimate\trecent range\twindows\tquota evidence\tlatest reset")
+    print("scope\taccount\testimate\trecent range\twindows\tquota evidence\tlatest reset")
     for row in current:
-        print(f"{row['provider']}\t{row['window']}\tUS${row['estimate_usd']:.2f}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['window_count']}\t{row['quota_span_percent']:.2f}%\t{row['latest_reset']}")
+        scope_label = row.get("account_scope", "account")
+        account_label = account.account_label(row.get("account_id")) if scope_label == "account" else "all accounts"
+        print(f"{scope_label}\t{row['provider']} {row['window']}\tUS${row['estimate_usd']:.2f}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['window_count']}\t{row['quota_span_percent']:.2f}%\t{row['latest_reset']}\t{account_label}")
 
     if changes:
         print("\nPossible backend limit changes")
-        print("provider\twindow\tstatus\tfirst observed\tbaseline\trecent\tchange")
+        print("scope\taccount\testimate window\tstatus\tfirst observed\tbaseline\trecent\tchange")
         for row in changes:
-            print(f"{row['provider']}\t{row['window']}\t{row['status']}\t{row['first_observed_reset']}\tUS${row['baseline_usd']:.2f}\tUS${row['recent_usd']:.2f}\t{row['change_percent']:+.1f}%")
+            scope_label = row.get("account_scope", "account")
+            account_label = account.account_label(row.get("account_id")) if scope_label == "account" else "all accounts"
+            print(f"{scope_label}\t{account_label}\t{row['provider']} {row['window']}\t{row['status']}\t{row['first_observed_reset']}\tUS${row['baseline_usd']:.2f}\tUS${row['recent_usd']:.2f}\t{row['change_percent']:+.1f}%")
     return 0
+
+
+def _matches_scope(row: dict, scope: str) -> bool:
+    row_scope = row.get("account_scope", "account")
+    if scope == "all":
+        return True
+    if scope == "account":
+        return row_scope == "account"
+    if scope == "plan":
+        return row_scope == "plan"
+    return True
 
 
 def _print_imports(db) -> int:
@@ -179,7 +224,8 @@ def _print_imports(db) -> int:
     if not rows:
         print("No imports recorded.")
         return 0
-    print("id\tprovider\treport\trows\timported_at\tsha256")
+    print("id\tprovider\taccount\treport\trows\timported_at\tsha256")
     for row in rows:
-        print(f"{row['id']}\t{row['provider']}\t{row['report']}\t{row['row_count']}\t{row['imported_at']}\t{row['payload_sha256'][:12]}")
+        label = account.account_label(row["account_id"]) if row["account_id"] else "-"
+        print(f"{row['id']}\t{row['provider']}\t{label}\t{row['report']}\t{row['row_count']}\t{row['imported_at']}\t{row['payload_sha256'][:12]}")
     return 0

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from . import account
+
 
 @dataclass(frozen=True)
 class EntitlementWindow:
@@ -17,6 +19,7 @@ class EntitlementWindow:
     resets_at: str | None
     duration_minutes: int | None
     source: str
+    account_id: str | None = None
 
 
 def collect_entitlements(provider: str) -> list[EntitlementWindow]:
@@ -28,6 +31,12 @@ def collect_entitlements(provider: str) -> list[EntitlementWindow]:
 
 
 def collect_codex() -> list[EntitlementWindow]:
+    account_id = account.active_account_id()
+    rows = collect_codex_for(account_id)
+    return rows
+
+
+def collect_codex_for(account_id: str | None) -> list[EntitlementWindow]:
     process = subprocess.Popen(
         ["codex", "app-server"],
         stdin=subprocess.PIPE,
@@ -49,7 +58,7 @@ def collect_codex() -> list[EntitlementWindow]:
         for line in process.stdout:
             message = json.loads(line)
             if message.get("id") == 2:
-                return _normalise_codex(message.get("result", {}))
+                return _normalise_codex(message.get("result", {}), account_id=account_id)
         raise RuntimeError("codex app-server ended before returning rate limits")
     finally:
         process.terminate()
@@ -72,16 +81,27 @@ def collect_claude() -> list[EntitlementWindow]:
     return _normalise_claude(json.loads(result.stdout))
 
 
-def _normalise_codex(payload: dict[str, Any]) -> list[EntitlementWindow]:
+def _normalise_codex(payload: dict[str, Any], *, account_id: str | None = None) -> list[EntitlementWindow]:
     limits = payload.get("rateLimits") or payload
-    rows: list[EntitlementWindow] = []
+    candidates: list[tuple[str, str, dict[str, Any], int | None]] = []
     for name, key in (("primary", "primary"), ("secondary", "secondary")):
         window = limits.get(key)
         if not isinstance(window, dict) or window.get("usedPercent") is None:
             continue
         duration = _int_or_none(window.get("windowDurationMins"))
         label = "five_hour" if duration and 240 <= duration <= 360 else "weekly" if duration and duration >= 6 * 24 * 60 else name
-        rows.append(EntitlementWindow("codex", label, float(window["usedPercent"]), _epoch_iso(window.get("resetsAt")), duration, "codex-app-server"))
+        candidates.append((name, label, window, duration))
+
+    label_counts = {label: sum(1 for _, candidate_label, _, _ in candidates if candidate_label == label) for _, label, _, _ in candidates}
+    rows: list[EntitlementWindow] = []
+    for name, label, window, duration in candidates:
+        # Disabled five-hour quotas can make both levels report a weekly duration.
+        # Keep each independent series rather than losing one to the DB uniqueness key.
+        unique_label = f"{label}_{name}" if label_counts[label] > 1 else label
+        rows.append(EntitlementWindow(
+            "codex", unique_label, float(window["usedPercent"]),
+            _epoch_iso(window.get("resetsAt")), duration, "codex-app-server", account_id=account_id,
+        ))
     return rows
 
 
@@ -112,7 +132,9 @@ def _normalise_claude(payload: dict[str, Any]) -> list[EntitlementWindow]:
 def _epoch_iso(value: Any) -> str | None:
     if value is None:
         return None
-    return datetime.fromtimestamp(float(value), timezone.utc).isoformat()
+    # Codex may vary a stable reset boundary by a few seconds between reads.
+    # Minute precision distinguishes actual reset windows without splitting one.
+    return datetime.fromtimestamp(float(value), timezone.utc).replace(second=0, microsecond=0).isoformat()
 
 
 def _time_iso(value: Any) -> str | None:

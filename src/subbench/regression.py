@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from statistics import median
 from typing import Iterable, Mapping, Any
 
@@ -18,23 +19,26 @@ class RegressionEstimate:
     quota_span_percent: float
     api_value_span_usd: float
     latest_observed_at: str
+    account_id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 def robust_estimates(points: Iterable[Mapping[str, Any]]) -> list[RegressionEstimate]:
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    groups: dict[tuple[str, str | None, str, str], list[dict[str, Any]]] = {}
     for source_point in points:
         # sqlite3.Row implements the mapping protocol but does not provide .get().
         # Normalising once also gives the rest of the estimator a stable input type.
         point = dict(source_point)
-        reset_key = str(point.get("resets_at") or "unknown")
-        key = (str(point["provider"]), str(point["window"]), reset_key)
+        reset_key = _reset_key(point.get("resets_at"))
+        account_id = point.get("account_id")
+        account_id = account_id if isinstance(account_id, str) else None
+        key = (str(point["provider"]), account_id, str(point["window"]), reset_key)
         groups.setdefault(key, []).append(point)
 
     estimates: list[RegressionEstimate] = []
-    for (provider, window, reset_key), rows in groups.items():
+    for (provider, account_id, window, reset_key), rows in groups.items():
         ordered = sorted(rows, key=lambda row: str(row["observed_at"]))
         slopes: list[float] = []
         for index, left in enumerate(ordered):
@@ -63,6 +67,7 @@ def robust_estimates(points: Iterable[Mapping[str, Any]]) -> list[RegressionEsti
                 quota_span_percent=max(quota_values) - min(quota_values),
                 api_value_span_usd=max(cost_values) - min(cost_values),
                 latest_observed_at=str(ordered[-1]["observed_at"]),
+                account_id=account_id,
             )
         )
 
@@ -78,3 +83,14 @@ def _quantile(values: list[float], probability: float) -> float:
     upper = min(lower + 1, len(ordered) - 1)
     weight = position - lower
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _reset_key(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    raw = str(value)
+    try:
+        timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    return timestamp.replace(second=0, microsecond=0).isoformat()

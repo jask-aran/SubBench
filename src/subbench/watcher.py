@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Sequence
 
+from . import account
 from .ccusage import CcusageSchemaError, normalise_payload
 from .entitlement import collect_entitlements
-from .incremental import LogChangeDetector
-from .store import save_entitlements, save_import
+from .incremental import AuthFileDetector, LogChangeDetector
+from .store import save_entitlements, save_import, upsert_account
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,9 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
     messages: list[str] = []
     failed = False
     command = ccusage_command(runner=runner, provider=target.provider, report=target.report)
+
+    account_id = account.active_account_id() if target.provider == "codex" else None
+
     result = subprocess.run(command, check=False, capture_output=True)
     if result.returncode != 0:
         error = result.stderr.decode("utf-8", errors="replace").strip()
@@ -47,7 +51,7 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
             import_id, row_count, created = save_import(
                 db, raw=result.stdout, payload=payload, rows=rows,
                 provider=target.provider, report=target.report,
-                command=" ".join(command),
+                command=" ".join(command), account_id=account_id,
             )
             state = "recorded" if created else "unchanged"
             messages.append(f"usage {state} import {import_id} ({row_count} rows)")
@@ -62,6 +66,16 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
         messages.append(f"entitlement {count} window(s)")
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         messages.append(f"entitlement unavailable: {error}")
+
+    if account_id and target.provider == "codex":
+        registry = account.lookup_account(account_id)
+        if registry is not None:
+            upsert_account(db, registry)
+            label = registry.email or registry.alias or account_id
+            messages.append(f"account {label}")
+        else:
+            upsert_account(db, account.Account(account_id=account_id))
+            messages.append(f"account {account_id[:8]}")
 
     return not failed, f"{target.provider}: " + "; ".join(messages)
 
@@ -82,8 +96,15 @@ def watch(
         raise ValueError("watch intervals must be positive")
 
     detectors = {target.provider: LogChangeDetector(target.provider) for target in targets}
+    auth_detectors = {target.provider: AuthFileDetector(target.provider) for target in targets}
     pending_since: dict[str, float] = {}
+    pending_debounce: dict[str, float] = {}
     last_collected: dict[str, float] = {target.provider: 0.0 for target in targets}
+
+    # Prime the auth detectors so a switch at runtime is reported as a change,
+    # without treating the initial on-disk state as one.
+    for target in targets:
+        auth_detectors[target.provider].scan()
 
     while True:
         failed = False
@@ -92,8 +113,15 @@ def watch(
             provider = target.provider
             if detectors[provider].scan():
                 pending_since.setdefault(provider, now)
+                pending_debounce[provider] = debounce_seconds
+            if auth_detectors[provider].scan():
+                # codex-auth switch observed: capture immediately, regardless of log activity.
+                pending_since[provider] = now
+                pending_debounce[provider] = 0.0
+                emit(f"{datetime.now(timezone.utc).isoformat()} {provider}: active-account change detected, reconciling")
 
-            due_to_change = provider in pending_since and now - pending_since[provider] >= debounce_seconds
+            debounce = pending_debounce.get(provider, debounce_seconds)
+            due_to_change = provider in pending_since and now - pending_since[provider] >= debounce
             due_to_reconcile = now - last_collected[provider] >= reconcile_seconds
             if once or due_to_change or due_to_reconcile:
                 ok, message = collect_target(db, target=target, runner=runner)
@@ -101,6 +129,7 @@ def watch(
                 failed = failed or not ok
                 last_collected[provider] = now
                 pending_since.pop(provider, None)
+                pending_debounce.pop(provider, None)
 
         if once:
             return 1 if failed else 0

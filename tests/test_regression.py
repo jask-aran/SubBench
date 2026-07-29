@@ -1,7 +1,7 @@
 from subbench.regression import robust_estimates
 
 
-def point(used, cost, observed, reset="reset-a"):
+def point(used, cost, observed, reset="reset-a", account_id=None):
     return {
         "provider": "codex",
         "window": "five_hour",
@@ -9,6 +9,7 @@ def point(used, cost, observed, reset="reset-a"):
         "used_percent": used,
         "cost_usd": cost,
         "observed_at": observed,
+        "account_id": account_id,
     }
 
 
@@ -45,6 +46,20 @@ def test_regression_separates_reset_windows():
     ])
     assert len(estimates) == 2
     assert {estimate.reset_key for estimate in estimates} == {"reset-a", "reset-b"}
+
+
+def test_regression_separates_accounts_with_same_reset_key():
+    estimates = robust_estimates([
+        point(10, 2.0, "2026-07-27T00:00:00Z", "reset-a", account_id="A"),
+        point(20, 5.0, "2026-07-27T00:10:00Z", "reset-a", account_id="A"),
+        point(10, 1.0, "2026-07-27T00:00:00Z", "reset-a", account_id="B"),
+        point(20, 2.5, "2026-07-27T00:10:00Z", "reset-a", account_id="B"),
+    ])
+    assert len(estimates) == 2
+    by_account = {estimate.account_id: estimate for estimate in estimates}
+    assert set(by_account) == {"A", "B"}
+    assert round(by_account["A"].estimate_usd, 2) == 30.0
+    assert round(by_account["B"].estimate_usd, 2) == 15.0
 
 
 def test_median_slope_limits_single_interval_outlier():

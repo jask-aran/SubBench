@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .account import auth_file, registry_file
+
 
 @dataclass(frozen=True)
 class FileStamp:
@@ -38,6 +40,42 @@ class LogChangeDetector:
         if not changed:
             changed = any(current[path] != self._state[path] for path in current)
         self._state = current
+        return changed
+
+
+class AuthFileDetector:
+    """Detect that the active Codex account may have changed by watching auth.json/registry.json mtime.
+
+    A switch via `codex-auth switch` rewrites both files; we only need their mtime.
+    The first scan establishes a baseline (returns False) so that an account already
+    active at startup does not masquerade as a switch.
+    """
+
+    def __init__(self, provider: str) -> None:
+        self.provider = provider
+        self._stamp: FileStamp | None = None
+        self._initialised = False
+
+    def scan(self) -> bool:
+        if self.provider != "codex":
+            return False
+        paths = [auth_file(), registry_file()]
+        size = 0
+        latest = 0
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            size += stat.st_size
+            latest = max(latest, stat.st_mtime_ns)
+        current = FileStamp(size=size, mtime_ns=latest)
+        if not self._initialised:
+            self._stamp = current
+            self._initialised = True
+            return False
+        changed = current != self._stamp
+        self._stamp = current
         return changed
 
 
