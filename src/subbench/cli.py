@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser = subcommands.add_parser("watch", help="Watch local agent logs and collect after changes")
     watch_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
     watch_parser.add_argument("--interval", type=float, default=2.0, help="Filesystem scan interval in seconds (default: 2)")
-    watch_parser.add_argument("--debounce", type=float, default=5.0, help="Wait after the latest log write before collecting (default: 5)")
+    watch_parser.add_argument("--debounce", type=float, default=60.0, help="Wait seconds after the latest log write before collecting (default: 60)")
     watch_parser.add_argument("--reconcile", type=float, default=21600.0, help="Maximum seconds between full ccusage reconciliations (default: 21600)")
     watch_parser.add_argument("--runner", choices=("npx", "bunx", "pnpm"), default="npx")
     watch_parser.add_argument("--once", action="store_true")

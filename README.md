@@ -43,6 +43,7 @@ journalctl --user -u subbench -f
 ```
 
 The service assumes `subbench` is installed at `~/.local/bin/subbench`. Adjust `ExecStart` where necessary. WSL must have systemd enabled.
+Its environment must also include the directories containing `codex` and `npx`; the included unit covers this machine's Homebrew installation.
 
 ## Terminal charts
 
@@ -61,6 +62,7 @@ The chart plots one robust API-equivalent value estimate per informative reset w
 ## Entitlement collection
 
 Codex uses the supported local app-server interface. SubBench starts `codex app-server`, performs the JSON-RPC handshake, calls `account/rateLimits/read`, and stores each returned window's used percentage, duration and reset timestamp.
+Codex reset timestamps are rounded to the minute because consecutive reads of one reset boundary can differ by a few seconds.
 
 Claude Code does not currently provide an equivalent supported local RPC. Set `SUBBENCH_CLAUDE_USAGE_COMMAND` to a local command that prints the Claude usage response as JSON:
 

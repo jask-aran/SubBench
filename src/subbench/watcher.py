@@ -87,7 +87,7 @@ def watch(
     runner: str,
     interval_seconds: float,
     once: bool = False,
-    debounce_seconds: float = 5.0,
+    debounce_seconds: float = 60.0,
     reconcile_seconds: float = 21600.0,
     emit: Callable[[str], None] = print,
 ) -> int:

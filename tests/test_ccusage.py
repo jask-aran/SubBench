@@ -33,6 +33,27 @@ class CcusageNormaliserTests(TestCase):
         self.assertEqual(rows[0].reasoning_output_tokens, 12)
         self.assertEqual(rows[0].reported_cost_usd, "0.01")
 
+    def test_aggregate_cost_is_not_inherited_by_model_breakdowns(self) -> None:
+        payload = {
+            "daily": [
+                {
+                    "date": "2026-07-27",
+                    "inputTokens": 150,
+                    "outputTokens": 20,
+                    "costUSD": 0.01,
+                    "modelBreakdowns": [
+                        {"model": "gpt-one", "inputTokens": 100, "outputTokens": 10},
+                        {"model": "gpt-two", "inputTokens": 50, "outputTokens": 10},
+                    ],
+                }
+            ]
+        }
+
+        rows = normalise_payload(payload, provider="codex", report="daily")
+        self.assertEqual(len(rows), 3)
+        costs = {row.model: row.reported_cost_usd for row in rows}
+        self.assertEqual(costs, {"gpt-one": None, "gpt-two": None, None: "0.01"})
+
     def test_claude_cache_classes(self) -> None:
         payload = {
             "data": [
