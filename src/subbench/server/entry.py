@@ -14,6 +14,7 @@ from js import Response  # type: ignore[import-not-found]  # provided by the Wor
 from workers import handler  # type: ignore[import-not-found]
 
 from . import ingest, queries
+from .assemble import IMPORT_DAYS_SQL, SNAPSHOTS_SQL, assemble_points
 
 STATIC_PAGE = "index.html"
 JSON_HEADERS = {"content-type": "application/json; charset=utf-8"}
@@ -35,22 +36,17 @@ async def _rows(env, sql: str, params: list) -> list[dict]:
     return [dict(row) for row in result.results.to_py()]
 
 
-async def _agent_id(env) -> str | None:
-    """The single agent's id.
-
-    Multi-agent aggregation is deliberately not implemented: pooled estimates must be
-    computed over combined pairs, which cannot be reconstructed from per-agent summaries,
-    so it is a design change rather than a query change. Until then the newest agent wins.
-    """
-    rows = await _rows(env, "SELECT agent_id FROM agents ORDER BY last_seen DESC LIMIT 1", [])
-    return rows[0]["agent_id"] if rows else None
-
-
 async def _points(env) -> list[dict]:
-    agent_id = await _agent_id(env)
-    if agent_id is None:
-        return []
-    return await _rows(env, queries.REGRESSION_POINTS_SQL, queries.points_params(agent_id))
+    """Evidence from every agent, merged per account.
+
+    Agents reporting the same (provider, account) describe one meter and one allowance,
+    and each ccusage sees only its own machine, so their spend is summed. Separate
+    accounts stay separate: those are different entitlements, pooled at the estimate
+    level by rolling_values, never at the pair level.
+    """
+    snapshots = await _rows(env, SNAPSHOTS_SQL, [])
+    imports = await _rows(env, IMPORT_DAYS_SQL, [])
+    return assemble_points(snapshots, imports)
 
 
 async def _ingest(request, env) -> "Response":
@@ -115,9 +111,11 @@ async def on_fetch(request, env):
         if path == "/api/history":
             return _json(queries.history_payload(await _points(env)))
         if path == "/api/models":
-            agent_id = await _agent_id(env)
-            rows = await _rows(env, queries.MODEL_MIX_SQL, [agent_id]) if agent_id else []
+            rows = await _rows(env, queries.MODEL_MIX_SQL, [])
             return _json(queries.models_payload(rows))
+        if path == "/api/weights":
+            rows = await _rows(env, queries.MODEL_MIX_SQL, [])
+            return _json(queries.weights_payload(await _points(env), rows))
         if path == "/api/health":
             rows = await _rows(env, queries.HEALTH_SQL, [])
             return _json({

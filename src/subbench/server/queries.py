@@ -11,8 +11,10 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from ..regression import robust_estimates
+from ..weights import observations_from_windows, solve
 from ..store import MAX_COST_AGE_MINUTES
 from ..timeseries import detect_regime_changes, rolling_values, window_history
+from .assemble import IMPORT_DAYS_SQL, SNAPSHOTS_SQL, assemble_points
 from .confidence import annotate, classify
 
 # Mirrors store.PRICED_WINDOWS_SQL, adapted for the agent-scoped D1 tables. Kept as one
@@ -54,21 +56,35 @@ WHERE s.import_key IS NOT NULL
 ORDER BY s.provider, s.account_id, s.window, s.resets_at, s.observed_at
 """
 
+# Per reset window, not per account: the weights fit needs one equation per window, and
+# a mix collapsed across windows carries no variation to separate the models with.
 MODEL_MIX_SQL = """
-WITH latest AS (
-    SELECT agent_id, provider, account_key, MAX(last_seen_at) AS last_seen_at
-    FROM usage_rows WHERE agent_id = ? GROUP BY agent_id, provider, account_key
+WITH windows AS (
+    SELECT DISTINCT provider, account_id, account_key, resets_at, window,
+           COALESCE(duration_minutes,
+                    CASE window WHEN 'five_hour' THEN 300 ELSE 10080 END) AS minutes
+    FROM entitlement_snapshots WHERE resets_at IS NOT NULL
+), newest AS (
+    SELECT w.provider, w.account_id, w.account_key, w.resets_at, w.window,
+           DATE(w.resets_at, '-' || w.minutes || ' minutes') AS start_date,
+           DATE(w.resets_at) AS end_date,
+           u.agent_id, MAX(u.last_seen_at) AS last_seen_at
+    FROM windows w JOIN usage_rows u
+      ON u.provider = w.provider AND u.account_key = w.account_key
+    GROUP BY w.provider, w.account_key, w.resets_at, w.window, u.agent_id
 )
-SELECT u.provider, u.account_id, u.model,
+SELECT n.provider, n.account_id, n.resets_at, n.window, u.model,
        SUM(u.input_tokens + u.output_tokens + u.cache_read_tokens
            + u.cache_write_tokens + u.reasoning_output_tokens) AS total_tokens
-FROM usage_rows u
-JOIN latest l ON l.agent_id = u.agent_id AND l.provider = u.provider
-             AND l.account_key = u.account_key AND l.last_seen_at = u.last_seen_at
+FROM newest n JOIN usage_rows u
+  ON u.agent_id = n.agent_id AND u.provider = n.provider
+ AND u.account_key = n.account_key AND u.last_seen_at = n.last_seen_at
 WHERE u.model IS NOT NULL
-GROUP BY u.provider, u.account_id, u.model
+  AND (u.period_start IS NULL
+       OR (DATE(u.period_start) >= n.start_date AND DATE(u.period_start) <= n.end_date))
+GROUP BY n.provider, n.account_id, n.resets_at, u.model
 HAVING total_tokens > 0
-ORDER BY u.provider, total_tokens DESC
+ORDER BY n.provider, n.resets_at, total_tokens DESC
 """
 
 HEALTH_SQL = """
@@ -82,6 +98,14 @@ SELECT (SELECT COUNT(*) FROM entitlement_snapshots) AS entitlement_rows,
 
 def points_params(agent_id: str, max_cost_age_minutes: float = MAX_COST_AGE_MINUTES) -> list[Any]:
     return [max_cost_age_minutes, agent_id]
+
+
+def weights_payload(points, mix) -> dict[str, Any]:
+    """Per-model quota weights, or why they cannot yet be fitted."""
+    estimates = robust_estimates(points)
+    observations = observations_from_windows(estimates, mix)
+    providers = sorted({str(row["provider"]) for row in observations})
+    return {"providers": [solve(observations, provider=name).as_dict() for name in providers]}
 
 
 def estimates_from_points(points: Iterable[Mapping[str, Any]]):

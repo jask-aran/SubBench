@@ -14,6 +14,7 @@ from .charts import render_value_history
 from .doctor import exit_code as doctor_exit_code
 from .doctor import run_doctor
 from .push import push_all
+from .weights import observations_from_windows, solve
 from .regression import MIN_QUOTA_DELTA_PERCENT, _cluster_resets, robust_estimates
 from .store import connect, estimate_windows, list_accounts, list_imports, model_mix, regression_points, save_import
 from .timeseries import detect_regime_changes, rolling_values, window_history
@@ -68,6 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
     models_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
     models_parser.add_argument("--account", default=None)
     models_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    weights_parser = subcommands.add_parser("weights", help="Fit per-model quota weights, or explain why not yet")
+    weights_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
+    weights_parser.add_argument("--json", action="store_true", dest="as_json")
 
     accounts_parser = subcommands.add_parser("accounts", help="List discovered accounts")
     accounts_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
@@ -161,6 +166,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             key = (row["provider"], row["account_id"], row["window"], row["resets_at"])
             share = 100.0 * int(row["total_tokens"]) / totals[key] if totals[key] else 0.0
             print(f"{row['provider']}\t{account.account_label(row.get('account_id'))}\t{row['window']}\t{row['resets_at']}\t{row['model']}\t{int(row['total_tokens']):,}\t{share:.1f}%")
+        return 0
+    if args.command == "weights":
+        provider = None if args.provider == "all" else args.provider
+        estimates = robust_estimates(regression_points(db, provider=provider))
+        mix = [dict(row) for row in model_mix(db, provider=provider)]
+        observations = observations_from_windows(estimates, mix)
+        names = sorted({row["provider"] for row in observations}) or ([provider] if provider else ["codex", "claude"])
+        fits = [solve(observations, provider=name) for name in names]
+        if args.as_json:
+            print(json.dumps([fit.as_dict() for fit in fits], indent=2))
+            return 0
+        for fit in fits:
+            if not fit.sufficient:
+                print(f"{fit.provider}: cannot fit yet - {fit.reason}")
+                continue
+            print(f"{fit.provider}: fitted over {fit.window_count} windows (residual {fit.residual:.4f})")
+            print("model\tquota % per million tokens")
+            for model, weight in sorted(zip(fit.models, fit.weights), key=lambda pair: -pair[1]):
+                print(f"{model}\t{weight * 1e6:.4f}")
         return 0
     if args.command == "accounts":
         return _print_accounts(db, args.provider)
