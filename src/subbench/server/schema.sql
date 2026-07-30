@@ -63,3 +63,15 @@ CREATE INDEX IF NOT EXISTS usage_by_import
     ON usage_rows(agent_id, import_key);
 CREATE INDEX IF NOT EXISTS entitlement_by_series
     ON entitlement_snapshots(agent_id, provider, account_key, window, observed_at);
+
+-- Reports are computed by the agent and stored verbatim. The Worker serves them; it
+-- never derives anything, because a second estimator implementation would drift from the
+-- Python one and there would be no way to tell which was right. Raw evidence is stored
+-- alongside so server-side derivation stays possible later without backfilling history.
+CREATE TABLE IF NOT EXISTS reports (
+    agent_id     TEXT NOT NULL,
+    kind         TEXT NOT NULL,   -- current | history | models | weights
+    generated_at TEXT NOT NULL,
+    payload      TEXT NOT NULL,   -- JSON, exactly as the agent computed it
+    PRIMARY KEY (agent_id, kind)
+);

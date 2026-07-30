@@ -1,14 +1,8 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "subbench",
-  "main": "src/worker.py",
+  "main": "worker/index.js",
   "compatibility_date": "2026-07-15",
-
-  // Python Workers are in open beta and require this flag. The estimator is pure
-  // standard library and single-threaded, so it runs unmodified on Pyodide. If the beta
-  // proves unworkable the same package runs under Containers, which is a deployment
-  // change rather than a rewrite -- entry.py is kept thin to preserve that.
-  "compatibility_flags": ["python_workers"],
 
   "d1_databases": [
     {
@@ -26,15 +20,9 @@
 
   // Prune usage rows once a window is long settled. Entitlement snapshots are never
   // pruned: they are small, and an unsampled moment cannot be recovered.
-  "triggers": {
-    "crons": ["0 4 * * *"]
-  },
+  "triggers": { "crons": ["0 4 * * *"] },
 
-  "vars": {
-    "USAGE_RETENTION_DAYS": "90"
-  },
+  "vars": { "USAGE_RETENTION_DAYS": "90" },
 
-  "observability": {
-    "enabled": true
-  }
+  "observability": { "enabled": true }
 }

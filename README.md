@@ -60,10 +60,19 @@ subbench push                    # send evidence recorded since the last acknowl
 unreachable server never delays a quota reading and a push failure never fails a
 collection cycle. The local database stays the source of truth.
 
-Derivation runs **server-side**: the Worker imports the same `subbench.regression` code
-the CLI uses. An estimator improvement is a redeploy, and re-derives all stored history
-without any agent re-pushing. Nothing re-implements the estimator, because every subtle
-defect this project has hit lived in that code and a second copy would drift silently.
+Derivation runs on the **agent**, and the Worker stores and serves the result. The Worker
+is JavaScript and contains no estimator logic at all: quota-span weighting,
+unobserved-usage exclusion, reset clustering and the staleness bound stay in
+`subbench/regression.py`. A second implementation would drift from it silently with no way
+to tell which copy was right.
+
+Validation is a different thing and does run server-side, which is what it was wanted for:
+the Worker rejects a batch whose quota is outside 0-100, whose token counts are negative,
+whose cost is not a decimal, or whose schema version it does not understand. None of that
+duplicates derivation.
+
+Raw evidence is pushed alongside the computed reports, so moving derivation server-side
+later means adding computation rather than backfilling history.
 
 Raw ccusage payloads are not sent — they are most of the local database by size and the
 estimator never reads them.

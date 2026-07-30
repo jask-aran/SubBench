@@ -132,13 +132,80 @@ def pending_usage(db: sqlite3.Connection, cursor: str | None, limit: int) -> lis
 
 
 def build_payload(
-    agent_id: str, entitlements: list[dict[str, Any]], usage: list[dict[str, Any]]
+    agent_id: str,
+    entitlements: list[dict[str, Any]],
+    usage: list[dict[str, Any]],
+    reports: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "agent_id": agent_id,
         "schema_version": SCHEMA_VERSION,
         "entitlements": entitlements,
         "usage": usage,
+    }
+    if reports:
+        payload["reports"] = reports
+    return payload
+
+
+def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
+    """Everything the dashboard displays, computed here rather than on the server.
+
+    The server stores these verbatim. Deriving them there would mean a second estimator
+    implementation, and every subtle defect this project has hit lived in that code --
+    two copies would disagree with no way to tell which was right. Raw evidence is pushed
+    alongside, so moving derivation server-side later needs computation added, not
+    history backfilled.
+    """
+    from .regression import robust_estimates
+    from .server.confidence import classify
+    from .store import model_mix, regression_points
+    from .timeseries import detect_regime_changes, rolling_values, window_history
+    from .weights import observations_from_windows, solve
+
+    estimates = robust_estimates(regression_points(db))
+    mix = [dict(row) for row in model_mix(db)]
+
+    current = []
+    by_series: dict[tuple, list] = {}
+    for estimate in estimates:
+        by_series.setdefault((estimate.provider, estimate.window, estimate.account_id), []).append(estimate)
+    for row in (value.as_dict() for value in rolling_values(estimates)):
+        members = by_series.get((row["provider"], row["window"], row.get("account_id")), [])
+        if members:
+            best = max(members, key=lambda item: item.covered_quota_percent)
+            row.update(classify(best, estimates).as_dict())
+        else:
+            row.update({"tier": "provisional", "reason": "no window-level estimate"})
+        current.append(row)
+
+    tiers = {
+        (e.provider, e.window, e.account_id, e.reset_key): classify(e, estimates).as_dict()
+        for e in estimates
+    }
+    history = []
+    for row in window_history(estimates):
+        key = (row["provider"], row["window"], row.get("account_id"), row["reset_key"])
+        history.append({**row, **tiers.get(key, {"tier": "provisional", "reason": ""})})
+
+    totals: dict[tuple, int] = {}
+    for row in mix:
+        key = (row["provider"], row.get("account_id"), str(row.get("resets_at")))
+        totals[key] = totals.get(key, 0) + int(row["total_tokens"])
+    models = []
+    for row in mix:
+        key = (row["provider"], row.get("account_id"), str(row.get("resets_at")))
+        total = totals[key]
+        models.append({**row, "share_percent": 100.0 * int(row["total_tokens"]) / total if total else 0.0})
+
+    observations = observations_from_windows(estimates, mix)
+    providers = sorted({str(row["provider"]) for row in observations})
+
+    return {
+        "current": {"current": current, "regime_changes": [row.as_dict() for row in detect_regime_changes(estimates)]},
+        "history": {"windows": history},
+        "models": {"models": models},
+        "weights": {"providers": [solve(observations, provider=name).as_dict() for name in providers]},
     }
 
 
@@ -192,7 +259,9 @@ def push_once(
     if not entitlements and not usage:
         return PushResult(0, 0, True, "nothing to push")
 
-    payload = build_payload(state.agent_id, entitlements, usage)
+    # Reports go with the first batch of a push so the dashboard is never showing
+    # numbers derived from evidence the server has not finished receiving.
+    payload = build_payload(state.agent_id, entitlements, usage, reports=build_reports(db))
     try:
         sender(url, token, payload, timeout)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as error:

@@ -12,11 +12,6 @@ license = { text = "MIT" }
 authors = [{ name = "Jaskaran Singh" }]
 dependencies = ["plotext>=5.3,<6"]
 
-# Python Workers bundle whatever is declared here and are built with `uv run pywrangler`.
-# workers-py provides the `workers` module the Worker entry imports.
-[dependency-groups]
-dev = ["workers-py", "workers-runtime-sdk", "pytest>=8,<9"]
-
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
 
