@@ -124,12 +124,12 @@ def test_pairs_below_the_quota_floor_are_excluded():
 
 
 def test_quota_moving_without_recorded_value_is_not_a_free_window():
-    # A stale usage import reports no new spend; treating that as a zero slope would
-    # drag the estimate down rather than simply carrying no information.
+    # Hours apart, so this cannot be the meter running ahead of the logs: the spend for
+    # that quota was never recorded here at all.
     slopes = pairwise_slopes([
         point(10, 2.0, "2026-07-27T00:00:00Z"),
-        point(30, 2.0, "2026-07-27T00:10:00Z"),
-        point(50, 8.0, "2026-07-27T00:20:00Z"),
+        point(30, 2.0, "2026-07-27T04:00:00Z"),
+        point(50, 8.0, "2026-07-27T08:00:00Z"),
     ])
     assert all(slope.slope_usd > 0 for slope in slopes)
     # Only the fully observed 30 -> 50 interval survives. The 10 -> 50 pair straddles
@@ -224,3 +224,54 @@ def test_genuinely_different_reset_windows_still_separate():
         point(30, 3.0, "2026-07-27T05:10:00Z", "2026-07-27T20:30:00+00:00"),
     ]
     assert len(robust_estimates(points)) == 2
+
+
+def test_partly_offmachine_stretch_is_excluded_by_the_relative_test():
+    # The leak the absolute floor misses: value moved enough to clear $0.01/point, but
+    # nowhere near the window's own rate, because most of that quota was spent in a
+    # provider's cloud runner and only a little locally. Presence of spend is not
+    # proportionality of spend.
+    points = [point(0, 0.0, "2026-07-27T00:00:00Z")]
+    cost = 0.0
+    for index in range(1, 13):          # a clean stretch at $100 per 100%
+        cost += 1.0
+        points.append(point(index, cost, f"2026-07-27T{index:02d}:00:00Z"))
+    cost += 0.25                        # 11 points of quota, almost all of it elsewhere
+    points.append(point(23, cost, "2026-07-27T13:00:00Z"))
+    for index in range(1, 8):
+        cost += 1.0
+        points.append(point(23 + index, cost, f"2026-07-27T{13 + index:02d}:00:00Z"))
+
+    estimate = robust_estimates(points)[0]
+    assert 80.0 < estimate.estimate_usd < 120.0, estimate.estimate_usd
+    assert estimate.unobserved_quota_percent >= 11.0
+
+
+def test_a_genuinely_cheap_stretch_is_kept():
+    # The risk of the relative test is discarding real evidence. A stretch at half the
+    # window rate is ordinary variation in model mix, not missing data, and must survive.
+    points = [point(0, 0.0, "2026-07-27T00:00:00Z")]
+    cost = 0.0
+    for index in range(1, 13):
+        cost += 1.0
+        points.append(point(index, cost, f"2026-07-27T{index:02d}:00:00Z"))
+    cost += 4.0                          # 8 points at $50 per 100%, half the rate
+    points.append(point(20, cost, "2026-07-27T13:00:00Z"))
+    estimate = robust_estimates(points)[0]
+    assert estimate.unobserved_quota_percent == 0.0
+
+
+def test_a_meter_running_ahead_of_the_logs_is_not_mistaken_for_missing_usage():
+    # Providers update the quota meter before the agent's logs are flushed and read, so
+    # quota routinely jumps several points a minute or two ahead of the spend that caused
+    # it. The cost lands moments later; discarding pairs across it would throw away good
+    # evidence on every single collection cycle.
+    points = [
+        point(10, 2.00, "2026-07-27T00:00:00Z"),
+        point(21, 2.00, "2026-07-27T00:01:00Z"),   # 11 points in one minute, no cost yet
+        point(22, 4.20, "2026-07-27T00:03:00Z"),   # the cost arrives
+        point(30, 6.00, "2026-07-27T00:20:00Z"),
+    ]
+    estimate = robust_estimates(points)[0]
+    assert estimate.unobserved_quota_percent == 0.0
+    assert estimate.coverage_percent == 100.0

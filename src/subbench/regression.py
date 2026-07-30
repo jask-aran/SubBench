@@ -151,13 +151,50 @@ MIN_QUOTA_DELTA_PERCENT = 2.0
 MIN_VALUE_PER_QUOTA_POINT = 0.01
 UNOBSERVED_QUOTA_POINTS = 5.0
 
+# The absolute floor above only asks whether value moved at all, which catches a stretch
+# that was entirely off-machine and misses one that was mostly off-machine. A stretch
+# running far below the window's own rate is the same defect in weaker form: local spend
+# divided by local-plus-elsewhere quota, which biases the estimate down.
+#
+# The reference rate is derived from the window's surviving intervals, so the test is
+# self-calibrating and needs no assumption about what a plan is worth. It is applied in a
+# single refinement pass -- iterating to convergence would let the estimate select the
+# evidence that supports it.
+UNOBSERVED_RATE_FRACTION = 0.25
+UNOBSERVED_RATE_MIN_QUOTA = 5.0
+
+# Neither test may fire on a short interval. A provider's meter updates before the agent's
+# logs are flushed and read, so quota routinely jumps several points a minute or two ahead
+# of the spend that caused it. That looks identical to usage consumed elsewhere and is not:
+# the cost arrives moments later, and pairs spanning both sides are perfectly good
+# evidence. Usage genuinely consumed off-machine shows up over hours, not minutes.
+UNOBSERVED_MIN_MINUTES = 30.0
+
 # How much recent quota the marginal estimate looks back over. Wide enough that several
 # pairs survive the floor, narrow enough to follow a mid-window change in model mix.
 MARGINAL_QUOTA_SPAN_PERCENT = 20.0
 
 
+def _interval_minutes(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+    start = _moment(left.get("observed_at"))
+    end = _moment(right.get("observed_at"))
+    if start is None or end is None:
+        return float("inf")  # undated rows: fall back to testing on quota alone
+    return (end - start).total_seconds() / 60.0
+
+
+def _moment(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _unobserved_intervals(
-    rows: list[Mapping[str, Any]], *, min_value_per_quota_point: float
+    rows: list[Mapping[str, Any]], *, min_value_per_quota_point: float,
+    reference_rate: float | None = None,
 ) -> tuple[list[int], float, float]:
     """Prefix counts of adjacent intervals whose spend was never recorded locally.
 
@@ -175,10 +212,17 @@ def _unobserved_intervals(
         value_delta = float(right["cost_usd"]) - float(left["cost_usd"])
         if quota_delta > 0:
             advanced += quota_delta
+        long_enough = _interval_minutes(left, right) >= UNOBSERVED_MIN_MINUTES
         unobserved = (
-            quota_delta >= UNOBSERVED_QUOTA_POINTS
+            long_enough
+            and quota_delta >= UNOBSERVED_QUOTA_POINTS
             and value_delta < quota_delta * min_value_per_quota_point
         )
+        if not unobserved and long_enough and reference_rate and quota_delta >= UNOBSERVED_RATE_MIN_QUOTA:
+            # Proportion, not presence: spend that moved but nowhere near far enough for
+            # the quota it accompanied means most of that quota was consumed elsewhere.
+            rate = value_delta / (quota_delta / 100.0)
+            unobserved = rate < reference_rate * UNOBSERVED_RATE_FRACTION
         if unobserved:
             unmeasured += quota_delta
         counts.append(counts[-1] + (1 if unobserved else 0))
@@ -190,11 +234,14 @@ def _valid_pairs(
     *,
     min_quota_delta: float,
     min_value_per_quota_point: float = MIN_VALUE_PER_QUOTA_POINT,
+    reference_rate: float | None = None,
 ) -> list[tuple[Mapping[str, Any], Mapping[str, Any], float, float, float]]:
     """Every ordered pair whose quota and value both moved far enough to be informative."""
     pairs: list[tuple[Mapping[str, Any], Mapping[str, Any], float, float, float]] = []
     floor = max(min_quota_delta, 0.0)
-    unobserved, _, _ = _unobserved_intervals(rows, min_value_per_quota_point=min_value_per_quota_point)
+    unobserved, _, _ = _unobserved_intervals(
+        rows, min_value_per_quota_point=min_value_per_quota_point, reference_rate=reference_rate,
+    )
     for index, left in enumerate(rows):
         for offset, right in enumerate(rows[index + 1 :], start=index + 1):
             # Skip the pair if any interval between its endpoints was never observed.
@@ -299,6 +346,12 @@ def robust_estimates(
         pairs = _valid_pairs(ordered, min_quota_delta=min_quota_delta)
         if not pairs:
             continue
+        # Second pass: re-test intervals against the rate the first pass implies, so a
+        # stretch that was only partly off-machine is excluded too.
+        reference = weighted_quantile([p[4] for p in pairs], [p[2] for p in pairs], 0.5)
+        refined = _valid_pairs(ordered, min_quota_delta=min_quota_delta, reference_rate=reference)
+        if refined:
+            pairs = refined
         slopes = [pair[4] for pair in pairs]
         weights = [pair[2] for pair in pairs]
         marginal, marginal_lower, marginal_upper, marginal_count, marginal_observed = (
@@ -306,7 +359,8 @@ def robust_estimates(
         )
 
         _, advanced, unmeasured = _unobserved_intervals(
-            ordered, min_value_per_quota_point=MIN_VALUE_PER_QUOTA_POINT
+            ordered, min_value_per_quota_point=MIN_VALUE_PER_QUOTA_POINT,
+            reference_rate=reference,
         )
         quota_values = [float(row["used_percent"]) for row in ordered]
         cost_values = [float(row["cost_usd"]) for row in ordered]
