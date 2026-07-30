@@ -13,8 +13,9 @@ from .ccusage import CcusageSchemaError, normalise_payload
 from .charts import render_value_history
 from .doctor import exit_code as doctor_exit_code
 from .doctor import run_doctor
-from .regression import robust_estimates
-from .store import connect, estimate_windows, list_accounts, list_imports, regression_points, save_import
+from .push import push_all
+from .regression import MIN_QUOTA_DELTA_PERCENT, _cluster_resets, robust_estimates
+from .store import connect, estimate_windows, list_accounts, list_imports, model_mix, regression_points, save_import
 from .timeseries import detect_regime_changes, rolling_values, window_history
 from .watcher import WatchTarget, ccusage_command, watch
 
@@ -47,14 +48,26 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--intervals", action="store_true", help="Show raw adjacent-interval estimates")
     report_parser.add_argument("--history", action="store_true", help="Show one robust estimate per reset window")
     report_parser.add_argument("--min-quota-span", type=float, default=5.0, help="Minimum observed quota movement for rolling estimates (default: 5)")
+    report_parser.add_argument("--min-pair-delta", type=float, default=MIN_QUOTA_DELTA_PERCENT, help=f"Minimum quota movement for one pair to contribute a slope (default: {MIN_QUOTA_DELTA_PERCENT})")
 
-    chart_parser = subcommands.add_parser("chart", help="Plot entitlement-value history in the terminal")
+    chart_parser = subcommands.add_parser("chart", help="Plot current entitlement-value convergence in the terminal")
     chart_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
     chart_parser.add_argument("--account", default=None, help="Restrict to one account_id")
     chart_parser.add_argument("--window", choices=("all", "five_hour", "weekly"), default="all")
     chart_parser.add_argument("--width", type=int)
     chart_parser.add_argument("--height", type=int)
-    chart_parser.add_argument("--min-quota-span", type=float, default=5.0)
+    chart_parser.add_argument("--min-quota-span", type=float, default=5.0, help="Minimum quota movement for a reset window to be charted (default: 5)")
+    chart_parser.add_argument("--min-pair-delta", type=float, default=MIN_QUOTA_DELTA_PERCENT, help=f"Minimum quota movement for one pair to contribute a slope (default: {MIN_QUOTA_DELTA_PERCENT})")
+    chart_parser.add_argument("--slopes", action="store_true", help="Show every valid slope contributing to the current estimate")
+
+    push_parser = subcommands.add_parser("push", help="Send collected evidence to a SubBench server")
+    push_parser.add_argument("--url", default=os.environ.get("SUBBENCH_PUSH_URL"), help="Ingest endpoint (default: $SUBBENCH_PUSH_URL)")
+    push_parser.add_argument("--token", default=os.environ.get("SUBBENCH_PUSH_TOKEN"), help="Bearer token (default: $SUBBENCH_PUSH_TOKEN)")
+
+    models_parser = subcommands.add_parser("models", help="Show the model mix behind each reset window")
+    models_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
+    models_parser.add_argument("--account", default=None)
+    models_parser.add_argument("--json", action="store_true", dest="as_json")
 
     accounts_parser = subcommands.add_parser("accounts", help="List discovered accounts")
     accounts_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
@@ -93,17 +106,67 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _print_imports(db)
     if args.command == "chart":
         provider = None if args.provider == "all" else args.provider
-        estimates = robust_estimates(regression_points(db, provider=provider, account_id=args.account))
+        points = regression_points(db, provider=provider, account_id=args.account)
+        estimates = robust_estimates(points, min_quota_delta=args.min_pair_delta)
         rows = [row for row in window_history(estimates) if row["quota_span_percent"] >= args.min_quota_span]
-        ok = render_value_history(rows, provider=provider, account_id=args.account, window=None if args.window == "all" else args.window, width=args.width, height=args.height)
+        ok = render_value_history(
+            rows,
+            points=points,
+            min_pair_delta=args.min_pair_delta,
+            provider=provider,
+            account_id=args.account,
+            window=None if args.window == "all" else args.window,
+            width=args.width,
+            height=args.height,
+            show_slopes=args.slopes,
+        )
         if not ok:
             print("No sufficiently informative reset-window estimates to chart.")
+        return 0
+    if args.command == "push":
+        if not args.url or not args.token:
+            print("set SUBBENCH_PUSH_URL and SUBBENCH_PUSH_TOKEN, or pass --url/--token", file=sys.stderr)
+            return 2
+        result = push_all(db, url=args.url, token=args.token)
+        print(result.message)
+        return 0 if result.drained else 1
+    if args.command == "models":
+        provider = None if args.provider == "all" else args.provider
+        rows = [dict(row) for row in model_mix(db, provider=provider, account_id=args.account)]
+        if args.as_json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print("No model mix recorded yet.")
+            return 0
+        # Group on the same clustered reset key the estimator uses, so a boundary that
+        # jitters across a minute does not show as two separate windows here either.
+        clusters = _cluster_resets([str(row["resets_at"]) for row in rows if row["resets_at"]])
+        for row in rows:
+            row["resets_at"] = clusters.get(str(row["resets_at"]), row["resets_at"])
+        totals: dict[tuple, int] = {}
+        merged: dict[tuple, dict] = {}
+        for row in rows:
+            key = (row["provider"], row["account_id"], row["window"], row["resets_at"], row["model"])
+            if key in merged:
+                merged[key]["total_tokens"] = max(int(merged[key]["total_tokens"]), int(row["total_tokens"]))
+            else:
+                merged[key] = row
+        rows = list(merged.values())
+        for row in rows:
+            key = (row["provider"], row["account_id"], row["window"], row["resets_at"])
+            totals[key] = totals.get(key, 0) + int(row["total_tokens"])
+        print("provider\taccount\twindow\treset\tmodel\ttokens\tshare")
+        for row in rows:
+            key = (row["provider"], row["account_id"], row["window"], row["resets_at"])
+            share = 100.0 * int(row["total_tokens"]) / totals[key] if totals[key] else 0.0
+            print(f"{row['provider']}\t{account.account_label(row.get('account_id'))}\t{row['window']}\t{row['resets_at']}\t{row['model']}\t{int(row['total_tokens']):,}\t{share:.1f}%")
         return 0
     if args.command == "accounts":
         return _print_accounts(db, args.provider)
     if args.command == "report":
         provider = None if args.provider == "all" else args.provider
-        return _print_report(db, provider=provider, account_id=args.account, scope=args.scope, as_json=args.as_json, intervals=args.intervals, history=args.history, min_quota_span=args.min_quota_span)
+        return _print_report(db, provider=provider, account_id=args.account, scope=args.scope, as_json=args.as_json, intervals=args.intervals, history=args.history, min_quota_span=args.min_quota_span, min_pair_delta=args.min_pair_delta)
     if args.command == "watch":
         providers = ("claude", "codex") if args.provider == "all" else (args.provider,)
         return watch(db, targets=[WatchTarget(provider=p) for p in providers], runner=args.runner, interval_seconds=args.interval, debounce_seconds=args.debounce, reconcile_seconds=args.reconcile, once=args.once)
@@ -146,12 +209,15 @@ def _print_accounts(db, provider_arg: str) -> int:
         return 0
     print("account_id\tprovider_or_alias\temail\tplan")
     for row in rows:
+        # Claude snapshots carry no account_id; a bare "None" row is noise, not an account.
+        if not row["account_id"]:
+            continue
         label = row["email"] or row["alias"] or (row["account_id"] or "")[:8]
         print(f"{row['account_id']}\t{label or '-'}\t{row['email'] or '-'}\t{row['plan'] or '-'}")
     return 0
 
 
-def _print_report(db, *, provider: str | None, account_id: str | None, scope: str, as_json: bool, intervals: bool, history: bool, min_quota_span: float) -> int:
+def _print_report(db, *, provider: str | None, account_id: str | None, scope: str, as_json: bool, intervals: bool, history: bool, min_quota_span: float, min_pair_delta: float) -> int:
     if intervals:
         rows = [dict(row) for row in estimate_windows(db, provider=provider, account_id=account_id)]
         if as_json:
@@ -165,7 +231,7 @@ def _print_report(db, *, provider: str | None, account_id: str | None, scope: st
             print(f"{row['provider']}\t{account.account_label(row.get('account_id'))}\t{row['window']}\t{row['quota_delta_percent']:.2f}%\tUS${row['api_value_usd']:.4f}\tUS${row['implied_full_window_usd']:.2f}\t{row['observed_at']}")
         return 0
 
-    estimates = robust_estimates(regression_points(db, provider=provider, account_id=account_id))
+    estimates = robust_estimates(regression_points(db, provider=provider, account_id=account_id), min_quota_delta=min_pair_delta)
     if history:
         rows = window_history(estimates)
         if as_json:
@@ -174,9 +240,11 @@ def _print_report(db, *, provider: str | None, account_id: str | None, scope: st
         if not rows:
             print("No usable reset-window estimates yet.")
             return 0
-        print("provider\taccount\twindow\treset\testimate\t80% slope range\tquota span\tobservations")
+        print("provider\taccount\twindow\treset\twindow avg\tmarginal\t80% slope range\tquota span\tcoverage\tobservations")
         for row in rows:
-            print(f"{row['provider']}\t{account.account_label(row.get('account_id'))}\t{row['window']}\t{row['reset_key']}\tUS${row['estimate_usd']:.2f}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['quota_span_percent']:.2f}%\t{row['observation_count']}")
+            marginal = row.get("marginal_usd")
+            marginal_label = f"US${marginal:.2f}" if marginal is not None else "-"
+            print(f"{row['provider']}\t{account.account_label(row.get('account_id'))}\t{row['window']}\t{row['reset_key']}\tUS${row['estimate_usd']:.2f}\t{marginal_label}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['quota_span_percent']:.2f}%\t{row.get('coverage_percent', 100.0):.0f}%\t{row['observation_count']}")
         return 0
 
     all_current = [row.as_dict() for row in rolling_values(estimates, min_quota_span=min_quota_span)]
@@ -192,11 +260,13 @@ def _print_report(db, *, provider: str | None, account_id: str | None, scope: st
         return 0
 
     print("Current API-equivalent entitlement value")
-    print("scope\taccount\testimate\trecent range\twindows\tquota evidence\tlatest reset")
+    print("scope\taccount\twindow avg\tmarginal\trecent range\twindows\tquota evidence\tcoverage\tlatest reset")
     for row in current:
         scope_label = row.get("account_scope", "account")
         account_label = account.account_label(row.get("account_id")) if scope_label == "account" else "all accounts"
-        print(f"{scope_label}\t{row['provider']} {row['window']}\tUS${row['estimate_usd']:.2f}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['window_count']}\t{row['quota_span_percent']:.2f}%\t{row['latest_reset']}\t{account_label}")
+        marginal = row.get("marginal_usd")
+        marginal_label = f"US${marginal:.2f}" if marginal is not None else "-"
+        print(f"{scope_label}\t{row['provider']} {row['window']}\tUS${row['estimate_usd']:.2f}\t{marginal_label}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['window_count']}\t{row['quota_span_percent']:.2f}%\t{row.get('coverage_percent', 100.0):.0f}%\t{row['latest_reset']}\t{account_label}")
 
     if changes:
         print("\nPossible backend limit changes")

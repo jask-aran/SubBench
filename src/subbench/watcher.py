@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -11,7 +12,8 @@ from . import account
 from .ccusage import CcusageSchemaError, normalise_payload
 from .entitlement import collect_entitlements
 from .incremental import AuthFileDetector, LogChangeDetector
-from .store import save_entitlements, save_import, upsert_account
+from .push import push_all
+from .store import dropped_periods, save_entitlements, save_import, upsert_account
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,28 @@ def ccusage_command(*, runner: str, provider: str, report: str) -> list[str]:
     return [*prefix, provider, report, "--json"]
 
 
+TRUNCATION_RETRIES = 2
+
+# Pushing is not collection. It runs on its own slow clock so a slow or unreachable
+# server can never delay a quota reading, and a failure is reported without failing
+# the cycle -- the local database remains the source of truth either way.
+PUSH_INTERVAL_SECONDS = 3600.0
+
+
+def push_if_due(db, *, last_pushed: float, now: float, emit) -> float:
+    url = os.environ.get("SUBBENCH_PUSH_URL")
+    token = os.environ.get("SUBBENCH_PUSH_TOKEN")
+    if not url or not token or now - last_pushed < PUSH_INTERVAL_SECONDS:
+        return last_pushed
+    try:
+        result = push_all(db, url=url, token=token)
+        if result.sent_entitlements or result.sent_usage or not result.drained:
+            emit(f"{datetime.now(timezone.utc).isoformat()} push: {result.message}")
+    except Exception as error:  # noqa: BLE001 - collection must survive any push failure
+        emit(f"{datetime.now(timezone.utc).isoformat()} push failed: {error}")
+    return now
+
+
 def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
     messages: list[str] = []
     failed = False
@@ -48,6 +72,21 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
         try:
             payload = json.loads(result.stdout)
             rows = normalise_payload(payload, provider=target.provider, report=target.report)
+            # ccusage sometimes returns fewer days than its own previous run. Retry a
+            # bounded number of times rather than storing a report known to be short.
+            for _ in range(TRUNCATION_RETRIES):
+                dropped = dropped_periods(db, provider=target.provider, account_id=account_id, rows=rows)
+                if not dropped:
+                    break
+                messages.append(f"retrying, ccusage dropped {len(dropped)} period(s)")
+                retry = subprocess.run(command, check=False, capture_output=True)
+                if retry.returncode != 0:
+                    break
+                result = retry
+                payload = json.loads(retry.stdout)
+                rows = normalise_payload(payload, provider=target.provider, report=target.report)
+            else:
+                messages.append("ccusage still short after retries; storing anyway")
             import_id, row_count, created = save_import(
                 db, raw=result.stdout, payload=payload, rows=rows,
                 provider=target.provider, report=target.report,
@@ -100,6 +139,7 @@ def watch(
     pending_since: dict[str, float] = {}
     pending_debounce: dict[str, float] = {}
     last_collected: dict[str, float] = {target.provider: 0.0 for target in targets}
+    last_pushed = time.monotonic()
 
     # Prime the auth detectors so a switch at runtime is reported as a change,
     # without treating the initial on-disk state as one.
@@ -130,6 +170,8 @@ def watch(
                 last_collected[provider] = now
                 pending_since.pop(provider, None)
                 pending_debounce.pop(provider, None)
+
+        last_pushed = push_if_due(db, last_pushed=last_pushed, now=now, emit=emit)
 
         if once:
             return 1 if failed else 0

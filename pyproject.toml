@@ -14,12 +14,20 @@ dependencies = ["plotext>=5.3,<6"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
+# The Worker runtime supplies its own bindings; nothing extra is needed to run the
+# server code, and the agent's push path uses only urllib. This marker exists so the
+# static assets and schema ship with the wheel.
+server = []
 
 [project.scripts]
 subbench = "subbench.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/subbench"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/subbench/server/schema.sql" = "subbench/server/schema.sql"
+"src/subbench/server/static" = "subbench/server/static"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SubBench — API-equivalent entitlement value</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --fg: #1a1917; --muted: #6f6a63; --line: #e3ded6;
+    --card: #ffffff; --accent: #b4531f;
+    --confirmed: #2f6f4e; --likely: #8a6d1f; --provisional: #7a7069;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161513; --fg: #ece8e1; --muted: #9a938a; --line: #2e2b27;
+      --card: #1e1c1a; --accent: #e0813f;
+      --confirmed: #6bbf8f; --likely: #d8b551; --provisional: #948b82;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 2.5rem 1.25rem 4rem;
+  }
+  main { max-width: 60rem; margin: 0 auto; }
+  h1 { font-size: 1.35rem; font-weight: 620; letter-spacing: -0.01em; margin: 0 0 .25rem; }
+  .sub { color: var(--muted); font-size: .9rem; margin: 0 0 2rem; }
+  h2 { font-size: .82rem; font-weight: 600; text-transform: uppercase;
+       letter-spacing: .07em; color: var(--muted); margin: 2.5rem 0 .9rem; }
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1.1rem 1.2rem; }
+  .series { font-size: .78rem; color: var(--muted); letter-spacing: .03em; }
+  .value { font-size: 2rem; font-weight: 640; letter-spacing: -0.02em; margin: .3rem 0 0;
+           font-variant-numeric: tabular-nums; }
+  .value small { font-size: .95rem; font-weight: 500; color: var(--muted); }
+  .marginal { font-size: .85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .tier { display: inline-flex; align-items: center; gap: .4rem; font-size: .74rem;
+          font-weight: 600; text-transform: uppercase; letter-spacing: .05em; margin-top: .8rem; }
+  .tier::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; }
+  .tier.confirmed { color: var(--confirmed); }
+  .tier.likely { color: var(--likely); }
+  .tier.provisional { color: var(--provisional); }
+  .reason { font-size: .82rem; color: var(--muted); margin-top: .3rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  .scroll { overflow-x: auto; }
+  th { text-align: left; font-weight: 600; color: var(--muted); font-size: .76rem;
+       text-transform: uppercase; letter-spacing: .05em; padding: 0 .8rem .5rem 0; }
+  td { padding: .45rem .8rem .45rem 0; border-top: 1px solid var(--line);
+       font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .bar { height: .45rem; border-radius: 3px; background: var(--accent); opacity: .85; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .8rem;
+           border-top: 1px solid var(--line); padding-top: 1rem; }
+  .error { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>API-equivalent entitlement value</h1>
+  <p class="sub">What each subscription delivered at public API prices, under the observed model mix and workload.</p>
+
+  <div id="current" class="grid"></div>
+
+  <h2>Reset windows</h2>
+  <div class="scroll"><table id="history"></table></div>
+
+  <h2>Model mix</h2>
+  <div class="scroll"><table id="models"></table></div>
+
+  <footer id="footer">loading…</footer>
+</main>
+<script>
+const money = n => n == null ? "—" : "$" + Number(n).toFixed(2);
+const pct = n => n == null ? "—" : Number(n).toFixed(0) + "%";
+const el = (tag, cls, text) => { const n = document.createElement(tag);
+  if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+
+async function load(path) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error(path + " → " + response.status);
+  return response.json();
+}
+
+function seriesName(row) {
+  const account = row.account_id ? " @" + String(row.account_id).slice(0, 8) : "";
+  return row.provider + " · " + row.window + account;
+}
+
+function renderCurrent(rows) {
+  const host = document.getElementById("current");
+  host.innerHTML = "";
+  if (!rows.length) {
+    host.append(el("div", "card", "No estimates yet — waiting for quota to move against recorded spend."));
+    return;
+  }
+  for (const row of rows) {
+    const card = el("div", "card");
+    card.append(el("div", "series", seriesName(row)));
+    const value = el("p", "value");
+    value.append(document.createTextNode(money(row.estimate_usd)));
+    value.append(el("small", null, " per full entitlement"));
+    card.append(value);
+    if (row.marginal_usd != null)
+      card.append(el("div", "marginal", "marginal " + money(row.marginal_usd) + " · coverage " + pct(row.coverage_percent)));
+    card.append(el("div", "tier " + (row.tier || "provisional"), row.tier || "provisional"));
+    if (row.reason) card.append(el("div", "reason", row.reason));
+    host.append(card);
+  }
+}
+
+function renderTable(node, columns, rows, cells) {
+  node.innerHTML = "";
+  if (!rows.length) { node.append(el("caption", "reason", "nothing recorded yet")); return; }
+  const head = node.insertRow();
+  for (const name of columns) head.append(el("th", null, name));
+  for (const row of rows) {
+    const line = node.insertRow();
+    for (const cell of cells(row)) {
+      const td = line.insertCell();
+      if (cell instanceof Node) td.append(cell); else td.textContent = cell;
+    }
+  }
+}
+
+function renderHistory(rows) {
+  renderTable(
+    document.getElementById("history"),
+    ["series", "reset", "window avg", "marginal", "80% range", "span", "coverage", "tier"],
+    rows,
+    row => [
+      seriesName(row), String(row.reset_key).slice(0, 16),
+      money(row.estimate_usd), money(row.marginal_usd),
+      money(row.lower_usd) + "–" + money(row.upper_usd),
+      pct(row.quota_span_percent), pct(row.coverage_percent),
+      el("span", "tier " + (row.tier || "provisional"), row.tier || "provisional"),
+    ]
+  );
+}
+
+function renderModels(rows) {
+  renderTable(
+    document.getElementById("models"),
+    ["provider", "model", "tokens", "share", ""],
+    rows,
+    row => {
+      const bar = el("div", "bar");
+      bar.style.width = Math.max(2, row.share_percent * 1.6) + "px";
+      return [row.provider, row.model, Number(row.total_tokens).toLocaleString(),
+              row.share_percent.toFixed(1) + "%", bar];
+    }
+  );
+}
+
+async function refresh() {
+  const footer = document.getElementById("footer");
+  try {
+    const [current, history, models, health] = await Promise.all([
+      load("/api/current"), load("/api/history"), load("/api/models"), load("/api/health"),
+    ]);
+    renderCurrent(current.current || []);
+    renderHistory(history.windows || []);
+    renderModels(models.models || []);
+    footer.className = "";
+    footer.textContent =
+      "last ingest " + (health.last_ingest_at || "never") +
+      " · " + (health.entitlement_rows ?? 0) + " entitlement snapshots" +
+      " · " + (health.usage_rows ?? 0) + " usage rows" +
+      " · schema v" + health.schema_version;
+  } catch (error) {
+    // Never leave a stale number looking current.
+    footer.className = "error";
+    footer.textContent = "could not refresh: " + error.message +
+      " — figures above may be out of date";
+  }
+}
+
+refresh();
+setInterval(refresh, 60000);
+</script>
+</body>
+</html>

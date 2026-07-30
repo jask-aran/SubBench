@@ -156,6 +156,17 @@ Measured over roughly two days of heavy use: 169 imports, 16,421 usage rows, 192
 entitlement snapshots. That is about 85 imports, 8,200 usage rows and 96 entitlement
 snapshots per day, or roughly 3 million usage rows a year for one agent.
 
+Measured again after building it, by pushing the real database through ingest into the D1
+schema: 253 entitlement rows and 21,724 usage rows occupy **9.46 MB**, against about
+2.6 MB of normalised rows locally. The difference is denormalisation — `agent_id`,
+`account_key`, `model_key`, `imported_at` and `last_seen_at` are stored per row, where
+locally the import metadata lives once per import. That is roughly 3.6x, or about
+1.7 GB/year for one agent against D1's 10 GB limit.
+
+Retention is therefore load-bearing rather than tidiness, and the 90-day window below
+holds one agent at roughly 425 MB. A second agent doubles it. If several agents are ever
+added, moving the per-import columns into their own table is the obvious next step.
+
 Entitlement snapshots are small and irreplaceable — an unsampled moment is gone forever —
 so they are never pruned. Usage rows are prunable: once a reset window has passed and its
 estimate is settled, the underlying rows are only needed to re-derive that window.
