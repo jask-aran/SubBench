@@ -5,7 +5,7 @@ import os
 import shlex
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import account
@@ -106,6 +106,8 @@ def _normalise_codex(payload: dict[str, Any], *, account_id: str | None = None) 
 
 
 def _normalise_claude(payload: dict[str, Any]) -> list[EntitlementWindow]:
+    account_id = _first_text(payload, ("account_uuid", "accountUuid", "account_id", "accountId",
+                                      "organization_uuid", "organizationUuid"))
     aliases = {
         "five_hour": "five_hour",
         "fiveHour": "five_hour",
@@ -125,8 +127,20 @@ def _normalise_claude(payload: dict[str, Any]) -> list[EntitlementWindow]:
         if 0 <= used <= 1:
             used *= 100
         reset = value.get("resets_at", value.get("resetsAt"))
-        rows.append(EntitlementWindow("claude", label, used, _time_iso(reset), None, "claude-oauth-usage"))
+        duration = 300 if label == "five_hour" else 10080
+        rows.append(EntitlementWindow(
+            "claude", label, used, _time_iso(reset), duration, "claude-oauth-usage",
+            account_id=account_id,
+        ))
     return rows
+
+
+def _first_text(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw
+    return None
 
 
 def _epoch_iso(value: Any) -> str | None:
@@ -134,7 +148,7 @@ def _epoch_iso(value: Any) -> str | None:
         return None
     # Codex may vary a stable reset boundary by a few seconds between reads.
     # Minute precision distinguishes actual reset windows without splitting one.
-    return datetime.fromtimestamp(float(value), timezone.utc).replace(second=0, microsecond=0).isoformat()
+    return _round_to_minute(datetime.fromtimestamp(float(value), timezone.utc))
 
 
 def _time_iso(value: Any) -> str | None:
@@ -142,7 +156,20 @@ def _time_iso(value: Any) -> str | None:
         return None
     if isinstance(value, (int, float)):
         return _epoch_iso(value)
-    return str(value)
+    # Claude returns a stable reset boundary with drifting sub-second noise, so the same
+    # window would otherwise be stored under a different key on every read. Round to the
+    # minute exactly as Codex timestamps are.
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    return _round_to_minute(parsed)
+
+
+def _round_to_minute(value: datetime) -> str:
+    """Nearest minute, not truncated: a boundary that jitters either side of :00 would
+    otherwise land in two different minutes and split one window in two."""
+    return (value + timedelta(seconds=30)).replace(second=0, microsecond=0).isoformat()
 
 
 def _int_or_none(value: Any) -> int | None:

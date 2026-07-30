@@ -5,6 +5,10 @@ After=network-online.target
 [Service]
 Type=simple
 Environment=PATH=/home/linuxbrew/.linuxbrew/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Claude has no local RPC equivalent to `codex app-server`, so entitlement comes from the
+# OAuth usage endpoint. Without this, Claude usage is priced but never valued.
+# Quoted: systemd rejects an unquoted assignment containing a space.
+Environment="SUBBENCH_CLAUDE_USAGE_COMMAND=python3 %h/SubBench/packaging/claude-usage.py"
 ExecStart=%h/.local/bin/subbench watch --provider all
 Restart=on-failure
 RestartSec=10

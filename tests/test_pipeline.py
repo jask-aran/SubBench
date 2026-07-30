@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from subbench.regression import robust_estimates
-from subbench.store import connect, regression_points
+from subbench.store import connect, regression_points, save_import
 from subbench.timeseries import rolling_values
 
 
@@ -101,9 +101,11 @@ def test_provider_pooled_rollup_combines_accounts(tmp_path: Path) -> None:
 
 def test_nearby_codex_reset_timestamps_stay_in_one_window(tmp_path: Path) -> None:
     db = connect(tmp_path / "subbench.sqlite3")
+    # The quota span has to clear the pairwise floor; this case is about the two
+    # near-identical reset timestamps grouping into one window, not the slope value.
     observations = [
         ("2026-07-01T00:00:00+00:00", 12.0, 1.0, "2026-07-08T03:12:56+00:00"),
-        ("2026-07-01T00:02:00+00:00", 13.0, 2.0, "2026-07-08T03:12:55+00:00"),
+        ("2026-07-01T00:02:00+00:00", 22.0, 11.0, "2026-07-08T03:12:55+00:00"),
     ]
     for index, (timestamp, used, cost, reset) in enumerate(observations, start=1):
         cursor = db.execute(
@@ -132,3 +134,31 @@ def test_nearby_codex_reset_timestamps_stay_in_one_window(tmp_path: Path) -> Non
     assert len(estimates) == 1
     assert estimates[0].observation_count == 2
     assert round(estimates[0].estimate_usd, 2) == 100.0
+
+
+def test_dropped_periods_flags_a_shrinking_ccusage_report(tmp_path: Path) -> None:
+    from subbench.ccusage import UsageRow
+    from subbench.store import dropped_periods
+
+    db = connect(tmp_path / "subbench.sqlite3")
+
+    def row(period: str) -> UsageRow:
+        return UsageRow(
+            provider="codex", report="daily", period_start=period, period_end=None,
+            model=None, input_tokens=1, cached_input_tokens=0, cache_write_tokens=0,
+            cache_read_tokens=0, output_tokens=1, reasoning_output_tokens=0,
+            reported_cost_usd="1.0", source_path=f"$.daily[{period}]",
+        )
+
+    full = [row("2026-07-01"), row("2026-07-02"), row("2026-07-03")]
+    save_import(db, raw=b'{"a": 1}', payload={"a": 1}, rows=full,
+                provider="codex", report="daily", command=None, account_id="acct-A")
+
+    short = [row("2026-07-01"), row("2026-07-03")]
+    assert dropped_periods(db, provider="codex", account_id="acct-A", rows=short) == {"2026-07-02"}
+    assert dropped_periods(db, provider="codex", account_id="acct-A", rows=full) == set()
+    # A brand new day appearing is growth, not shrinkage.
+    grown = [*full, row("2026-07-04")]
+    assert dropped_periods(db, provider="codex", account_id="acct-A", rows=grown) == set()
+    # Another account's history must not be compared against this one.
+    assert dropped_periods(db, provider="codex", account_id="acct-B", rows=short) == set()

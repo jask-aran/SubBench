@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from statistics import median
 from typing import Any, Iterable
 
-from .regression import RegressionEstimate
+from .regression import RegressionEstimate, weighted_quantile
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,11 @@ class CurrentValue:
     latest_reset: str
     account_id: str | None = None
     account_scope: str = "account"
+    # Rate over the most recent quota only. Leads estimate_usd whenever the workload
+    # mix has shifted, because the window average is still carrying the old rate.
+    marginal_usd: float | None = None
+    # Share of the aggregated quota movement that had recorded spend beside it.
+    coverage_percent: float = 100.0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -43,16 +48,31 @@ class RegimeChange:
         return asdict(self)
 
 
+# The baseline a regime change is measured against used to be counted in whole reset
+# windows, so five thin windows outranked two dense ones. Sizing it by accumulated
+# *covered* quota weighs what was actually measured. Covered rather than total span, so a
+# window that mostly went unmeasured cannot qualify on quota it never measured. A run of
+# consistent recent windows stays a count, because consistency is a property of the run.
+MIN_BASELINE_EVIDENCE_PERCENT = 150.0
+STRONG_BASELINE_EVIDENCE_PERCENT = 200.0
+
+
 def informative_windows(
     estimates: Iterable[RegressionEstimate], *, min_quota_span: float = 5.0
 ) -> list[RegressionEstimate]:
     return [
         estimate
         for estimate in estimates
-        if estimate.quota_span_percent >= min_quota_span
+        if _evidence(estimate) >= min_quota_span
         and estimate.estimate_usd > 0
         and estimate.reset_key != "unknown"
     ]
+
+
+def _evidence(estimate: RegressionEstimate) -> float:
+    """Quota this window actually measured, falling back to span for older estimates."""
+    total = estimate.covered_quota_percent + estimate.unobserved_quota_percent
+    return estimate.covered_quota_percent if total > 0 else estimate.quota_span_percent
 
 
 def rolling_values(
@@ -85,7 +105,17 @@ def _rolling_value(provider: str, window: str, rows: list[RegressionEstimate], *
     limit = 10 if window.startswith("weekly") else 30
     recent = ordered[-limit:]
     values = [row.estimate_usd for row in recent]
-    weights = [min(row.quota_span_percent, 100.0) for row in recent]
+    weights = [min(_evidence(row), 100.0) for row in recent]
+    marginal_pairs = [
+        (row.marginal_usd, min(row.marginal_span_percent, 100.0))
+        for row in recent
+        if row.marginal_usd is not None
+    ]
+    marginal = (
+        _weighted_median([value for value, _ in marginal_pairs], [weight for _, weight in marginal_pairs])
+        if marginal_pairs
+        else None
+    )
     return CurrentValue(
         provider=provider,
         window=window,
@@ -94,10 +124,16 @@ def _rolling_value(provider: str, window: str, rows: list[RegressionEstimate], *
         upper_usd=_weighted_quantile(values, weights, 0.90),
         window_count=len(recent),
         quota_span_percent=sum(weights),
+        coverage_percent=(
+            100.0 * sum(_evidence(row) for row in recent)
+            / sum(row.quota_span_percent for row in recent)
+            if sum(row.quota_span_percent for row in recent) > 0 else 0.0
+        ),
         first_reset=recent[0].reset_key,
         latest_reset=recent[-1].reset_key,
         account_id=account_id,
         account_scope=account_scope,
+        marginal_usd=marginal,
     )
 
 
@@ -132,10 +168,13 @@ def _regime_for(
     account_id: str | None, account_scope: str, recent_count: int, minimum_change: float,
 ) -> list[RegimeChange]:
     ordered = sorted(rows, key=lambda row: row.reset_key)
-    if len(ordered) < recent_count * 2:
+    if len(ordered) <= recent_count:
         return []
     recent = ordered[-recent_count:]
     baseline = ordered[:-recent_count]
+    baseline_evidence = sum(_evidence(row) for row in baseline)
+    if baseline_evidence < MIN_BASELINE_EVIDENCE_PERCENT:
+        return []
     baseline_value = median(row.estimate_usd for row in baseline)
     recent_value = median(row.estimate_usd for row in recent)
     if baseline_value <= 0:
@@ -148,7 +187,7 @@ def _regime_for(
     )
     if not direction_consistent:
         return []
-    status = "likely" if len(baseline) >= 5 else "developing"
+    status = "likely" if baseline_evidence >= STRONG_BASELINE_EVIDENCE_PERCENT else "developing"
     return [RegimeChange(
         provider=provider,
         window=window,
@@ -179,15 +218,4 @@ def _weighted_median(values: list[float], weights: list[float]) -> float:
     return _weighted_quantile(values, weights, 0.5)
 
 
-def _weighted_quantile(values: list[float], weights: list[float], probability: float) -> float:
-    pairs = sorted(zip(values, weights), key=lambda pair: pair[0])
-    total = sum(weight for _, weight in pairs)
-    if total <= 0:
-        return median(values)
-    threshold = total * probability
-    cumulative = 0.0
-    for value, weight in pairs:
-        cumulative += weight
-        if cumulative >= threshold:
-            return value
-    return pairs[-1][0]
+_weighted_quantile = weighted_quantile
