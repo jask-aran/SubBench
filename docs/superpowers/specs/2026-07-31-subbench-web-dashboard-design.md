@@ -373,3 +373,63 @@ from per-user summaries.
 Per-model quota weights — the prerequisite for the model × subscription Pareto — need many
 reset windows with varying model mix. Pushing evidence now means that data accumulates
 server-side from day one, whether or not the fit is ever run here.
+
+## Deployment status, 2026-07-31
+
+The Worker code is written and `wrangler deploy --dry-run` validates. It is **not yet
+deployed**, because of a toolchain problem rather than a problem with this code.
+
+What `wrangler dev` established, which is the part that mattered:
+
+- The whole 169 KB bundle **loads on Pyodide**. `subbench.regression`, `timeseries` and
+  `weights` import and initialise, which was the main risk in choosing Python Workers.
+- Requests route to the handler.
+
+Two problems were found and fixed by running it rather than reasoning about it:
+
+1. An entry file inside the package cannot use relative imports. Wrangler loads it as a
+   top-level module, so Pyodide raises "attempted relative import with no known parent
+   package". The entry now sits at `src/worker.py`, beside the package, so `subbench`
+   ships as a real package.
+2. `queries` reached `store`, which reaches `entitlement`, which imports `subprocess` --
+   unavailable on the runtime. `MAX_COST_AGE_MINUTES` moved to `regression`, and the
+   server's import closure is now `regression`, `timeseries`, `weights` and `server.*`
+   with only `dataclasses`, `datetime`, `decimal`, `json`, `statistics` and `typing`
+   beneath them.
+
+The remaining blocker is the handler entry point. Current Python Workers expect
+`class Default(WorkerEntrypoint)` from the `workers` package, which ships in `workers-py`
+and is built with `uv run pywrangler` rather than plain `wrangler`. That build fails
+before it starts:
+
+```
+INFO    Installing packages into python_modules...
+INFO    Packages installed in python_modules.
+INFO    Installing packages into .venv-workers...
+WARNING error: Unexpected '', expected '-c', '-e', '-r' or the start of a requirement
+ERROR   Failed to install the requirements defined in your pyproject.toml file.
+```
+
+Ruled out by testing: the project's `plotext` dependency (fails identically with
+`dependencies = []`), and a `dev` name collision between `[project.optional-dependencies]`
+and `[dependency-groups]`. The `python_modules` install succeeds and only the
+`.venv-workers` step fails, which points at pywrangler rather than at this project.
+
+The `disable_python_external_sdk` escape hatch was also tried, with module-level
+`on_fetch`/`fetch` exports defined both in the entry module and imported into it. The
+runtime kept reporting "Handler does not export a fetch() function", so that path appears
+to be withdrawn rather than merely undocumented.
+
+Options, in the order worth trying:
+
+1. Pin an older `workers-py`, or check the workers-sdk issue tracker for the
+   `.venv-workers` install bug. Cheapest if a fix or working version exists.
+2. Deploy on **Containers** instead. Generally available, runs the same package under a
+   normal ASGI app, and needs no Pyodide toolchain. `entry.py` was kept thin precisely so
+   this is a redeploy rather than a rewrite.
+3. Keep derivation on the agent and reduce the Worker to store-and-render in JavaScript.
+   Rejected during design because it duplicates the estimator, and that judgement has not
+   changed.
+
+Nothing about the agent, ingest, confidence, multi-agent merge or weights work depends on
+which of these is chosen.

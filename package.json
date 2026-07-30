@@ -1,0 +1,8 @@
+{
+  "name": "subbench-worker",
+  "private": true,
+  "description": "Wrangler tooling for the SubBench dashboard Worker. The Worker itself is Python.",
+  "devDependencies": {
+    "wrangler": "^4.116.0"
+  }
+}

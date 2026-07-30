@@ -12,7 +12,7 @@ from typing import Any, Iterable, Mapping
 
 from ..regression import robust_estimates
 from ..weights import observations_from_windows, solve
-from ..store import MAX_COST_AGE_MINUTES
+from ..regression import MAX_COST_AGE_MINUTES
 from ..timeseries import detect_regime_changes, rolling_values, window_history
 from .assemble import IMPORT_DAYS_SQL, SNAPSHOTS_SQL, assemble_points
 from .confidence import annotate, classify

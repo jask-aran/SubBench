@@ -347,10 +347,10 @@ PRICED_WINDOWS_SQL = """
 """
 
 
-# A quota reading is only usable if the cost total beside it was confirmed at roughly
-# the same moment. When collection stops, quota keeps advancing while cost stands
-# still, and the pair understates the value of that quota badly.
-MAX_COST_AGE_MINUTES = 30.0
+# Defined with the estimator so the server can import it without dragging in this
+# module, which reaches subprocess through the collectors and would not load on the
+# Workers runtime.
+from .regression import MAX_COST_AGE_MINUTES  # noqa: E402  (re-exported for callers)
 
 
 def regression_points(

@@ -170,6 +170,11 @@ UNOBSERVED_RATE_MIN_QUOTA = 5.0
 # evidence. Usage genuinely consumed off-machine shows up over hours, not minutes.
 UNOBSERVED_MIN_MINUTES = 30.0
 
+# A quota reading is only usable if the cost total beside it was confirmed at roughly the
+# same moment. When collection stops, quota keeps advancing while cost stands still, and
+# the pair understates the value of that quota badly.
+MAX_COST_AGE_MINUTES = 30.0
+
 # How much recent quota the marginal estimate looks back over. Wide enough that several
 # pairs survive the floor, narrow enough to follow a mid-window change in model mix.
 MARGINAL_QUOTA_SPAN_PERCENT = 20.0

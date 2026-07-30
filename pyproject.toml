@@ -12,12 +12,13 @@ license = { text = "MIT" }
 authors = [{ name = "Jaskaran Singh" }]
 dependencies = ["plotext>=5.3,<6"]
 
+# Python Workers bundle whatever is declared here and are built with `uv run pywrangler`.
+# workers-py provides the `workers` module the Worker entry imports.
+[dependency-groups]
+dev = ["workers-py", "workers-runtime-sdk", "pytest>=8,<9"]
+
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
-# The Worker runtime supplies its own bindings; nothing extra is needed to run the
-# server code, and the agent's push path uses only urllib. This marker exists so the
-# static assets and schema ship with the wheel.
-server = []
 
 [project.scripts]
 subbench = "subbench.cli:main"

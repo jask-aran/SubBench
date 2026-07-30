@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Iterable, Mapping
 
-from ..store import MAX_COST_AGE_MINUTES
+from ..regression import MAX_COST_AGE_MINUTES
 
 
 def _moment(value: str) -> datetime | None:
