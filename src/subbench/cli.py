@@ -13,6 +13,7 @@ from .ccusage import CcusageSchemaError, normalise_payload
 from .charts import render_value_history
 from .doctor import exit_code as doctor_exit_code
 from .doctor import run_doctor
+from .crosssolve import account_plans, combined_estimates, divergences
 from .push import push_all
 from .weights import observations_from_windows, solve
 from .regression import MIN_QUOTA_DELTA_PERCENT, _cluster_resets, robust_estimates
@@ -255,7 +256,12 @@ def _print_report(db, *, provider: str | None, account_id: str | None, scope: st
             print(f"{row['provider']}\t{account.account_label(row.get('account_id'))}\t{row['window']}\t{row['quota_delta_percent']:.2f}%\tUS${row['api_value_usd']:.4f}\tUS${row['implied_full_window_usd']:.2f}\t{row['observed_at']}")
         return 0
 
-    estimates = robust_estimates(regression_points(db, provider=provider, account_id=account_id), min_quota_delta=min_pair_delta)
+    points = [dict(row) for row in regression_points(db, provider=provider, account_id=account_id)]
+    # Short windows expressed in long-window terms join the pool: two meters measuring one
+    # subscription are two measurements of it, and the short one turns over far more often.
+    estimates, window_ratio_rows = combined_estimates(
+        points, robust_estimates(points, min_quota_delta=min_pair_delta)
+    )
     if history:
         rows = window_history(estimates)
         if as_json:
@@ -291,6 +297,19 @@ def _print_report(db, *, provider: str | None, account_id: str | None, scope: st
         marginal = row.get("marginal_usd")
         marginal_label = f"US${marginal:.2f}" if marginal is not None else "-"
         print(f"{scope_label}\t{row['provider']} {row['window']}\tUS${row['estimate_usd']:.2f}\t{marginal_label}\tUS${row['lower_usd']:.2f}–US${row['upper_usd']:.2f}\t{row['window_count']}\t{row['quota_span_percent']:.2f}%\t{row.get('coverage_percent', 100.0):.0f}%\t{row['latest_reset']}\t{account_label}")
+
+    found = divergences(estimates, window_ratio_rows, account_plans(db))
+    if found:
+        print("\nIndependent measurements disagreeing")
+        print("scope\tprovider\tsubject\tdifference\tdetail")
+        for row in found:
+            print(f"{row.scope}\t{row.provider}\t{row.subject}\t{row.difference:+.1%}\t{row.detail}")
+
+    if window_ratio_rows:
+        print("\nWindow conversion")
+        for ratio in window_ratio_rows:
+            print(f"{ratio.provider}: {1 / ratio.ratio:.2f} {ratio.short_window} entitlements per {ratio.long_window} "
+                  f"(from {ratio.short_quota_percent:.0f}% vs {ratio.long_quota_percent:.0f}% observed movement)")
 
     if changes:
         print("\nPossible backend limit changes")

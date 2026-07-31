@@ -87,6 +87,46 @@ wrangler secret put SUBBENCH_INGEST_TOKEN
 wrangler deploy
 ```
 
+### Cross-solving and divergence
+
+Two things measure one entitlement, and combining them is worth more than reporting each
+alone.
+
+**Window types.** A provider exposing both a five-hour and a weekly allowance is metering
+one subscription twice: spending a five-hour window also spends part of the weekly one, at
+a ratio the observations reveal. On this machine that ratio is measured, not assumed:
+
+```text
+claude: 8.67 five_hour entitlements per weekly (from 182% vs 21% observed movement)
+```
+
+So every five-hour estimate becomes a weekly-equivalent one and joins the weekly pool.
+That matters because the short window turns over roughly 34 times a week and the long one
+once -- it took the Claude weekly figure from a single observation period to three.
+
+**Accounts.** Two accounts on the same plan are separate entitlements, so their *pairs*
+are never pooled; one percent of each is a different physical allowance. Their *estimates*
+describe the same product, so those are. Plan equality is required rather than assumed,
+and comes from the meter itself (`planType` on the Codex rate-limit response) rather than
+from a local registry that may not exist.
+
+**Divergence.** Independent measurements of one quantity should agree. When they stop,
+either an assumption here is wrong or something changed at the provider, and neither is
+visible from a single series:
+
+```text
+Independent measurements disagreeing
+scope     provider  subject                  difference  detail
+window    claude    five_hour vs weekly         -42.1%   five_hour implies US$300.00 per
+                                                         weekly entitlement, measured
+                                                         directly it is US$173.70
+```
+
+The threshold is 35%, set well above ordinary estimator noise -- the observed agreement on
+real data is within a few percent. Because the two share a numerator (the same recorded
+spend) while having independent denominators (one meter each), this buys robustness
+against a single meter misbehaving, not genuinely independent evidence.
+
 ### Confidence tiers
 
 Every estimate is shown; the tier sets how prominently. Suppressing weak estimates would

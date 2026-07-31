@@ -161,13 +161,16 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
     alongside, so moving derivation server-side later needs computation added, not
     history backfilled.
     """
+    from .crosssolve import account_plans, combined_estimates, divergences
     from .regression import robust_estimates
     from .server.confidence import classify
     from .store import model_mix, regression_points
     from .timeseries import detect_regime_changes, rolling_values, window_history
     from .weights import observations_from_windows, solve
 
-    estimates = robust_estimates(regression_points(db))
+    points = [dict(row) for row in regression_points(db)]
+    estimates, ratios = combined_estimates(points, robust_estimates(points))
+    plans = account_plans(db)
     mix = [dict(row) for row in model_mix(db)]
 
     current = []
@@ -206,7 +209,17 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
     providers = sorted({str(row["provider"]) for row in observations})
 
     return {
-        "current": {"current": current, "regime_changes": [row.as_dict() for row in detect_regime_changes(estimates)]},
+        "current": {
+            "current": current,
+            "regime_changes": [row.as_dict() for row in detect_regime_changes(estimates)],
+            "divergences": [row.as_dict() for row in divergences(estimates, ratios, plans)],
+            "window_ratios": [
+                {"provider": r.provider, "account_id": r.account_id,
+                 "short_window": r.short_window, "long_window": r.long_window,
+                 "ratio": r.ratio, "per_long_window": 1.0 / r.ratio}
+                for r in ratios
+            ],
+        },
         "history": {"windows": history},
         "models": {"models": models},
         "weights": {"providers": [solve(observations, provider=name).as_dict() for name in providers]},

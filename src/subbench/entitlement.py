@@ -20,6 +20,10 @@ class EntitlementWindow:
     duration_minutes: int | None
     source: str
     account_id: str | None = None
+    # Reported by the provider alongside the meter. Two accounts may only be pooled when
+    # they are the same plan, and the registry that codex-auth maintains is not always
+    # present, so the value that comes back with the quota reading is the reliable one.
+    plan: str | None = None
 
 
 def collect_entitlements(provider: str) -> list[EntitlementWindow]:
@@ -83,6 +87,7 @@ def collect_claude() -> list[EntitlementWindow]:
 
 def _normalise_codex(payload: dict[str, Any], *, account_id: str | None = None) -> list[EntitlementWindow]:
     limits = payload.get("rateLimits") or payload
+    plan = _first_text(limits, ("planType", "plan_type", "plan"))
     candidates: list[tuple[str, str, dict[str, Any], int | None]] = []
     for name, key in (("primary", "primary"), ("secondary", "secondary")):
         window = limits.get(key)
@@ -100,7 +105,8 @@ def _normalise_codex(payload: dict[str, Any], *, account_id: str | None = None) 
         unique_label = f"{label}_{name}" if label_counts[label] > 1 else label
         rows.append(EntitlementWindow(
             "codex", unique_label, float(window["usedPercent"]),
-            _epoch_iso(window.get("resetsAt")), duration, "codex-app-server", account_id=account_id,
+            _epoch_iso(window.get("resetsAt")), duration, "codex-app-server",
+            account_id=account_id, plan=plan,
         ))
     return rows
 
@@ -108,6 +114,7 @@ def _normalise_codex(payload: dict[str, Any], *, account_id: str | None = None) 
 def _normalise_claude(payload: dict[str, Any]) -> list[EntitlementWindow]:
     account_id = _first_text(payload, ("account_uuid", "accountUuid", "account_id", "accountId",
                                       "organization_uuid", "organizationUuid"))
+    plan = _first_text(payload, ("subscription_type", "subscriptionType", "plan", "tier"))
     aliases = {
         "five_hour": "five_hour",
         "fiveHour": "five_hour",
@@ -130,7 +137,7 @@ def _normalise_claude(payload: dict[str, Any]) -> list[EntitlementWindow]:
         duration = 300 if label == "five_hour" else 10080
         rows.append(EntitlementWindow(
             "claude", label, used, _time_iso(reset), duration, "claude-oauth-usage",
-            account_id=account_id,
+            account_id=account_id, plan=plan,
         ))
     return rows
 
