@@ -56,7 +56,8 @@ export SUBBENCH_PUSH_TOKEN=...
 subbench push                    # send evidence recorded since the last acknowledgement
 ```
 
-`subbench watch` pushes hourly on its own clock once those variables are set, so a slow or
+`subbench watch` pushes every 30 minutes on its own clock once those variables are set, and
+sends nothing when there is no new evidence. It runs separately from collection so a slow or
 unreachable server never delays a quota reading and a push failure never fails a
 collection cycle. The local database stays the source of truth.
 

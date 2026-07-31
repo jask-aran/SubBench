@@ -38,8 +38,9 @@ TRUNCATION_RETRIES = 2
 
 # Pushing is not collection. It runs on its own slow clock so a slow or unreachable
 # server can never delay a quota reading, and a failure is reported without failing
-# the cycle -- the local database remains the source of truth either way.
-PUSH_INTERVAL_SECONDS = 3600.0
+# the cycle -- the local database remains the source of truth either way. A cycle with
+# nothing pending costs one indexed query and sends no request.
+PUSH_INTERVAL_SECONDS = 1800.0
 
 
 def push_if_due(db, *, last_pushed: float, now: float, emit) -> float:
