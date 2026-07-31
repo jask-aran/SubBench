@@ -27,7 +27,10 @@ def test_normalise_codex_keeps_same_duration_levels_separate():
             "secondary": {"usedPercent": 40, "windowDurationMins": 10080, "resetsAt": 1780500000},
         }
     })
-    assert [row.window for row in rows] == ["weekly_primary", "weekly_secondary"]
+    # Separate series, but the first keeps the plain name. A provider enabling a second
+    # level mid-window would otherwise rename the series already being measured and
+    # orphan every observation recorded before the change.
+    assert [row.window for row in rows] == ["weekly", "weekly_secondary"]
 
 
 def test_normalise_claude_fractional_utilisation():

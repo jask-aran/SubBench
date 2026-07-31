@@ -97,12 +97,16 @@ def _normalise_codex(payload: dict[str, Any], *, account_id: str | None = None) 
         label = "five_hour" if duration and 240 <= duration <= 360 else "weekly" if duration and duration >= 6 * 24 * 60 else name
         candidates.append((name, label, window, duration))
 
-    label_counts = {label: sum(1 for _, candidate_label, _, _ in candidates if candidate_label == label) for _, label, _, _ in candidates}
     rows: list[EntitlementWindow] = []
+    seen: dict[str, int] = {}
     for name, label, window, duration in candidates:
-        # Disabled five-hour quotas can make both levels report a weekly duration.
-        # Keep each independent series rather than losing one to the DB uniqueness key.
-        unique_label = f"{label}_{name}" if label_counts[label] > 1 else label
+        # Disabled five-hour quotas can make both levels report a weekly duration. Each
+        # needs its own series or one is lost to the uniqueness key -- but only the
+        # *duplicate* is renamed. Suffixing both would rename the series a provider change
+        # arrived in the middle of, orphaning every observation recorded before it and
+        # splitting the window that is currently being measured.
+        seen[label] = seen.get(label, 0) + 1
+        unique_label = label if seen[label] == 1 else f"{label}_{name}"
         rows.append(EntitlementWindow(
             "codex", unique_label, float(window["usedPercent"]),
             _epoch_iso(window.get("resetsAt")), duration, "codex-app-server",
