@@ -19,6 +19,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 SCHEMA_VERSION = 1
+# urllib's default User-Agent is rejected by Cloudflare's bot rules with a 403 before the
+# request ever reaches the Worker, which surfaces as an opaque "error code: 1010".
+# Identifying the client properly is the fix, and is better manners anyway.
+USER_AGENT = "subbench/0.2.0 (+https://github.com/jask-aran/SubBench)"
 MAX_USAGE_ROWS_PER_BATCH = 5000
 MAX_ENTITLEMENT_ROWS_PER_BATCH = 5000
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -236,6 +240,7 @@ def _post(url: str, token: str, payload: dict[str, Any], timeout: float) -> dict
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
+            "User-Agent": USER_AGENT,
         },
         method="POST",
     )

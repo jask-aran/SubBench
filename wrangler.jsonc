@@ -8,8 +8,14 @@
     {
       "binding": "DB",
       "database_name": "subbench",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
+      "database_id": "0f4f6728-405c-4594-b627-7a9a2e3875e7"
     }
+  ],
+
+  // Routing lives here rather than in the dashboard so the deployed surface is described
+  // by the repository. Cloudflare creates the DNS record for a custom domain itself.
+  "routes": [
+    { "pattern": "subbench.jask-aran.com", "custom_domain": true }
   ],
 
   "assets": {

@@ -9,6 +9,10 @@ Environment=PATH=/home/linuxbrew/.linuxbrew/bin:%h/.local/bin:/usr/local/bin:/us
 # OAuth usage endpoint. Without this, Claude usage is priced but never valued.
 # Quoted: systemd rejects an unquoted assignment containing a space.
 Environment="SUBBENCH_CLAUDE_USAGE_COMMAND=python3 %h/SubBench/packaging/claude-usage.py"
+# Push credentials live outside the repository, in a 0600 file, so the token is never
+# committed. The leading "-" makes the file optional: without it the watcher collects as
+# before and simply does not push.
+EnvironmentFile=-%h/.config/subbench/push.env
 ExecStart=%h/.local/bin/subbench watch --provider all
 Restart=on-failure
 RestartSec=10
