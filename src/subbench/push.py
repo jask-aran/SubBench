@@ -165,6 +165,7 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
     from .regression import robust_estimates
     from .server.confidence import classify
     from .store import model_mix, regression_points
+    from .timeline import build_series
     from .timeseries import detect_regime_changes, rolling_values, window_history
     from .weights import observations_from_windows, solve
 
@@ -221,6 +222,7 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
             ],
         },
         "history": {"windows": history},
+        "series": build_series(points),
         "models": {"models": models},
         "weights": {"providers": [solve(observations, provider=name).as_dict() for name in providers]},
     }

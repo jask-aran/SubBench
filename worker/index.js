@@ -17,7 +17,7 @@ const SCHEMA_VERSION = 1;
 const MAX_USAGE_ROWS = 5000;
 const MAX_ENTITLEMENT_ROWS = 5000;
 const PROVIDERS = new Set(["claude", "codex"]);
-const REPORT_KINDS = new Set(["current", "history", "models", "weights"]);
+const REPORT_KINDS = new Set(["current", "history", "models", "weights", "series"]);
 const TOKEN_FIELDS = [
   "input_tokens", "cached_input_tokens", "cache_write_tokens",
   "cache_read_tokens", "output_tokens", "reasoning_output_tokens",
@@ -268,6 +268,7 @@ export default {
     try {
       if (path === "/api/current") return await report(env, "current");
       if (path === "/api/history") return await report(env, "history");
+      if (path === "/api/series") return await report(env, "series");
       if (path === "/api/models") return await report(env, "models");
       if (path === "/api/weights") return await report(env, "weights");
       if (path === "/api/health") return await health(env);
