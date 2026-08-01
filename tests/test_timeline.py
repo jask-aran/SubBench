@@ -158,3 +158,27 @@ def test_build_series_emits_both_windows_flat():
     assert {row["window"] for row in payload["settled"]} == set(TARGET_WINDOWS)
     assert payload["ratios"], "the short-to-long ratio is what makes the two comparable"
     assert all(row["estimator_version"] == payload["estimator_version"] for row in payload["settled"])
+
+
+def test_thin_windows_are_kept_out_of_the_settled_series():
+    """Eight quota points cannot evidence what an allowance is worth, and plotted beside
+    fuller windows a thin point reads as a step that never happened."""
+    thin = ramp(3, per_point_quota=2.0)
+    assert settled_timeline(thin, now=datetime(2026, 8, 1, tzinfo=timezone.utc)) == []
+
+
+def test_direct_and_converted_weekly_points_are_distinguishable():
+    """They are two measurements of one quantity, so they share provider, window and
+    timestamp -- only source_window separates the series."""
+    rows = ramp(8, provider="claude", account_id=None)
+    for index in range(8):
+        rows.append(point(
+            index * 60, index * 10.0, index * 20.0, window="five_hour",
+            resets_at="2026-07-20T20:00:00+00:00", provider="claude", account_id=None,
+        ))
+    weekly = [
+        row for row in settled_timeline(rows, now=datetime(2026, 8, 1, tzinfo=timezone.utc))
+        if row.window == "weekly"
+    ]
+    assert len(weekly) == 2
+    assert len({row.source_window for row in weekly}) == 2

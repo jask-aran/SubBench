@@ -27,6 +27,12 @@ never stored: a stored snapshot would be frozen at whatever estimator produced i
 later fix to the estimator would read as a change in the plan. Replaying from retained
 evidence keeps the whole series self-consistent with one estimator.
 
+**One series is keyed by `(provider, account_id, window, source_window)`** -- all four.
+A weekly value measured directly and a weekly value converted from five-hour evidence are
+two independent measurements of the same quantity, and they legitimately carry the same
+provider, window and timestamp. Grouping without `source_window` draws one line zigzagging
+between two series, which reads as violent instability in a plan that is in fact steady.
+
 That distinction is why every point carries `estimator_version`. A step in the line has two
 possible causes -- the provider changed something, or we did -- and a change-detector that
 cannot tell them apart will eventually make a confident wrong claim.
@@ -78,6 +84,12 @@ MAX_REPLAY_SAMPLES = 150
 
 # A minimum of evidence before a replayed point is worth plotting at all.
 MIN_REPLAY_QUOTA_PERCENT = 2.0
+
+# A settled point is read as evidence about the entitlement itself, so it needs more
+# behind it than a replay point, which is only ever read as "what we knew so far". A
+# window that moved eight quota points cannot say anything about what the allowance is
+# worth, and plotted beside fuller windows it reads as a step that never happened.
+MIN_SETTLED_QUOTA_PERCENT = 10.0
 
 
 def estimator_version() -> str:
@@ -157,7 +169,7 @@ def settled_timeline(
 
     timeline: list[TimelinePoint] = []
     for estimate in robust_estimates(rows):
-        if estimate.estimate_usd <= 0:
+        if estimate.estimate_usd <= 0 or estimate.covered_quota_percent < MIN_SETTLED_QUOTA_PERCENT:
             continue
         scale = 1.0
         if estimate.window != target_window:
