@@ -1,38 +1,372 @@
 # SubBench
 
-SubBench continuously estimates the **API-equivalent entitlement value** delivered by coding-agent subscriptions. It joins exact token usage reported by Codex CLI and Claude Code with observed changes in their subscription usage windows.
+SubBench measures the API-equivalent value of a coding-agent subscription. It joins the
+token usage that Codex CLI and Claude Code record on this machine with the quota movement
+that the provider reports for the same period.
 
-It does not estimate OpenAI or Anthropic's internal cost. It answers:
+SubBench does not estimate the internal cost of OpenAI or Anthropic. It answers one
+question:
 
-> At public API prices, how much usage did this subscription entitlement deliver under the observed model mix and workload?
+> At public API prices, how much usage did this subscription entitlement deliver under the
+> observed model mix and workload?
 
-## Run continuously
+The documentation uses ASD-STE100 Simplified Technical English.
+
+---
+
+## 1. Data collection
+
+Four collectors write to one SQLite database at
+`~/.local/share/subbench/subbench.sqlite3`. The `subbench watch` command runs all four.
+
+| Collector | Source | Result |
+|---|---|---|
+| File watcher | Agent JSONL logs | A trigger. It reads file metadata only. |
+| ccusage | Agent JSONL logs | Token counts and API-equivalent cost, per day and model. |
+| Codex app-server | `codex app-server` JSON-RPC | Quota percent, window length and reset time. |
+| Claude usage helper | Claude OAuth usage endpoint | The same three values for Claude. |
+
+### The watcher
+
+The watcher scans file metadata every 2 seconds. It does not open or parse the logs. After
+the last write, the watcher waits 60 seconds for the burst of writes to stop. Then it
+starts ccusage and the entitlement collectors. A full reconciliation runs every 6 hours,
+even if no file changed. The reconciliation recovers missed file events. It also recovers
+usage that occurred while SubBench was off.
 
 ```bash
-# Python 3.11+
-pip install -e .
-
-# Verify collection once
-npx ccusage@latest codex daily --json >/dev/null
-subbench watch --provider codex --once
-
-# Then leave it running, normally through the included systemd user service
-subbench watch
-```
-
-The watcher is event-driven. It scans only file metadata every two seconds, waits five seconds for a burst of log writes to settle, then runs ccusage and captures entitlement. A full ccusage reconciliation runs every six hours even if no change was detected. This keeps ccusage as the pricing and schema authority without launching Node processes every minute.
-
-Changed ccusage payloads and entitlement snapshots are retained in `~/.local/share/subbench/subbench.sqlite3`; identical usage snapshots are discarded by hash.
-
-Useful controls:
-
-```bash
-subbench watch --interval 1       # filesystem metadata scan cadence
-subbench watch --debounce 10      # wait for logs to settle
+subbench watch --interval 1       # metadata scan period, in seconds
+subbench watch --debounce 10      # wait time after the last log write
 subbench watch --reconcile 3600   # maximum time between full reconciliations
 ```
 
-### Automatic startup on Linux or WSL
+### What the database keeps
+
+The database keeps three layers apart:
+
+1. **Usage evidence.** The raw ccusage payload, and the token classes and USD cost that
+   ccusage calculates from it.
+2. **Entitlement evidence.** One quota reading for each window at each poll: the used
+   percent, the reset time and the window length.
+3. **Inference.** Every estimate. SubBench calculates each estimate again from layers 1
+   and 2. It never treats an estimate as source data.
+
+SubBench keeps the raw payloads. Therefore an improvement to the estimator applies to all
+history, and not only to new data.
+
+SubBench discards a ccusage payload that is identical to the previous payload. The
+`imports.last_seen_at` column records when SubBench last confirmed a payload. This
+separates "unchanged" from "not collected".
+
+SubBench rounds each reset time to the nearest minute. A provider reports a stable reset
+boundary that moves by a few seconds between reads. SubBench then groups reset times that
+are within 5 minutes of each other. Two different windows are hours apart, so this
+tolerance cannot merge two real windows.
+
+### Entitlement collection for each provider
+
+Codex has a supported local interface. SubBench starts `codex app-server`, does the
+JSON-RPC handshake, and calls `account/rateLimits/read`. The response also gives the plan
+name. SubBench uses that name to decide whether two accounts are comparable.
+
+Claude Code has no equivalent local interface. Set `SUBBENCH_CLAUDE_USAGE_COMMAND` to a
+command that prints the Claude usage response as JSON. `packaging/claude-usage.py` is such
+a command. It reads the access token that Claude Code already keeps in
+`~/.claude/.credentials.json`. It sends that token only to the API host that issued it.
+
+```bash
+export SUBBENCH_CLAUDE_USAGE_COMMAND="python3 $PWD/packaging/claude-usage.py"
+subbench watch --provider claude --once
+```
+
+A `401` response means that the stored token has expired. Open Claude Code to refresh it.
+
+If you do not set this variable, SubBench collects Claude cost but no Claude quota. It can
+then produce no Claude estimate at all. `subbench doctor` reports this condition as an
+error.
+
+---
+
+## 2. Arithmetic
+
+### Step 1 — the value of the usage
+
+SubBench uses the model identification, the token classes and the price table of ccusage.
+For Codex:
+
+```text
+V = (T_input - T_cached) x P_input
+  + T_cached x P_cached
+  + T_output x P_output
+```
+
+For Claude Code:
+
+```text
+V = T_input x P_input
+  + T_cache_write x P_cache_write
+  + T_cache_read x P_cache_read
+  + T_output x P_output
+```
+
+SubBench sums this value over the days **inside the reset window**. It does not subtract
+one lifetime total from another. ccusage reports its full history at each run, and that
+history is not stable between runs: two identical commands have returned reports that
+differ by several days. A difference of two lifetime totals turns that instability into
+large false deltas. A window-bounded sum does not depend on any day outside the window.
+
+### Step 2 — the slope of each pair
+
+Inside one reset window, each pair of observations where both the quota and the value
+increase implies a value for the full window:
+
+```text
+slope(i, j) = (value_j - value_i) / ((quota_j - quota_i) / 100)
+```
+
+SubBench rejects a pair in four conditions:
+
+| Condition | Reason |
+|---|---|
+| The quota moved less than 2 points. | A provider reports quota as a whole percent. A 1-point pair carries approximately 50% error. |
+| The value did not move. | This shows an incomplete usage import, and not free quota. |
+| The cost total is more than 30 minutes old. | The quota advances while a stopped collector holds the cost still. |
+| The pair spans an interval of unobserved usage. | Refer to "Usage that ccusage cannot see". |
+
+### Step 3 — the estimate for the window
+
+SubBench reports the **quota-weighted median** of all valid slopes. Each slope has the
+weight of the quota that it spans.
+
+The weight is necessary. The error enters through `1/delta`, so the distribution of the
+slopes has a long tail to the right. Short pairs also outnumber long pairs quadratically.
+An unweighted median therefore follows the least reliable evidence, and it becomes worse
+as more observations arrive. The weight makes one 50-point pair equal to fifty 1-point
+pairs, which is the ratio of the information in them.
+
+SubBench also reports a **marginal** value. This is the same calculation over the pairs
+inside the most recent 20 quota points. The window average shows what the entitlement has
+delivered until now. The marginal value shows what one quota point is worth now. The two
+values move apart when the model mix changes inside a window.
+
+The 10th to 90th percentile range of the slopes is an empirical stability range. It is not
+a formal confidence interval. A wide range usually means that the value for each quota
+point changed inside the window.
+
+### Step 4 — combination across windows and accounts
+
+A provider that reports both a five-hour window and a weekly window meters one
+subscription twice. Use of the five-hour window also uses part of the weekly window. The
+observations give this ratio directly:
+
+```text
+claude: 7.98 five_hour entitlements fill one weekly entitlement
+```
+
+SubBench multiplies each five-hour estimate by this ratio. The result joins the weekly
+pool. The five-hour window turns over approximately 34 times each week, and the weekly
+window turns over one time. Therefore this step gives the weekly figure much more
+evidence.
+
+SubBench converts a short window into a long window only. It never converts a long window
+into a short one. A weekly meter is not evidence of a five-hour limit. A conversion in that
+direction would invent the limit that the measurement must find.
+
+Two accounts on one plan are two separate entitlements. SubBench therefore never pools
+their **pairs**: one percent of each account is a different physical allowance. It does
+pool their **estimates**, because those describe the same product. The plan name must be
+equal, and that name comes from the meter itself.
+
+### Step 5 — divergence
+
+Two independent measurements of one quantity must agree. If they do not agree, either an
+assumption here is wrong, or something changed at the provider. A single series shows
+neither condition.
+
+```text
+scope     provider  subject                  difference  detail
+window    claude    five_hour vs weekly         -42.1%   five_hour implies US$300.00 per
+                                                         weekly entitlement, measured
+                                                         directly it is US$173.70
+```
+
+The threshold is 35%. This value is well above the usual noise of the estimator, which is
+a few percent on real data.
+
+### Step 6 — value over time
+
+Each reset window gives one estimate. SubBench treats these estimates as a time series. It
+does not fit one permanent regression across all history.
+
+Two series answer two different questions:
+
+- **Settled windows.** One point for each window that has passed its reset time. A step
+  between two settled points is a change in what the entitlement delivered. This series
+  detects a change of allowance at the provider, and gives its date.
+- **Replay.** What the present estimator says at each moment inside a window. This series
+  shows convergence. SubBench calculates it again from the retained evidence, so one
+  estimator produces the whole curve. A stored series would mix estimator versions, and a
+  later correction would then look like a change of the plan.
+
+Each point carries an `estimator_version`. This value is a hash of the constants that
+decide what an estimate is. A step in a line has two possible causes: the provider changed
+something, or SubBench changed something. The version separates the two causes.
+
+### Confidence tiers
+
+SubBench shows every estimate. The tier controls how prominent the estimate is. To hide a
+weak estimate would give an empty page for the first hours. It would also hide the series
+that most needs an explanation.
+
+| Tier | Requirement |
+|---|---|
+| `confirmed` | Meets `likely`, and has a slope band within 70% of the estimate **or** cross-window agreement within 15%. |
+| `likely` | Has at least 25 points of measured quota, 70% coverage and 50 valid pairs. |
+| `provisional` | An estimate exists. |
+
+### Usage that ccusage cannot see
+
+ccusage reads the logs on this machine only. Quota that a web interface, a cloud runner or
+a second machine uses leaves no local tokens.
+
+Such an interval is not cheap usage. It is unmeasured usage: the numerator is absent, and
+not small. It also spans much quota, so the weight would make it the strongest evidence of
+all. SubBench therefore rejects **every pair that spans an interval where the quota moved
+at least 5 points and the recorded value did not move**. This includes a pair whose own
+ends are far outside that interval, because it inherits the same absent value.
+
+The result is an estimate over the observed evidence only. This assumes that the
+unobserved quota was worth approximately as much as the observed quota. That is an
+assumption, but it is much better than an assumption that the unobserved quota was worth
+nothing.
+
+Reports therefore give a **coverage** value: the share of the observed quota movement that
+had recorded spend beside it. A window can show an 89% quota span and 49% coverage. Only
+the second number describes the evidence.
+
+### Why SubBench does not attribute cost below one day
+
+`ccusage <provider> session --json` gives the time of each session. Against 93 dense
+observations, this does not improve on daily buckets:
+
+| Attribution | Linearity of cost against quota (R²) |
+|---|---|
+| Daily buckets | **0.977** |
+| Session, at `lastActivity` | 0.054 |
+| Session, spread over its span | 0.974 |
+
+A session has a median span of 30 minutes and a 90th percentile of 6 hours. To put its
+full cost at its last activity is therefore very late. To spread the cost equally recovers
+the accuracy, but it does not do better than daily bucketing. The ccusage row for the
+current day is a live running total, so it already grows at each import. Day boundaries
+are important only at the edges of a reset window.
+
+---
+
+## 3. How the data reaches subbench.jask-aran.com
+
+```bash
+export SUBBENCH_PUSH_URL=https://subbench.jask-aran.com/ingest
+export SUBBENCH_PUSH_TOKEN=...
+subbench push
+```
+
+`subbench watch` pushes every 30 minutes on its own clock when these two variables exist.
+It sends nothing when there is no new evidence.
+
+The push runs separately from the collection. Therefore a slow server cannot delay a quota
+reading, and a failed push cannot fail a collection cycle. The local database stays the
+source of truth. The cursor advances only after the server accepts the batch. Rejected
+evidence is thus sent again after you correct the cause.
+
+Each batch contains three parts:
+
+1. **The new evidence** — the quota readings and usage rows since the last
+   acknowledgement. SubBench sends complete imports, because the rows of one import share
+   a timestamp. SubBench does not send the raw ccusage payloads: they are most of the
+   database by size, and the estimator never reads them.
+2. **The computed reports** — `current`, `history`, `models`, `weights` and `series`.
+3. **The cursor** that the server returns to acknowledge the batch.
+
+**The agent calculates the reports. The server keeps them.** The Worker contains no
+estimator logic. The quota-span weighting, the exclusion of unobserved usage, the reset
+clustering and the staleness limit stay in `subbench/regression.py`. A second
+implementation would move away from the first one silently, and nothing could then show
+which copy was correct.
+
+The server validates the batch. Validation is different from derivation, and it is the
+reason for the server. The Worker rejects a batch with a quota outside 0-100, with a
+negative token count, with a cost that is not a decimal, or with a schema version that it
+does not know.
+
+The raw evidence travels with the reports. To move the derivation to the server later
+therefore needs added computation, and not a backfill of history.
+
+---
+
+## 4. The Worker and the page
+
+The Worker is JavaScript. It runs on Cloudflare Workers with a D1 database and a static
+asset binding.
+
+| Route | Method | Function |
+|---|---|---|
+| `/ingest` | POST | Validates a batch, then stores the evidence and the reports. |
+| `/api/current` | GET | The rolling value, the divergences and the window ratios. |
+| `/api/history` | GET | One estimate for each reset window. |
+| `/api/models` | GET | The token share of each model, for each window. |
+| `/api/weights` | GET | The per-model quota weights, if a fit exists. |
+| `/api/series` | GET | The settled series, the replay series and the ratios. |
+| `/api/health` | GET | The row counts, the last ingest time and the schema version. |
+| `/` | GET | The static page. |
+
+Each report route returns the newest report of that kind. The page reads all of the routes
+every 60 seconds.
+
+The page shows four things:
+
+- **An interval plot.** There is one row for each series. The bar is the 80% slope range,
+  the diamond is the estimate, and the form of the diamond is the confidence tier. A
+  separate meter shows the coverage. Without that meter, an estimate with no spread would
+  look like the cleanest row on the page.
+- **Two charts of value against time**, one for the weekly entitlement and one for the
+  five-hour entitlement. A directly measured series is a solid line. A series that comes
+  from a shorter window is a dashed line, because it is an independent measurement of the
+  same allowance. An open window is a hollow point: it still accumulates evidence, so
+  movement there is convergence and not change.
+- **The divergences**, or a statement that every independent measurement agrees.
+- **Two tables**: the reset windows, and the model mix.
+
+The footer gives the age of the data and the estimator version. If a refresh fails, the
+footer says so. A stale number must never look current.
+
+To deploy:
+
+```bash
+wrangler d1 create subbench
+wrangler d1 execute subbench --file src/subbench/server/schema.sql --remote
+wrangler secret put SUBBENCH_INGEST_TOKEN
+wrangler deploy
+```
+
+> Delete the `.wrangler` directory before you deploy a changed static page. The asset cache
+> can report "No updated asset files to upload" and continue to serve the old page.
+
+---
+
+## Installation
+
+```bash
+# Python 3.11 or later
+pip install -e .
+
+npx ccusage@latest codex daily --json >/dev/null
+subbench watch --provider codex --once
+
+subbench watch
+```
+
+### Automatic start on Linux or WSL
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -42,355 +376,89 @@ systemctl --user enable --now subbench
 journalctl --user -u subbench -f
 ```
 
-The service assumes `subbench` is installed at `~/.local/bin/subbench`. Adjust `ExecStart` where necessary. WSL must have systemd enabled.
-Its environment must also include the directories containing `codex` and `npx`; the included unit covers this machine's Homebrew installation.
+The unit expects `subbench` at `~/.local/bin/subbench`. Change `ExecStart` if necessary.
+The environment of the unit must contain the directories of `codex` and `npx`. WSL must
+have systemd enabled.
 
-## Web dashboard
+> Restart the service after you change the code. An editable installation does not update
+> a process that already runs. The page then shows old numbers with no warning.
 
-SubBench can publish its estimates to a Cloudflare Worker backed by D1, with a public page
-and token-authenticated ingest.
-
-```bash
-export SUBBENCH_PUSH_URL=https://subbench.example.com/ingest
-export SUBBENCH_PUSH_TOKEN=...
-subbench push                    # send evidence recorded since the last acknowledgement
-```
-
-`subbench watch` pushes every 30 minutes on its own clock once those variables are set, and
-sends nothing when there is no new evidence. It runs separately from collection so a slow or
-unreachable server never delays a quota reading and a push failure never fails a
-collection cycle. The local database stays the source of truth.
-
-Derivation runs on the **agent**, and the Worker stores and serves the result. The Worker
-is JavaScript and contains no estimator logic at all: quota-span weighting,
-unobserved-usage exclusion, reset clustering and the staleness bound stay in
-`subbench/regression.py`. A second implementation would drift from it silently with no way
-to tell which copy was right.
-
-Validation is a different thing and does run server-side, which is what it was wanted for:
-the Worker rejects a batch whose quota is outside 0-100, whose token counts are negative,
-whose cost is not a decimal, or whose schema version it does not understand. None of that
-duplicates derivation.
-
-Raw evidence is pushed alongside the computed reports, so moving derivation server-side
-later means adding computation rather than backfilling history.
-
-Raw ccusage payloads are not sent — they are most of the local database by size and the
-estimator never reads them.
-
-Deploying:
-
-```bash
-wrangler d1 create subbench
-wrangler d1 execute subbench --file src/subbench/server/schema.sql --remote
-wrangler secret put SUBBENCH_INGEST_TOKEN
-wrangler deploy
-```
-
-### Cross-solving and divergence
-
-Two things measure one entitlement, and combining them is worth more than reporting each
-alone.
-
-**Window types.** A provider exposing both a five-hour and a weekly allowance is metering
-one subscription twice: spending a five-hour window also spends part of the weekly one, at
-a ratio the observations reveal. On this machine that ratio is measured, not assumed:
-
-```text
-claude: 8.67 five_hour entitlements per weekly (from 182% vs 21% observed movement)
-```
-
-So every five-hour estimate becomes a weekly-equivalent one and joins the weekly pool.
-That matters because the short window turns over roughly 34 times a week and the long one
-once -- it took the Claude weekly figure from a single observation period to three.
-
-**Accounts.** Two accounts on the same plan are separate entitlements, so their *pairs*
-are never pooled; one percent of each is a different physical allowance. Their *estimates*
-describe the same product, so those are. Plan equality is required rather than assumed,
-and comes from the meter itself (`planType` on the Codex rate-limit response) rather than
-from a local registry that may not exist.
-
-**Divergence.** Independent measurements of one quantity should agree. When they stop,
-either an assumption here is wrong or something changed at the provider, and neither is
-visible from a single series:
-
-```text
-Independent measurements disagreeing
-scope     provider  subject                  difference  detail
-window    claude    five_hour vs weekly         -42.1%   five_hour implies US$300.00 per
-                                                         weekly entitlement, measured
-                                                         directly it is US$173.70
-```
-
-The threshold is 35%, set well above ordinary estimator noise -- the observed agreement on
-real data is within a few percent. Because the two share a numerator (the same recorded
-spend) while having independent denominators (one meter each), this buys robustness
-against a single meter misbehaving, not genuinely independent evidence.
-
-### Confidence tiers
-
-Every estimate is shown; the tier sets how prominently. Suppressing weak estimates would
-leave a blank page for the first hours of collection and would hide the series that most
-needs explaining.
-
-| tier | requirement |
-|---|---|
-| `confirmed` | meets `likely`, and a slope band within 70% of the estimate **or** cross-window agreement within 15% |
-| `likely` | at least 25 points of measured quota, 70% coverage, and 50 valid pairs |
-| `provisional` | an estimate exists |
-
-The Codex weekly series carries thousands of slopes and still reads `provisional`, because
-half its quota movement was never measured locally. That is the label doing its job.
-
-## Terminal charts
-
-SubBench uses `plotext` to draw charts directly in a normal terminal. It remains a CLI rather than becoming an interactive TUI.
-
-```bash
-subbench chart
-subbench chart --provider codex
-subbench chart --provider codex --window weekly
-subbench chart --width 120 --height 32
-subbench chart --min-quota-span 10
-subbench chart --provider codex --slopes
-```
-
-The chart is a compact plot of the running median estimate for the latest reset period. Each new entitlement observation adds valid pairwise slopes, so the line shows the estimate converging as evidence arrives. `--slopes` prints every valid pairwise slope contributing to the latest median, including its quota delta and API-value delta. The default plot is bounded to 78×16 terminal cells; `--width` and `--height` override that for larger displays. Use `subbench report --history` for one final estimate per historical reset window and `subbench report --json` as the stable machine-readable interface.
-
-## Entitlement collection
-
-Codex uses the supported local app-server interface. SubBench starts `codex app-server`, performs the JSON-RPC handshake, calls `account/rateLimits/read`, and stores each returned window's used percentage, duration and reset timestamp.
-Codex reset timestamps are rounded to the minute because consecutive reads of one reset boundary can differ by a few seconds.
-
-Claude Code does not currently provide an equivalent supported local RPC. Set `SUBBENCH_CLAUDE_USAGE_COMMAND` to a local command that prints the Claude usage response as JSON:
-
-`packaging/claude-usage.py` is such a helper. It reads `claudeAiOauth.accessToken` from `~/.claude/.credentials.json` — the credentials Claude Code already stores — and queries the OAuth usage endpoint, sending the token only to the API host it belongs to.
-
-```bash
-export SUBBENCH_CLAUDE_USAGE_COMMAND="python3 $PWD/packaging/claude-usage.py"
-subbench watch --provider claude --once
-```
-
-A `401` means the stored token expired; opening Claude Code refreshes it. Override `CLAUDE_CREDENTIALS` or `CLAUDE_USAGE_URL` if either moves. The included systemd unit sets this variable already.
-
-Expected fields are `five_hour` and `seven_day` (or `weekly`), each containing `utilization` and optionally `resets_at`. An `account_uuid` (or `organization_uuid`) is used to scope snapshots per account, as Codex snapshots already are.
-
-There is no `claude usage` subcommand — the `claude` CLI does not expose this, so the helper has to call the OAuth usage endpoint itself with your local credentials.
-
-Without the helper, SubBench is **half-instrumented for Claude**: token costs accumulate as the numerator while no quota is ever observed as the denominator, so no Claude estimate can ever be produced. That is silent in the watcher log, so `subbench doctor` now reports it as an `error` rather than a warning:
-
-```text
-error  Claude entitlement helper  SUBBENCH_CLAUDE_USAGE_COMMAND is not set;
-                                  Claude usage is priced but never valued
-error  claude valuation           usage is recorded but no entitlement snapshot
-                                  exists, so no estimate can be produced
-```
-
-Wiring this up matters beyond Claude coverage: Claude exposes a **five-hour** window, while a Codex `plus` account returns only a weekly one. Five-hour windows produce roughly 34 reset periods a week instead of one, which is what the multi-window aggregates are starved of.
-
-## Method
-
-SubBench relies on ccusage's model identification, token classes and API-cost calculation. For Codex:
-
-```text
-V = (T_input - T_cached) × P_input
-  + T_cached × P_cached
-  + T_output × P_output
-```
-
-For Claude Code:
-
-```text
-V = T_input × P_input
-  + T_cache_write × P_cache_write
-  + T_cache_read × P_cache_read
-  + T_output × P_output
-```
-
-Reasoning or thinking tokens are retained separately where exposed, but are not added again when already included in billed output tokens.
-
-Within each reset window, every pair of cumulative observations with increasing quota and increasing API value implies a full-window value:
-
-```text
-slope(i, j) = (api_value_j - api_value_i)
-              / ((usage_j - usage_i) / 100)
-```
-
-The API value of a pair is summed over the days **inside that entitlement window**, not differenced from a lifetime running total. ccusage re-reports its whole history on every run and is not stable between runs: identical commands on the same account have returned reports differing by several whole days. Differencing a lifetime total turns that into large phantom deltas; window-bounded sums do not depend on days outside the window at all.
-
-SubBench reports the **quota-weighted** median of all valid pairwise slopes, each slope weighted by the quota it spans. Weighting is what makes the estimate usable. Providers report quota as a whole integer percent, so a pair one point apart carries ±0.5% error in the denominator — roughly ±50% on that slope — and because the error enters through `1/delta` the resulting distribution is heavy-tailed to the right. Short pairs also outnumber long pairs quadratically, so an unweighted median is decided by the least reliable evidence and *degrades* as observations accumulate. Weighting by span makes one 50-point pair count for fifty 1-point pairs, which is the ratio of their information content. Pairs below `--min-pair-delta` (default 2%) are discarded outright.
-
-Pairs where quota moved but recorded API value did not are dropped rather than counted as a zero slope: that pattern means a stale or incomplete usage import, not a stretch of free quota.
-
-A quota reading is only used if the cost total beside it was confirmed within 30 minutes. When collection stops, quota keeps advancing while the last recorded cost stands still, and pairing the two badly understates the value of that quota. Because unchanged ccusage payloads are deduplicated, `imports.last_seen_at` records when a payload was last confirmed — that is what separates "unchanged" from "not collected".
-
-### Model mix
-
-Quota-per-dollar varies several-fold inside a single window, and the likeliest cause is which models the workload used. `subbench models` shows the token share of each model per reset window:
-
-```text
-codex  weekly  2026-08-05T04:11  gpt-5.6-terra  24,930,077  49.7%
-codex  weekly  2026-08-05T04:11  gpt-5.6-sol    15,775,241  31.5%
-codex  weekly  2026-08-05T04:11  gpt-5.5         8,777,584  17.5%
-```
-
-Solving for per-model quota weights would explain that variance instead of averaging it away, but it needs many windows with a *varying* mix — comfortably more than the number of distinct models, so more than a dozen. SubBench records the inputs and does not attempt the fit: a weight vector fitted to one window would look authoritative and be noise. Per-model cost is deliberately absent, because ccusage reports cost on the aggregate row and leaves model breakdowns null.
-
-### Usage that ccusage cannot see
-
-ccusage reads this machine's logs. Quota spent through a provider's web or cloud runner, or from another machine on the same account, burns entitlement while leaving no local tokens.
-
-Such a stretch is not cheap usage, it is unmeasured usage: the numerator is missing rather than small. Worse, it spans a lot of quota, so under span weighting it would be the most heavily weighted evidence of all. SubBench therefore drops **any pair spanning an interval where quota moved at least 5 points while recorded value did not move** — including pairs whose own endpoints sit far outside it, since they inherit the same missing value. What remains is an estimate over observed evidence only, which implicitly assumes the unobserved quota was worth about what the observed quota was worth. That is a far better assumption than the alternative of treating it as worthless, but it is still an assumption.
-
-`subbench doctor` reports how much quota this affected:
-
-```text
-warn  codex unobserved usage  45 percentage points of quota moved with almost no
-                              locally recorded spend; estimates for that window
-                              understate the entitlement
-```
-
-A window carrying that warning rests on less evidence than its quota span suggests, because the unobserved stretch and everything spanning it has been discarded. Reports therefore carry a **coverage** column: the share of observed quota movement that had recorded spend beside it. A window can show an 89% quota span and 49% coverage, and only the second number describes the evidence.
-
-### Why not sub-day cost attribution
-
-`ccusage <provider> session --json` exposes per-session timestamps, which looks like it should beat day-granularity cost. Measured against 93 dense observations, it does not:
-
-| attribution | linearity of cost vs quota (R²) |
-|---|---|
-| daily buckets | **0.977** |
-| session, at `lastActivity` | 0.054 |
-| session, spread over its span | 0.974 |
-
-Sessions have a median span of 30 minutes and a p90 of six hours, so attributing a session's whole cost at its last activity is severely late-biased. Spreading it uniformly recovers the accuracy but does not exceed daily bucketing, because ccusage's row for the current day is a **live running total** — it grows on every import, so intra-day resolution already matches the polling interval. Day boundaries only matter at the edges of a reset window.
-
-The 10th–90th percentile slope range is an empirical stability range, not a formal confidence interval. A wide range is meaningful — it usually means quota-per-dollar genuinely varied inside the window because the model mix changed.
-
-### Window average and marginal rate
-
-Reports show two numbers, because there are two different questions:
-
-- **window avg** — the quota-weighted median over every valid pair in the reset window. What the entitlement has averaged so far.
-- **marginal** — the same calculation over pairs lying entirely within the most recent 20 quota points. What a quota point is worth *now*.
-
-They diverge whenever the workload mix shifts mid-window, and the divergence is not noise. The window average is an average, so it keeps carrying the old rate long after the rate has changed; on one observed window the marginal estimate reported the new rate roughly four hours before the window average caught up:
-
-```text
-quota   window avg   marginal
-  69%       $14.87    $14.47     rates still agree
-  74%       $38.26    $80.50     marginal has switched, average is lagging
-  84%       $96.32   $102.67     average has caught up
-```
-
-Use the window average to value the entitlement as a whole, and the marginal rate to see the current regime early. A large, sustained gap between them is the within-window analogue of what `detect_regime_changes` reports across windows.
-
-Reset boundaries are clustered within five minutes before grouping. Providers report a stable boundary that wanders by a few seconds between reads, and rounding alone still splits a window whenever the boundary straddles a minute. Genuinely different windows are hours apart, so the tolerance cannot merge two real ones.
-
-A regression is never combined across different reported reset timestamps. Points with unchanged rounded quota do not create slopes, but remain useful once a later snapshot moves the meter.
-
-## Current value over time
-
-Each reset timestamp produces a separate robust estimate. SubBench then treats those reset-window estimates as a time series rather than fitting one permanent regression across all history.
-
-The default report calculates a rolling current value using recent informative windows:
-
-- up to 10 weekly windows;
-- up to 30 five-hour windows;
-- only windows with at least 5 percentage points of observed quota movement by default;
-- weighted by observed quota span, capped at one full entitlement.
-
-### How quickly it converges
-
-A single reset window becomes usable as soon as it has spanned a decent fraction of its quota — hours to a day or two of ordinary use, not weeks. The within-window estimate is what `subbench chart` plots.
-
-The **multi-window** aggregates are the slow ones, and only because they are sized in whole reset periods: the rolling value wants up to 10 windows and regime detection needs at least 6 before it will report anything. For a five-hour window that is a day or two; for a weekly window that is genuinely weeks to months. If a provider exposes only a weekly window, expect one estimate per week feeding those aggregates no matter how densely you sample.
-
-Sampling density stops helping quickly. Once observations are dense enough that the quota meter advances between them, extra snapshots at the same integer percent add pairs with either zero quota delta (discarded) or a 1-point delta (below the floor). What is scarce is quota **span**, not sample count.
-```bash
-subbench report
-subbench report --provider codex
-subbench report --json
-subbench report --history
-subbench report --intervals
-subbench chart
-```
-
-`--history` shows one robust estimate per reset window. `--intervals` retains raw adjacent-snapshot calculations for debugging. `chart` renders the same reset-window history visually.
-
-## Detecting changed limit regimes
-
-SubBench compares the latest three informative reset windows with the preceding baseline. It reports a possible regime change only when:
-
-- the recent median differs from the baseline median by at least 20%;
-- all three recent estimates lie on the same side of the baseline;
-- at least three earlier informative windows exist.
-
-A change is labelled `developing` with three or four baseline windows and `likely` once at least five baseline windows support the old regime.
-
-The date means the first reset window in which SubBench observed the new level. It is not necessarily the exact backend-change date, particularly if the harness was unused around the transition.
-
-A sustained jump is evidence of a changed **effective API-equivalent entitlement under the observed workload**. It does not by itself prove that every subscriber received a fixed token increase. A provider may change model weights, temporary multipliers or account segmentation, and a major change in model/workload mix can also move the estimate.
-
-## Architecture
-
-```text
-Codex CLI / Claude Code
-        │ append local JSONL logs
-        ▼
-metadata-only file watcher
-        │ change burst + debounce
-        ▼
-      ccusage ──────────────┐
-                            │
-Codex app-server ───────────┤ on change or reconciliation
-Claude usage helper ────────┘
-                            ▼
-                    SQLite evidence store
-                            ▼
-              reset-separated robust regression
-                            ▼
-               time series + terminal charts
-                            ▼
-              rolling value + regime detection
-```
-
-The filesystem watcher does not parse or modify agent logs. It only notices new, appended, replaced or removed JSONL files. ccusage remains responsible for interpreting those logs and calculating API-equivalent cost. Periodic reconciliation recovers missed filesystem events and usage generated while SubBench was offline.
+---
 
 ## Commands
 
 ```bash
-subbench watch                          # incremental continuous collection
-subbench watch --provider codex --once # diagnostic snapshot
-subbench chart                          # terminal value history
-subbench chart --window weekly          # one quota-window type
-subbench report                         # rolling current value and regime changes
-subbench report --history               # one estimate per reset window
-subbench report --intervals             # raw adjacent-interval diagnostics
-subbench chart --slopes                  # audit every current-period slope
-subbench collect codex --report daily  # manual/backfill usage snapshot
+subbench watch                           # continuous collection
+subbench watch --provider codex --once   # one diagnostic snapshot
+subbench doctor                          # check the dependencies and the freshness
+subbench report                          # rolling value and changes of limit
+subbench report --history                # one estimate for each reset window
+subbench report --intervals              # raw adjacent-interval diagnostics
+subbench report --json                   # stable machine-readable output
+subbench chart                           # terminal chart of the current window
+subbench chart --slopes                  # every slope in the current window
+subbench models                          # token share of each model
+subbench weights                         # per-model quota weights
+subbench accounts                        # known accounts and plans
+subbench imports                         # audit the raw usage imports
+subbench push                            # send the evidence to the server
+subbench collect codex --report daily    # manual or backfill collection
 subbench ingest payload.json --provider claude --report daily
-subbench imports                        # audit raw usage imports
 ```
 
-## Overhead
+`subbench chart` draws in a normal terminal with `plotext`. SubBench stays a CLI. It does
+not become an interactive TUI.
 
-While idle, SubBench performs recursive directory scans of file names and metadata only; it does not open every JSONL file. CPU use should remain near zero and the Python process should remain in the tens-of-megabytes memory range. The heavier Node/ccusage and entitlement subprocesses now run only after relevant log changes or at the six-hour reconciliation boundary.
+---
 
-A very large archive containing hundreds of thousands of session files would still make metadata scans non-trivial. A future platform-native filesystem notification backend could remove even that scan, but the current approach stays dependency-light and works consistently across Linux, WSL and macOS-style filesystems.
+## Detection of a changed limit
 
-## Evidence model
+SubBench compares the three most recent informative windows with the earlier baseline. It
+reports a possible change only when all three conditions are true:
 
-SubBench keeps three layers separate:
+- The recent median differs from the baseline median by at least 20%.
+- All three recent estimates are on the same side of the baseline.
+- At least three earlier informative windows exist.
 
-1. **Usage and pricing evidence:** provider-reported token classes and ccusage's API-equivalent USD calculation.
-2. **Entitlement evidence:** usage percentage, reset time and window identity sampled from account interfaces.
-3. **Inference:** reset-separated robust regression, rolling current value and conservative structural-break detection.
+A change is `developing` with three or four baseline windows. It is `likely` with five or
+more.
 
-Raw ccusage JSON is preserved so parser changes can be audited and historical observations rebuilt. Derived estimates are recomputed from that evidence rather than treated as irreversible source data.
+The date is the first reset window in which SubBench observed the new level. It is not
+necessarily the date of the change at the provider. This is especially true if nobody used
+the harness near the transition.
 
-## Measurement limits
+A step that continues is evidence of a changed **effective API-equivalent entitlement
+under the observed workload**. It does not prove that every subscriber received a fixed
+increase. A provider can change a model weight, a temporary multiplier or an account
+segment. A large change in the workload mix can also move the estimate.
 
-Token valuation is only as accurate as the retained provider telemetry and ccusage pricing. Entitlement inference remains empirical: meters may be rounded, limits may roll, providers may apply model-specific weights, and allowance multipliers may change. Results are workload-specific API-equivalent allowance estimates, not contractual quotas.
+---
+
+## How quickly SubBench converges
+
+One reset window becomes usable when it has spanned a good part of its quota. That takes
+hours to one day of ordinary use, and not weeks.
+
+The aggregates across windows are the slow part, because whole reset periods size them.
+The rolling value wants up to 10 windows, and the detection of a changed limit needs at
+least 6. For a five-hour window that is one or two days. For a weekly window that is many
+weeks.
+
+More samples stop helping quickly. When the samples are dense enough for the meter to
+advance between them, an extra sample adds a pair with either no quota delta or a 1-point
+delta. SubBench rejects both. The scarce quantity is quota **span**, and not the number of
+samples.
+
+---
+
+## Limits of the measurement
+
+The valuation is only as accurate as the retained telemetry and the ccusage price table.
+The inference stays empirical. A meter can round, a limit can roll, a provider can apply a
+model-specific weight, and a multiplier can change. The results are workload-specific
+estimates of an API-equivalent allowance. They are not contractual quotas.
+
+---
 
 ## Licence
 
