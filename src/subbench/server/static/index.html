@@ -128,6 +128,27 @@
   .legend .sw-prov { border: 1px dashed var(--ink-faint); transform: rotate(45deg);
                      width:.55rem; height:.55rem; }
 
+  /* ── value over time ─────────────────────────────────────────────────── */
+  .chart { border: 1px solid var(--rule); border-radius: 3px; background: var(--panel);
+           padding: 1.2rem 1.3rem 1rem; margin-bottom: 1.1rem; }
+  .chart h3 { margin: 0 0 .15rem; font-size: .82rem; font-weight: 600; }
+  .chart p { margin: 0 0 .9rem; font-size: .72rem; color: var(--ink-faint); max-width: 44rem; }
+  .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart .gridline { stroke: var(--grid); stroke-width: 1; }
+  .chart .tick { fill: var(--ink-faint); font-size: 9.5px; }
+  /* A measured line and a line converted from a shorter window are two independent
+     measurements, so they are drawn as such: the derived one is dashed and muted. */
+  .chart .line { fill: none; stroke: var(--measured); stroke-width: 1.5;
+                 stroke-linejoin: round; }
+  .chart .line.derived { stroke: var(--ink-soft); stroke-dasharray: 4 3; stroke-width: 1.2; }
+  .chart .dot { fill: var(--measured); }
+  .chart .dot.derived { fill: var(--ink-soft); }
+  /* An open window is still accumulating: a step into it is convergence, not a change. */
+  .chart .dot.open { fill: var(--paper); stroke: var(--measured); stroke-width: 1.5; }
+  .chart .dot.open.derived { stroke: var(--ink-soft); }
+  .chart .series-label { font-size: 9.5px; fill: var(--ink-soft); }
+  .chart .empty { font-size: .8rem; color: var(--ink-soft); margin: 0; }
+
   /* ── divergence ──────────────────────────────────────────────────────── */
   .diverge { border: 1px solid var(--rule); border-left: 3px solid var(--alert);
              border-radius: 3px; padding: .9rem 1.1rem; margin-bottom: .6rem; background: var(--panel); }
@@ -166,6 +187,13 @@
   <p class="note" id="axis-note">Short windows are converted to weekly terms using the ratio
     measured from their own quota movement, so every series sits on one axis.</p>
   <div class="plot" id="plot"></div>
+
+  <h2>Value over time</h2>
+  <p class="note">One point per reset window, placed where its evidence ends. A step between
+    settled points is a change in what the entitlement delivered — which is how a provider
+    quietly moving an allowance becomes visible, and datable. The open window is drawn hollow:
+    it is still accumulating, so movement there is convergence, not change.</p>
+  <div id="series"></div>
 
   <h2>Independent measurements</h2>
   <p class="note">Two windows of one account, or two accounts on one plan, measure the same
@@ -310,6 +338,127 @@ function renderPlot(rows, ratios) {
   host.append(legend);
 }
 
+/* ── value over time ───────────────────────────────────────────────────────
+   A weekly value measured directly and one converted from five-hour evidence are two
+   independent measurements that share provider, window and timestamp. Keying without
+   source_window would draw a single line zigzagging between them, which reads as violent
+   instability in a plan that is in fact steady. */
+const SERIES_KEY = row =>
+  [row.provider, row.account_id || "", row.window, row.source_window].join("|");
+
+const svgEl = (tag, attrs) => {
+  const n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  return n;
+};
+
+const shortDate = ms => new Date(ms).toLocaleString(undefined,
+  { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+function renderChart(host, points, { title, note }) {
+  const box = el("div", "chart");
+  box.append(el("h3", null, title));
+  box.append(el("p", null, note));
+
+  if (points.length < 1) {
+    box.append(el("p", "empty",
+      "No settled window yet. A point appears once a window has passed its reset with "
+      + "enough quota movement behind it to say anything."));
+    host.append(box);
+    return;
+  }
+
+  const groups = new Map();
+  for (const row of points) {
+    const key = SERIES_KEY(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ ...row, t: Date.parse(row.at) });
+  }
+  for (const rows of groups.values()) rows.sort((a, b) => a.t - b.t);
+
+  const W = 720, H = 240, PAD = { l: 46, r: 92, t: 10, b: 26 };
+  const times = points.map(r => Date.parse(r.at));
+  const t0 = Math.min(...times), t1 = Math.max(...times);
+  const max = niceMax(Math.max(...points.map(r => r.estimate_usd)));
+  const x = t => PAD.l + (t1 === t0 ? 0.5 : (t - t0) / (t1 - t0)) * (W - PAD.l - PAD.r);
+  const y = v => H - PAD.b - (v / max) * (H - PAD.t - PAD.b);
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
+    "aria-label": title + " over time" });
+
+  for (let i = 0; i <= 4; i++) {
+    const v = (max / 4) * i;
+    svg.append(svgEl("line",
+      { class: "gridline", x1: PAD.l, x2: W - PAD.r, y1: y(v), y2: y(v) }));
+    const t = svgEl("text", { class: "tick mono", x: PAD.l - 6, y: y(v) + 3,
+      "text-anchor": "end" });
+    t.textContent = i === 0 ? "$0" : money(v);
+    svg.append(t);
+  }
+  for (const [at, anchor] of [[t0, "start"], [t1, "end"]]) {
+    const t = svgEl("text", { class: "tick mono", x: x(at), y: H - PAD.b + 14,
+      "text-anchor": t0 === t1 ? "middle" : anchor });
+    t.textContent = shortDate(at);
+    svg.append(t);
+  }
+
+  for (const rows of groups.values()) {
+    const derived = rows[0].source_window !== rows[0].window;
+    const cls = "line" + (derived ? " derived" : "");
+    if (rows.length > 1) {
+      svg.append(svgEl("path", { class: cls,
+        d: rows.map((r, i) => (i ? "L" : "M") + x(r.t) + " " + y(r.estimate_usd)).join(" ") }));
+    }
+    for (const r of rows) {
+      const dot = svgEl("circle", {
+        class: "dot" + (derived ? " derived" : "") + (r.settled ? "" : " open"),
+        cx: x(r.t), cy: y(r.estimate_usd), r: 3.5 });
+      const tip = svgEl("title");
+      tip.textContent =
+        `${r.provider} ${r.window}${derived ? " (from " + r.source_window + ")" : ""}\n`
+        + `${money(r.estimate_usd)} · ${pct(r.covered_quota_percent)} quota measured\n`
+        + `${shortDate(r.t)}${r.settled ? "" : " · window still open"}`;
+      dot.append(tip);
+      svg.append(dot);
+    }
+    const last = rows[rows.length - 1];
+    const label = svgEl("text", { class: "series-label mono",
+      x: x(last.t) + 8, y: y(last.estimate_usd) + 3 });
+    label.textContent = last.provider
+      + (last.account_id ? " " + String(last.account_id).slice(0, 4) : "")
+      + (derived ? " ← " + last.source_window : "");
+    svg.append(label);
+  }
+
+  box.append(svg);
+  host.append(box);
+}
+
+function renderSeries(series) {
+  const host = document.getElementById("series");
+  host.textContent = "";
+  const settled = (series.settled || []).filter(r => r.estimate_usd > 0);
+  const ratio = (series.ratios || [])[0];
+
+  renderChart(host, settled.filter(r => r.window === "weekly"), {
+    title: "Weekly entitlement",
+    note: "What a full week of the plan was worth, at public API prices. Dashed lines are "
+      + "weekly values implied by five-hour evidence — an independent measurement of the "
+      + "same allowance, not a second plan.",
+  });
+  renderChart(host, settled.filter(r => r.window === "five_hour"), {
+    title: "Five-hour entitlement",
+    note: "What a full short window was worth. This is the burst limit: the weekly figure "
+      + "bounds the total, this bounds how fast it can be spent"
+      + (ratio ? ". Measured here: " + (1 / ratio.ratio).toFixed(2) + " full five-hour "
+          + "windows fit in a weekly allowance, so only about "
+          + Math.round((1 / ratio.ratio) * 5 / 168 * 100) + "% of a week can be run at the "
+          + "burst rate before the weekly runs out." : ".")
+      + " A provider with no five-hour meter has no line here: a weekly rate is not evidence "
+      + "of a short-window cap.",
+  });
+}
+
 function renderDivergences(rows) {
   const host = document.getElementById("divergences");
   host.textContent = "";
@@ -375,11 +524,13 @@ function ago(iso) {
 async function refresh() {
   const footer = document.getElementById("footer");
   try {
-    const [current, history, models, health] = await Promise.all([
-      load("/api/current"), load("/api/history"), load("/api/models"), load("/api/health"),
+    const [current, history, models, series, health] = await Promise.all([
+      load("/api/current"), load("/api/history"), load("/api/models"),
+      load("/api/series"), load("/api/health"),
     ]);
 
     renderPlot(current.current || [], current.window_ratios || []);
+    renderSeries(series);
     renderDivergences(current.divergences || []);
     renderHistory((history.windows || []).slice().sort((a, b) =>
       String(b.reset_key).localeCompare(String(a.reset_key))));
@@ -404,6 +555,9 @@ async function refresh() {
       + " · " + (health.entitlement_rows ?? 0).toLocaleString() + " quota readings"
       + " · " + (health.usage_rows ?? 0).toLocaleString() + " usage rows"
       + " · schema v" + health.schema_version
+      // Named so a step in a line can be attributed to the provider or to us. Two values
+      // carrying different versions were not produced by the same estimator.
+      + (series.estimator_version ? " · estimator " + series.estimator_version : "")
       + (health.rejected ? " · " + health.rejected + " rejected" : "");
   } catch (error) {
     // Never let a failed refresh leave a stale number looking current.
