@@ -78,6 +78,10 @@ UNVERSIONED_CONSTANTS: tuple[tuple[Any, str], ...] = (
 # Windows a settled series is emitted for, longest first.
 TARGET_WINDOWS = ("weekly", "five_hour")
 
+# A policy marker is versioned with the estimator so replay data cannot make a policy
+# change look like a provider change when the numeric thresholds stay the same.
+ESTIMATOR_POLICY = "peer-reset-reference-v1"
+
 # Replaying every observation is quadratic in pairs and cubic overall. The shape of a
 # convergence curve survives sampling; its cost does not.
 MAX_REPLAY_SAMPLES = 150
@@ -100,7 +104,10 @@ def estimator_version() -> str:
     has. Two points carrying different versions are not comparable, and a step between
     them says nothing about the provider.
     """
-    material = repr([(name, getattr(module, name)) for module, name in VERSIONED_CONSTANTS])
+    material = repr([
+        ("policy", ESTIMATOR_POLICY),
+        *[(name, getattr(module, name)) for module, name in VERSIONED_CONSTANTS],
+    ])
     return sha256(material.encode()).hexdigest()[:12]
 
 

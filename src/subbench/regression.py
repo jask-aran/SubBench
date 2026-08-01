@@ -156,10 +156,9 @@ UNOBSERVED_QUOTA_POINTS = 5.0
 # running far below the window's own rate is the same defect in weaker form: local spend
 # divided by local-plus-elsewhere quota, which biases the estimate down.
 #
-# The reference rate is derived from the window's surviving intervals, so the test is
-# self-calibrating and needs no assumption about what a plan is worth. It is applied in a
-# single refinement pass -- iterating to convergence would let the estimate select the
-# evidence that supports it.
+# The reference rate comes from other reset windows in the same provider/account/length
+# series, so a target cannot define the rate that decides whether its own usage is missing.
+# A peer is optional: without one, only the absolute floor below applies.
 UNOBSERVED_RATE_FRACTION = 0.25
 UNOBSERVED_RATE_MIN_QUOTA = 5.0
 
@@ -201,36 +200,45 @@ def _unobserved_intervals(
     rows: list[Mapping[str, Any]], *, min_value_per_quota_point: float,
     reference_rate: float | None = None,
 ) -> tuple[list[int], float, float]:
-    """Prefix counts of adjacent intervals whose spend was never recorded locally.
+    """Prefix counts of intervals whose spend was never recorded locally.
 
-    Any pair spanning one of these inherits its missing value, however far apart its own
-    endpoints are, so the whole pair has to go -- not just pairs that sit entirely inside.
+    A flagged stretch can contain several short collection intervals. The 30-minute guard
+    applies to the span used to detect it, not to every meter update inside it. Each
+    component interval is marked so any pair crossing the stretch inherits its missing
+    value, however far apart its own endpoints are.
 
     Also totals the quota that advanced, and how much of it advanced unmeasured, so a
     report can say how much of the window the estimate actually rests on.
     """
+    flagged = [False] * max(len(rows) - 1, 0)
+    for start, left in enumerate(rows):
+        for end, right in enumerate(rows[start + 1 :], start=start + 1):
+            quota_delta = float(right["used_percent"]) - float(left["used_percent"])
+            value_delta = float(right["cost_usd"]) - float(left["cost_usd"])
+            if _interval_minutes(left, right) < UNOBSERVED_MIN_MINUTES:
+                continue
+            unobserved = (
+                quota_delta >= UNOBSERVED_QUOTA_POINTS
+                and value_delta < quota_delta * min_value_per_quota_point
+            )
+            if not unobserved and reference_rate and quota_delta >= UNOBSERVED_RATE_MIN_QUOTA:
+                # Proportion, not presence: spend that moved but nowhere near far enough for
+                # the quota it accompanied means most of that quota was consumed elsewhere.
+                rate = value_delta / (quota_delta / 100.0)
+                unobserved = rate < reference_rate * UNOBSERVED_RATE_FRACTION
+            if unobserved:
+                flagged[start:end] = [True] * (end - start)
+
     counts = [0]
     advanced = 0.0
     unmeasured = 0.0
-    for left, right in zip(rows, rows[1:]):
+    for index, (left, right) in enumerate(zip(rows, rows[1:])):
         quota_delta = float(right["used_percent"]) - float(left["used_percent"])
-        value_delta = float(right["cost_usd"]) - float(left["cost_usd"])
         if quota_delta > 0:
             advanced += quota_delta
-        long_enough = _interval_minutes(left, right) >= UNOBSERVED_MIN_MINUTES
-        unobserved = (
-            long_enough
-            and quota_delta >= UNOBSERVED_QUOTA_POINTS
-            and value_delta < quota_delta * min_value_per_quota_point
-        )
-        if not unobserved and long_enough and reference_rate and quota_delta >= UNOBSERVED_RATE_MIN_QUOTA:
-            # Proportion, not presence: spend that moved but nowhere near far enough for
-            # the quota it accompanied means most of that quota was consumed elsewhere.
-            rate = value_delta / (quota_delta / 100.0)
-            unobserved = rate < reference_rate * UNOBSERVED_RATE_FRACTION
-        if unobserved:
+        if flagged[index] and quota_delta > 0:
             unmeasured += quota_delta
-        counts.append(counts[-1] + (1 if unobserved else 0))
+        counts.append(counts[-1] + (1 if flagged[index] else 0))
     return counts, advanced, unmeasured
 
 
@@ -262,6 +270,41 @@ def _valid_pairs(
     return pairs
 
 
+def _peer_reference_rates(
+    groups: list[tuple[tuple[str, str | None, str, str], list[dict[str, Any]]]],
+    *,
+    min_quota_delta: float,
+) -> dict[tuple[str, str | None, str, str], float | None]:
+    """Return one reference rate per window, using only other reset windows.
+
+    A target window must not define the rate that decides whether its own evidence is
+    missing. Otherwise a single under-recorded window can make its low rate look normal.
+    Peer pairs use the absolute floor only; relative filtering needs a trusted peer and is
+    applied later to the target window.
+    """
+    by_series: dict[
+        tuple[str, str | None, str],
+        list[tuple[tuple[str, str | None, str, str], list[dict[str, Any]]]],
+    ] = {}
+    for key, rows in groups:
+        by_series.setdefault(key[:3], []).append((key, rows))
+
+    references: dict[tuple[str, str | None, str, str], float | None] = {}
+    for key, _ in groups:
+        slopes: list[float] = []
+        weights: list[float] = []
+        for peer_key, peer_rows in by_series[key[:3]]:
+            if peer_key == key:
+                continue
+            for _, _, quota_delta, _, slope in _valid_pairs(
+                peer_rows, min_quota_delta=min_quota_delta
+            ):
+                slopes.append(slope)
+                weights.append(quota_delta)
+        references[key] = weighted_quantile(slopes, weights, 0.5) if slopes else None
+    return references
+
+
 def _ordered_groups(points: Iterable[Mapping[str, Any]]):
     for key, rows in _group_points(points).items():
         yield key, sorted(rows, key=lambda row: str(row["observed_at"]))
@@ -271,8 +314,14 @@ def pairwise_slopes(
     points: Iterable[Mapping[str, Any]], *, min_quota_delta: float = MIN_QUOTA_DELTA_PERCENT
 ) -> list[SlopeContribution]:
     contributions: list[SlopeContribution] = []
-    for (provider, account_id, window, reset_key), rows in _ordered_groups(points):
-        for left, right, _, _, slope in _valid_pairs(rows, min_quota_delta=min_quota_delta):
+    groups = list(_ordered_groups(points))
+    references = _peer_reference_rates(groups, min_quota_delta=min_quota_delta)
+    for (provider, account_id, window, reset_key), rows in groups:
+        for left, right, _, _, slope in _valid_pairs(
+            rows,
+            min_quota_delta=min_quota_delta,
+            reference_rate=references[(provider, account_id, window, reset_key)],
+        ):
             contributions.append(SlopeContribution(
                 provider=provider,
                 window=window,
@@ -293,9 +342,26 @@ def estimate_progress(
     points: Iterable[Mapping[str, Any]], *, min_quota_delta: float = MIN_QUOTA_DELTA_PERCENT
 ) -> list[EstimateProgress]:
     progress: list[EstimateProgress] = []
-    for (provider, account_id, window, reset_key), rows in _ordered_groups(points):
+    groups = list(_ordered_groups(points))
+    for (provider, account_id, window, reset_key), rows in groups:
         for index in range(1, len(rows)):
-            pairs = _valid_pairs(rows[: index + 1], min_quota_delta=min_quota_delta)
+            current_at = str(rows[index]["observed_at"])
+            visible_peers: list[tuple[tuple[str, str | None, str, str], list[dict[str, Any]]]] = []
+            for peer_key, peer_rows in groups:
+                if peer_key[:3] != (provider, account_id, window) or peer_key[3] == reset_key:
+                    continue
+                visible = [row for row in peer_rows if str(row["observed_at"]) <= current_at]
+                if visible:
+                    visible_peers.append((peer_key, visible))
+            reference = _peer_reference_rates(
+                [((provider, account_id, window, reset_key), rows[: index + 1]), *visible_peers],
+                min_quota_delta=min_quota_delta,
+            )[(provider, account_id, window, reset_key)]
+            pairs = _valid_pairs(
+                rows[: index + 1],
+                min_quota_delta=min_quota_delta,
+                reference_rate=reference,
+            )
             # Only replot once the newest observation actually contributed a pair.
             if not pairs or pairs[-1][1] is not rows[index]:
                 continue
@@ -347,16 +413,17 @@ def robust_estimates(
     marginal_span: float = MARGINAL_QUOTA_SPAN_PERCENT,
 ) -> list[RegressionEstimate]:
     estimates: list[RegressionEstimate] = []
-    for (provider, account_id, window, reset_key), ordered in _ordered_groups(points):
-        pairs = _valid_pairs(ordered, min_quota_delta=min_quota_delta)
+    groups = list(_ordered_groups(points))
+    references = _peer_reference_rates(groups, min_quota_delta=min_quota_delta)
+    for (provider, account_id, window, reset_key), ordered in groups:
+        reference = references[(provider, account_id, window, reset_key)]
+        pairs = _valid_pairs(
+            ordered,
+            min_quota_delta=min_quota_delta,
+            reference_rate=reference,
+        )
         if not pairs:
             continue
-        # Second pass: re-test intervals against the rate the first pass implies, so a
-        # stretch that was only partly off-machine is excluded too.
-        reference = weighted_quantile([p[4] for p in pairs], [p[2] for p in pairs], 0.5)
-        refined = _valid_pairs(ordered, min_quota_delta=min_quota_delta, reference_rate=reference)
-        if refined:
-            pairs = refined
         slopes = [pair[4] for pair in pairs]
         weights = [pair[2] for pair in pairs]
         marginal, marginal_lower, marginal_upper, marginal_count, marginal_observed = (

@@ -3,7 +3,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from subbench import crosssolve, regression
+from subbench import timeline as timeline_module
 from subbench.timeline import (
+    ESTIMATOR_POLICY,
     TARGET_WINDOWS,
     UNVERSIONED_CONSTANTS,
     VERSIONED_CONSTANTS,
@@ -127,6 +129,12 @@ def test_estimator_version_covers_the_cross_solve_threshold(monkeypatch):
     """The weekly series is partly converted short windows, so this constant moves it."""
     before = estimator_version()
     monkeypatch.setattr(crosssolve, "MIN_RATIO_QUOTA_PERCENT", 42.0)
+    assert estimator_version() != before
+
+
+def test_estimator_version_covers_the_policy_marker(monkeypatch):
+    before = estimator_version()
+    monkeypatch.setattr(timeline_module, "ESTIMATOR_POLICY", ESTIMATOR_POLICY + "-changed")
     assert estimator_version() != before
 
 
