@@ -553,7 +553,6 @@ async function refresh() {
       + "computed " + ago(current.generated_at)
       + " · ingested " + ago(health.last_ingest_at)
       + " · " + (health.entitlement_rows ?? 0).toLocaleString() + " quota readings"
-      + " · " + (health.usage_rows ?? 0).toLocaleString() + " usage rows"
       + " · schema v" + health.schema_version
       // Named so a step in a line can be attributed to the provider or to us. Two values
       // carrying different versions were not produced by the same estimator.

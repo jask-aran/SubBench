@@ -274,6 +274,19 @@ subbench push
 `subbench watch` pushes every 30 minutes on its own clock when these two variables exist.
 It sends nothing when there is no new evidence.
 
+Normal pushes are measurement-only. They send quota snapshots and the derived reports;
+raw usage rows stay in the local SQLite database. To send normalised usage rows for a
+deliberate multi-machine aggregation test, set the exact opt-in before pushing:
+
+```bash
+export SUBBENCH_PUSH_RAW_USAGE=1
+subbench push
+```
+
+The usage cursor, whole-import batching, retry behavior, and server idempotency apply only
+to this opt-in path. A normal push does not advance the raw-usage cursor. The local raw
+imports and rows are not deleted.
+
 The push runs separately from the collection. Therefore a slow server cannot delay a quota
 reading, and a failed push cannot fail a collection cycle. The local database stays the
 source of truth. The cursor advances only after the server accepts the batch. Rejected
@@ -281,10 +294,9 @@ evidence is thus sent again after you correct the cause.
 
 Each batch contains three parts:
 
-1. **The new evidence** — the quota readings and usage rows since the last
-   acknowledgement. SubBench sends complete imports, because the rows of one import share
-   a timestamp. SubBench does not send the raw ccusage payloads: they are most of the
-   database by size, and the estimator never reads them.
+1. **The new measurements** — quota readings since the last acknowledgement. Normal pushes
+   contain no raw usage rows. The opt-in path sends complete imports, because the rows of
+   one import share a timestamp. SubBench never sends the raw ccusage payloads.
 2. **The computed reports** — `current`, `history`, `models`, `weights` and `series`.
 3. **The cursor** that the server returns to acknowledge the batch.
 
@@ -299,8 +311,9 @@ reason for the server. The Worker rejects a batch with a quota outside 0-100, wi
 negative token count, with a cost that is not a decimal, or with a schema version that it
 does not know.
 
-The raw evidence travels with the reports. To move the derivation to the server later
-therefore needs added computation, and not a backfill of history.
+Raw usage remains available locally for future aggregation. The server stores the quota
+measurements and reports by default; enabling the opt-in usage path is a separate
+operational decision and does not delete existing local or D1 rows.
 
 ---
 
@@ -317,7 +330,7 @@ asset binding.
 | `/api/models` | GET | The token share of each model, for each window. |
 | `/api/weights` | GET | The per-model quota weights, if a fit exists. |
 | `/api/series` | GET | The settled series, the replay series and the ratios. |
-| `/api/health` | GET | The row counts, the last ingest time and the schema version. |
+| `/api/health` | GET | The quota row count, last ingest time and schema version. |
 | `/` | GET | The static page. |
 
 Each report route returns the newest report of that kind. The page reads all of the routes

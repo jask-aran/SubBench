@@ -250,7 +250,6 @@ async function report(env, kind) {
 async function health(env) {
   const row = await env.DB.prepare(`
     SELECT (SELECT COUNT(*) FROM entitlement_snapshots) AS entitlement_rows,
-           (SELECT COUNT(*) FROM usage_rows) AS usage_rows,
            (SELECT COUNT(*) FROM agents) AS agents,
            (SELECT MAX(last_seen) FROM agents) AS last_ingest_at,
            (SELECT MAX(generated_at) FROM reports) AS last_report_at,

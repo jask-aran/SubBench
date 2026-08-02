@@ -5,12 +5,14 @@ sends evidence recorded since the server last acknowledged, and advances the cur
 on success, so a lost acknowledgement costs a duplicate send rather than a gap. Collection
 never waits on the network.
 
-Raw ccusage payloads are not sent. They are most of the local database by size and the
-estimator never reads them; the server receives the normalised rows it actually consumes.
+Raw usage rows stay local by default. The server receives quota measurements and the
+derived reports; normalised usage rows are available only with an explicit opt-in for
+future multi-machine aggregation.
 """
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import urllib.error
 import urllib.request
@@ -26,6 +28,7 @@ USER_AGENT = "subbench/0.2.0 (+https://github.com/jask-aran/SubBench)"
 MAX_USAGE_ROWS_PER_BATCH = 5000
 MAX_ENTITLEMENT_ROWS_PER_BATCH = 5000
 DEFAULT_TIMEOUT_SECONDS = 30.0
+RAW_USAGE_ENV = "SUBBENCH_PUSH_RAW_USAGE"
 
 
 @dataclass(frozen=True)
@@ -157,9 +160,9 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
 
     The server stores these verbatim. Deriving them there would mean a second estimator
     implementation, and every subtle defect this project has hit lived in that code --
-    two copies would disagree with no way to tell which was right. Raw evidence is pushed
-    alongside, so moving derivation server-side later needs computation added, not
-    history backfilled.
+    two copies would disagree with no way to tell which was right. Raw usage remains local
+    by default. Moving derivation server-side later needs the explicit raw-usage path or a
+    deliberate backfill.
     """
     from .crosssolve import account_plans, combined_estimates, divergences
     from .regression import robust_estimates
@@ -275,7 +278,9 @@ def push_once(
     """Send one batch. Returns whether the local backlog is now drained."""
     state = push_state(db, url)
     entitlements = pending_entitlements(db, state.entitlement_cursor, MAX_ENTITLEMENT_ROWS_PER_BATCH)
-    usage = pending_usage(db, state.usage_cursor, MAX_USAGE_ROWS_PER_BATCH)
+    usage = []
+    if os.environ.get(RAW_USAGE_ENV) == "1":
+        usage = pending_usage(db, state.usage_cursor, MAX_USAGE_ROWS_PER_BATCH)
     if not entitlements and not usage:
         return PushResult(0, 0, True, "nothing to push")
 

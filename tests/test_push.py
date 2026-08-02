@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from subbench import push as push_module
 from subbench.push import (
     MAX_USAGE_ROWS_PER_BATCH,
     push_all,
@@ -84,9 +85,24 @@ def test_agent_id_is_stable_across_calls(tmp_path: Path) -> None:
     assert push_state(db, URL).agent_id == first.agent_id
 
 
-def test_push_sends_everything_then_reports_drained(tmp_path: Path) -> None:
+def test_default_push_sends_measurements_and_reports_without_raw_usage(tmp_path: Path) -> None:
     db = connect(tmp_path / "s.sqlite3")
     _seed(db)
+    sender = Recorder()
+    result = push_once(db, url=URL, token="t", sender=sender)
+    assert (result.sent_entitlements, result.sent_usage) == (3, 0)
+    assert result.drained
+    payload = sender.payloads[0]
+    assert payload["schema_version"] == 1
+    assert payload["agent_id"] == push_state(db, URL).agent_id
+    assert payload["usage"] == []
+    assert set(payload["reports"]) == {"current", "history", "models", "weights", "series"}
+
+
+def test_raw_usage_requires_explicit_opt_in(tmp_path: Path, monkeypatch) -> None:
+    db = connect(tmp_path / "s.sqlite3")
+    _seed(db)
+    monkeypatch.setenv("SUBBENCH_PUSH_RAW_USAGE", "1")
     sender = Recorder()
     result = push_once(db, url=URL, token="t", sender=sender)
     assert (result.sent_entitlements, result.sent_usage) == (3, 3)
@@ -96,6 +112,21 @@ def test_push_sends_everything_then_reports_drained(tmp_path: Path) -> None:
     assert payload["agent_id"] == push_state(db, URL).agent_id
     # Raw payloads are deliberately not sent.
     assert "raw_json" not in payload["usage"][0]
+
+
+def test_normal_push_leaves_existing_raw_cursor_unchanged(tmp_path: Path, monkeypatch) -> None:
+    db = connect(tmp_path / "s.sqlite3")
+    _seed(db, count=1)
+    monkeypatch.setenv("SUBBENCH_PUSH_RAW_USAGE", "1")
+    sender = Recorder()
+    push_once(db, url=URL, token="t", sender=sender)
+    before = push_state(db, URL).usage_cursor
+
+    monkeypatch.delenv("SUBBENCH_PUSH_RAW_USAGE")
+    _seed_at(db, "2026-07-31T10:00:00+00:00", account_id="acct-B")
+    push_once(db, url=URL, token="t", sender=sender)
+
+    assert push_state(db, URL).usage_cursor == before
 
 
 def test_second_push_sends_nothing_new(tmp_path: Path) -> None:
@@ -108,9 +139,10 @@ def test_second_push_sends_nothing_new(tmp_path: Path) -> None:
     assert len(sender.payloads) == 1
 
 
-def test_only_new_evidence_is_sent_after_a_cursor_advance(tmp_path: Path) -> None:
+def test_only_new_evidence_is_sent_after_a_cursor_advance(tmp_path: Path, monkeypatch) -> None:
     db = connect(tmp_path / "s.sqlite3")
     _seed(db, count=2)
+    monkeypatch.setenv("SUBBENCH_PUSH_RAW_USAGE", "1")
     sender = Recorder()
     push_once(db, url=URL, token="t", sender=sender)
     _seed_at(db, "2026-07-31T10:00:00+00:00", account_id="acct-B")
@@ -145,9 +177,10 @@ def test_a_batch_never_splits_an_import(tmp_path: Path) -> None:
     assert len(pending_usage(db, None, limit=5)) == 30
 
 
-def test_failed_push_leaves_the_cursor_untouched(tmp_path: Path) -> None:
+def test_failed_opt_in_push_leaves_the_cursor_untouched(tmp_path: Path, monkeypatch) -> None:
     db = connect(tmp_path / "s.sqlite3")
     _seed(db)
+    monkeypatch.setenv("SUBBENCH_PUSH_RAW_USAGE", "1")
     failing = Recorder(fail=True)
     result = push_once(db, url=URL, token="t", sender=failing)
     assert result.sent_entitlements == 0
@@ -167,13 +200,29 @@ def test_failure_is_recorded_for_diagnosis(tmp_path: Path) -> None:
     assert row["last_error"]
 
 
-def test_push_all_drains_in_batches(tmp_path: Path) -> None:
+def test_push_all_drains_in_batches(tmp_path: Path, monkeypatch) -> None:
     db = connect(tmp_path / "s.sqlite3")
     _seed(db, count=4)
+    monkeypatch.setenv("SUBBENCH_PUSH_RAW_USAGE", "1")
     sender = Recorder()
     result = push_all(db, url=URL, token="t", sender=sender)
     assert result.drained
     assert result.sent_usage == 4
+
+
+def test_opt_in_push_all_preserves_usage_batching(tmp_path: Path, monkeypatch) -> None:
+    db = connect(tmp_path / "s.sqlite3")
+    _seed(db, count=5)
+    monkeypatch.setenv("SUBBENCH_PUSH_RAW_USAGE", "1")
+    monkeypatch.setattr(push_module, "MAX_USAGE_ROWS_PER_BATCH", 2)
+    sender = Recorder()
+
+    result = push_all(db, url=URL, token="t", sender=sender)
+
+    assert result.drained
+    assert result.sent_usage == 5
+    assert [len(payload["usage"]) for payload in sender.payloads] == [2, 2, 1]
+    assert push_state(db, URL).usage_cursor == "2026-07-30T00:04:00+00:00"
 
 
 def test_nothing_to_push_is_not_an_error(tmp_path: Path) -> None:
@@ -183,11 +232,12 @@ def test_nothing_to_push_is_not_an_error(tmp_path: Path) -> None:
     assert result.message == "nothing to push"
 
 
-def test_usage_is_ordered_by_confirmation_not_import_time(tmp_path: Path) -> None:
+def test_opt_in_usage_is_ordered_by_confirmation_not_import_time(tmp_path: Path, monkeypatch) -> None:
     # A deduplicated ccusage payload stops advancing imported_at while last_seen_at keeps
     # moving. Cursoring on imported_at would strand the re-confirmation.
     db = connect(tmp_path / "s.sqlite3")
     _seed(db, count=1)
+    monkeypatch.setenv("SUBBENCH_PUSH_RAW_USAGE", "1")
     sender = Recorder()
     push_once(db, url=URL, token="t", sender=sender)
     db.execute("UPDATE imports SET last_seen_at = '2026-07-30T09:00:00+00:00'")

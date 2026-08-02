@@ -150,6 +150,12 @@ current cost reading looks arbitrarily old.
 `raw_json` is deliberately not sent. It is 3.37 MB of the local database's 5.96 MB and the
 estimator never reads it.
 
+Normal pushes are measurement-only: they send entitlement snapshots and the derived
+reports, while raw usage rows stay in the local SQLite database. Set
+`SUBBENCH_PUSH_RAW_USAGE=1` to opt into sending normalised usage rows for future
+multi-machine aggregation. The existing D1 raw rows remain in place; the 90-day retention
+job is unchanged.
+
 ### Growth and retention
 
 Measured over roughly two days of heavy use: 169 imports, 16,421 usage rows, 192
@@ -158,10 +164,11 @@ snapshots per day, or roughly 3 million usage rows a year for one agent.
 
 Measured again after building it, by pushing the real database through ingest into the D1
 schema: 253 entitlement rows and 21,724 usage rows occupy **9.46 MB**, against about
-2.6 MB of normalised rows locally. The difference is denormalisation — `agent_id`,
-`account_key`, `model_key`, `imported_at` and `last_seen_at` are stored per row, where
-locally the import metadata lives once per import. That is roughly 3.6x, or about
-1.7 GB/year for one agent against D1's 10 GB limit.
+2.6 MB of normalised rows locally. This is the raw-usage opt-in path; normal pushes do not
+add these rows. The difference is denormalisation — `agent_id`, `account_key`, `model_key`,
+`imported_at` and `last_seen_at` are stored per row, where locally the import metadata
+lives once per import. That is roughly 3.6x, or about 1.7 GB/year for one agent against
+D1's 10 GB limit.
 
 Retention is therefore load-bearing rather than tidiness, and the 90-day window below
 holds one agent at roughly 425 MB. A second agent doubles it. If several agents are ever
@@ -180,11 +187,14 @@ window from the last quarter. Implemented as a Worker Cron Trigger, not inline i
 `subbench push` is incremental and idempotent.
 
 - **Cursor.** The agent stores the highest `observed_at` and `last_seen_at` the server has
-  acknowledged, in a local `push_state` table. Each push sends rows strictly newer than
-  the cursor. The cursor advances only on a `200`.
+  acknowledged, in a local `push_state` table. Normal pushes send entitlement snapshots
+  strictly newer than the entitlement cursor and leave the raw-usage cursor unchanged.
+  The raw-usage cursor is used only when `SUBBENCH_PUSH_RAW_USAGE=1`. Cursors advance only
+  on a `200`.
 - **Idempotency.** The server upserts by primary key. Re-pushing an overlapping range is
   harmless, which means a lost acknowledgement costs a duplicate send, not a gap.
-- **Batching.** At most 5,000 usage rows per request; the agent loops until drained.
+- **Batching.** The opt-in raw-usage path sends at most 5,000 rows per request and loops
+  until drained. It keeps each import whole.
 - **Identity.** `agent_id` is a UUID generated on first push and stored locally. It is not
   derived from anything identifying.
 - **Interval.** Default hourly, from the watcher loop. `--once` for manual pushes.
@@ -196,6 +206,8 @@ Configuration mirrors the existing environment-variable style:
 ```bash
 SUBBENCH_PUSH_URL=https://subbench.example.com/ingest
 SUBBENCH_PUSH_TOKEN=...
+# Optional: enable raw usage upload.
+SUBBENCH_PUSH_RAW_USAGE=1
 ```
 
 If `SUBBENCH_PUSH_URL` is unset, `subbench push` is a no-op and `subbench watch` never
@@ -210,12 +222,12 @@ attempts it.
   "entitlements": [ { "observed_at": "…", "provider": "codex", "window": "weekly",
                       "used_percent": 84.0, "resets_at": "…", "duration_minutes": 10080,
                       "account_id": "…", "source": "codex-app-server" } ],
-  "usage": [ { "import_key": "…", "imported_at": "…", "last_seen_at": "…",
-               "provider": "codex", "account_id": "…", "period_start": "2026-07-30",
-               "model": "gpt-5.6-terra", "input_tokens": 0, "…": 0,
-               "reported_cost_usd": "1.23", "source_path": "$.daily[57]" } ]
+  "usage": []
 }
 ```
+
+With `SUBBENCH_PUSH_RAW_USAGE=1`, `usage` contains the normalised rows shown in the
+original protocol shape and retains the cursor, batching, retry, and idempotency behavior.
 
 Response `200`: `{"accepted": {"entitlements": n, "usage": n}, "cursor": {...}}`.
 

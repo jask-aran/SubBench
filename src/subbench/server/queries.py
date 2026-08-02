@@ -89,7 +89,6 @@ ORDER BY n.provider, n.resets_at, total_tokens DESC
 
 HEALTH_SQL = """
 SELECT (SELECT COUNT(*) FROM entitlement_snapshots) AS entitlement_rows,
-       (SELECT COUNT(*) FROM usage_rows) AS usage_rows,
        (SELECT COUNT(*) FROM agents) AS agents,
        (SELECT MAX(last_seen) FROM agents) AS last_ingest_at,
        (SELECT COUNT(*) FROM ingest_log WHERE status >= 400) AS rejected
