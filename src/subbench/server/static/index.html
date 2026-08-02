@@ -68,6 +68,21 @@
        color: var(--ink-faint); margin: 3rem 0 .35rem; }
   .note { color: var(--ink-soft); font-size: .82rem; margin: 0 0 1.4rem; max-width: 46rem; }
 
+  /* ── provider section ─────────────────────────────────────────────────── */
+  .provider { margin-bottom: 3.2rem; }
+  .provider h2 { font-size: .9rem; letter-spacing: .06em; color: var(--ink-soft);
+                 margin: 0 0 1.1rem; padding-bottom: .5rem; border-bottom: 1px solid var(--rule); }
+  .provider h3, .account-block h4 { font-size: .78rem; font-weight: 600; color: var(--ink-soft);
+                 margin: 1.6rem 0 .5rem; letter-spacing: .03em; }
+  .provider .charts { margin-top: 1.6rem; }
+
+  /* two windows sit side by side, each on its own axis: a five-hour allowance is
+     a different quantity from a weekly one and must not share a scale */
+  .value-blocks { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+                  gap: 1.1rem; align-items: start; }
+  .value-block h3 { font-size: .66rem; text-transform: uppercase; letter-spacing: .1em;
+                    color: var(--ink-faint); margin: 0 0 .9rem; }
+
   /* ── interval plot ───────────────────────────────────────────────────── */
   .plot { border: 1px solid var(--rule); border-radius: 3px; background: var(--panel);
           padding: 1.4rem 1.5rem 1rem; }
@@ -85,6 +100,11 @@
   .label { padding-right: 1rem; }
   .label b { display: block; font-weight: 600; font-size: .82rem; letter-spacing: -0.005em; }
   .label span { display: block; font-size: .7rem; color: var(--ink-faint); margin-top: .1rem; }
+  .tier { display: inline-block; font-size: .6rem; font-weight: 600; letter-spacing: .05em;
+          text-transform: uppercase; border: 1px solid var(--ink-faint); border-radius: 2px;
+          padding: .05rem .35rem; margin-top: .3rem; color: var(--ink-faint); }
+  .tier.confirmed { color: var(--measured); border-color: var(--measured); }
+  .tier.likely { color: var(--unmeasured); border-color: var(--unmeasured); }
   /* Coverage gets its own meter so it stays legible even when an estimate has no spread. */
   .cov { display: flex; align-items: center; gap: .4rem; margin-top: .3rem; }
   .cov-bar { flex: 0 0 3.4rem; height: 4px; border-radius: 2px; overflow: hidden;
@@ -149,16 +169,20 @@
   .chart .series-label { font-size: 9.5px; fill: var(--ink-soft); }
   .chart .empty { font-size: .8rem; color: var(--ink-soft); margin: 0; }
 
+  /* ── account breakdown ───────────────────────────────────────────────── */
+  .account-block { border: 1px solid var(--rule); border-radius: 3px; background: var(--panel);
+                   padding: 1.2rem 1.4rem 1rem; margin-top: 1.1rem; }
+  .account-block h4 { margin: 0 0 .9rem; font-size: .8rem; color: var(--ink); }
+
   /* ── divergence ──────────────────────────────────────────────────────── */
   .diverge { border: 1px solid var(--rule); border-left: 3px solid var(--alert);
              border-radius: 3px; padding: .9rem 1.1rem; margin-bottom: .6rem; background: var(--panel); }
   .diverge b { color: var(--alert); font-size: .82rem; }
   .diverge p { margin: .3rem 0 0; font-size: .84rem; color: var(--ink-soft); }
-  .agree { border: 1px solid var(--rule); border-radius: 3px; padding: .9rem 1.1rem;
-           background: var(--panel); font-size: .84rem; color: var(--ink-soft); }
 
   /* ── tables ──────────────────────────────────────────────────────────── */
-  .scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 3px; background: var(--panel); }
+  .scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 3px; background: var(--panel);
+            margin-bottom: 1.1rem; }
   table { width: 100%; border-collapse: collapse; font-size: .82rem; }
   th { text-align: left; font-weight: 600; color: var(--ink-faint); font-size: .68rem;
        text-transform: uppercase; letter-spacing: .07em; padding: .7rem .9rem; white-space: nowrap; }
@@ -183,26 +207,14 @@
     <div class="meta mono" id="meta"></div>
   </header>
 
-  <h2>Value per full weekly entitlement</h2>
-  <p class="note" id="axis-note">Short windows are converted to weekly terms using the ratio
-    measured from their own quota movement, so every series sits on one axis.</p>
-  <div class="plot" id="plot"></div>
+  <div id="providers"></div>
 
-  <h2>Value over time</h2>
-  <p class="note">One point per reset window, placed where its evidence ends. A step between
-    settled points is a change in what the entitlement delivered — which is how a provider
-    quietly moving an allowance becomes visible, and datable. The open window is drawn hollow:
-    it is still accumulating, so movement there is convergence, not change.</p>
-  <div id="series"></div>
-
-  <h2>Independent measurements</h2>
-  <p class="note">Two windows of one account, or two accounts on one plan, measure the same
-    thing. Disagreement means either an assumption here is wrong or something changed at the
-    provider.</p>
-  <div id="divergences"></div>
-
-  <h2>Reset windows</h2>
-  <div class="scroll"><table id="history"></table></div>
+  <h2>Windows per account</h2>
+  <p class="note">Every individual entitlement window of every account, newest first. These
+    are the raw material: each row is one measured window, and the estimate above is what
+    the settled windows jointly say. No chart here on purpose — with many windows, the noise
+    would drown the signal.</p>
+  <div id="windows"></div>
 
   <h2>Model mix</h2>
   <div class="scroll"><table id="models"></table></div>
@@ -211,11 +223,11 @@
 </main>
 
 <script>
-const TIERS = ["provisional", "likely", "confirmed"];
 const money = n => n == null ? "—" : "$" + Number(n).toFixed(Number(n) >= 100 ? 0 : 2);
 const pct   = n => n == null ? "—" : Math.round(Number(n)) + "%";
 const el = (tag, cls, text) => { const n = document.createElement(tag);
   if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+const shortId = id => id ? String(id).slice(0, 8) : "single account";
 
 async function load(path) {
   const r = await fetch(path);
@@ -223,26 +235,26 @@ async function load(path) {
   return r.json();
 }
 
-const account = row => row.account_scope === "plan" ? "all accounts"
-  : row.account_id ? String(row.account_id).slice(0, 8) : "single account";
+const WINDOW_ORDER = ["weekly", "five_hour"];
+const WINDOW_TITLES = { weekly: "Per week", five_hour: "Per five hours" };
+const WINDOW_HINTS = {
+  weekly: "What one full weekly allowance was worth, at public API prices.",
+  five_hour: "What one full five-hour allowance was worth — the burst limit.",
+};
+const scopeLabel = row => row.account_scope === "plan" ? "all accounts"
+  : row.account_id ? "account " + shortId(row.account_id) : "single account";
 
-/* Put every series on one weekly axis. A short window's estimate is multiplied by how many
-   of it fit in a weekly entitlement — a ratio measured from observed quota movement, never
-   assumed. Series with no measured ratio are shown in their own terms and marked. */
-function toWeekly(rows, ratios) {
-  const longest = new Map();          // provider → longest window seen
-  for (const r of rows) if (r.window === "weekly") longest.set(r.provider, true);
-  const byShort = new Map();
-  for (const r of ratios || []) byShort.set(r.provider + "|" + r.short_window, r);
-
-  return rows.map(row => {
-    const ratio = byShort.get(row.provider + "|" + row.window);
-    if (row.window === "weekly" || !ratio) {
-      return { ...row, scale: 1, basis: row.window === "weekly" ? null : "not converted" };
-    }
-    const k = 1 / ratio.ratio;
-    return { ...row, scale: k, basis: "×" + k.toFixed(1) + " from " + row.window };
-  });
+/* Every row already carries its own window: nothing is converted to a shared axis.
+   A five-hour allowance is a different quantity from a weekly one, so they get their
+   own plots and their own scales. */
+function providerList(current, settled, windows) {
+  const seen = new Set();
+  for (const r of current) seen.add(r.provider);
+  for (const s of settled) seen.add(s.provider);
+  for (const w of windows) seen.add(w.provider);
+  const order = { codex: 0, claude: 1 };
+  return [...seen].sort((a, b) =>
+    (order[a] ?? 9) - (order[b] ?? 9) || String(a).localeCompare(String(b)));
 }
 
 function niceMax(v) {
@@ -253,19 +265,15 @@ function niceMax(v) {
   return 10 * mag;
 }
 
-function renderPlot(rows, ratios) {
-  const host = document.getElementById("plot");
+function renderValueBlock(host, rows) {
   host.textContent = "";
-  const series = toWeekly(rows, ratios)
-    .filter(r => r.estimate_usd > 0)
-    .sort((a, b) => (b.estimate_usd * b.scale) - (a.estimate_usd * a.scale));
-
-  if (!series.length) {
+  const visible = rows.filter(r => r.estimate_usd > 0);
+  if (!visible.length) {
     host.append(el("p", "note", "No estimate yet. An estimate needs quota to move with recorded spend beside it."));
     return;
   }
 
-  const max = niceMax(Math.max(...series.map(r => (r.upper_usd ?? r.estimate_usd) * r.scale)));
+  const max = niceMax(Math.max(...visible.map(r => r.upper_usd ?? r.estimate_usd)));
   const x = v => Math.max(0, Math.min(100, (v / max) * 100));
 
   const axis = el("div", "axis mono");
@@ -277,11 +285,12 @@ function renderPlot(rows, ratios) {
   }
   host.append(axis);
 
-  for (const row of series) {
+  for (const row of visible) {
     const line = el("div", "row");
     const label = el("div", "label");
-    label.append(el("b", null, row.provider + " · " + (row.scale === 1 ? row.window : "weekly")));
-    label.append(el("span", null, account(row) + (row.basis ? " · " + row.basis : "")));
+    label.append(el("b", null, scopeLabel(row)));
+    label.append(el("span", null,
+      row.window_count + " windows · " + pct(row.coverage_percent) + " measured"));
 
     const cov = Math.max(0, Math.min(100, row.coverage_percent ?? 100));
     const meter = el("div", "cov");
@@ -291,14 +300,17 @@ function renderPlot(rows, ratios) {
     bar.append(fill);
     bar.title = pct(cov) + " of observed quota movement had recorded spend beside it";
     meter.append(bar);
-    meter.append(el("span", "cov-num" + (cov < 70 ? " low" : ""), pct(cov) + " measured"));
+    meter.append(el("span", "cov-num" + (cov < 70 ? " low" : ""), pct(cov)));
     label.append(meter);
+    const tier = el("span", "tier " + (row.tier || "provisional"), row.tier || "provisional");
+    tier.title = row.reason || "";
+    label.append(tier);
     line.append(label);
 
     const track = el("div", "track");
-    const lo = (row.lower_usd ?? row.estimate_usd) * row.scale;
-    const hi = (row.upper_usd ?? row.estimate_usd) * row.scale;
-    const est = row.estimate_usd * row.scale;
+    const lo = row.lower_usd ?? row.estimate_usd;
+    const hi = row.upper_usd ?? row.estimate_usd;
+    const est = row.estimate_usd;
 
     const spread = x(hi) - x(lo);
     const band = el("div", "band" + (spread < 0.8 ? " point" : ""));
@@ -317,25 +329,12 @@ function renderPlot(rows, ratios) {
     const v = el("div", "value mono");
     v.style.left = x(est) + "%";
     v.append(document.createTextNode(money(est)));
-    if (spread >= 0.8) v.append(el("em", null, "  " + money(lo) + "–" + money(hi)));
+    if (row.marginal_usd != null) v.append(el("em", null, "  " + money(row.marginal_usd) + "/pt"));
     track.append(v);
 
     line.append(track);
     host.append(line);
   }
-
-  const legend = el("div", "legend");
-  const item = (swatch, text) => {
-    const s = el("span");
-    s.append(el("i", swatch));
-    s.append(document.createTextNode(text));
-    return s;
-  };
-  legend.append(item("sw-band", "80% slope range"));
-  legend.append(item("sw-unmeasured", "quota that moved unmeasured"));
-  legend.append(item("sw-conf", "confirmed"));
-  legend.append(item("sw-prov", "provisional"));
-  host.append(legend);
 }
 
 /* ── value over time ───────────────────────────────────────────────────────
@@ -434,20 +433,19 @@ function renderChart(host, points, { title, note }) {
   host.append(box);
 }
 
-function renderSeries(series) {
-  const host = document.getElementById("series");
-  host.textContent = "";
-  const settled = (series.settled || []).filter(r => r.estimate_usd > 0);
-  const ratio = (series.ratios || [])[0];
-
-  renderChart(host, settled.filter(r => r.window === "weekly"), {
-    title: "Weekly entitlement",
+/* At the provider level every account is drawn together: the accounts measure the same
+   entitlement, so their lines are expected to sit on top of each other. */
+function renderCharts(host, points, ratios, provider, accountId) {
+  const ratio = (ratios || []).find(r =>
+    r.provider === provider && (r.account_id || "") === (accountId || ""));
+  renderChart(host, points.filter(r => r.window === "weekly"), {
+    title: "Weekly value over time",
     note: "What a full week of the plan was worth, at public API prices. Dashed lines are "
       + "weekly values implied by five-hour evidence — an independent measurement of the "
       + "same allowance, not a second plan.",
   });
-  renderChart(host, settled.filter(r => r.window === "five_hour"), {
-    title: "Five-hour entitlement",
+  renderChart(host, points.filter(r => r.window === "five_hour"), {
+    title: "Five-hour value over time",
     note: "What a full short window was worth. This is the burst limit: the weekly figure "
       + "bounds the total, this bounds how fast it can be spent"
       + (ratio ? ". Measured here: " + (1 / ratio.ratio).toFixed(2) + " full five-hour "
@@ -459,57 +457,158 @@ function renderSeries(series) {
   });
 }
 
-function renderDivergences(rows) {
-  const host = document.getElementById("divergences");
-  host.textContent = "";
-  if (!rows || !rows.length) {
-    host.append(el("div", "agree", "Every independent measurement agrees within tolerance."));
-    return;
+function renderLegend(host) {
+  const legend = el("div", "legend");
+  const item = (swatch, text) => {
+    const s = el("span");
+    s.append(el("i", swatch));
+    s.append(document.createTextNode(text));
+    return s;
+  };
+  legend.append(item("sw-band", "80% slope range"));
+  legend.append(item("sw-unmeasured", "quota that moved unmeasured"));
+  legend.append(item("sw-conf", "confirmed"));
+  legend.append(item("sw-prov", "provisional"));
+  host.append(legend);
+}
+
+/* Each window type gets its own value block, own axis, own empty state: a missing
+   five-hour meter is a fact about the provider, not an estimate of zero. */
+function renderWindowBlocks(host, rows) {
+  const blocks = el("div", "value-blocks");
+  for (const window of WINDOW_ORDER) {
+    const box = el("div", "plot value-block");
+    box.append(el("h3", null, WINDOW_TITLES[window]));
+    box.append(el("p", "note", WINDOW_HINTS[window]));
+    const blockRows = rows.filter(r => r.window === window);
+    if (blockRows.length) renderValueBlock(box, blockRows);
+    else if (window === "five_hour")
+      box.append(el("p", "note", "No five-hour meter reported yet. A weekly rate is not "
+        + "evidence of a short-window cap — this block appears when the meter does."));
+    else
+      box.append(el("p", "note", "No weekly meter reported yet."));
+    blocks.append(box);
   }
-  for (const d of rows) {
-    const box = el("div", "diverge");
-    box.append(el("b", null, d.provider + " · " + d.subject + "  "
-      + (d.difference > 0 ? "+" : "") + Math.round(d.difference * 100) + "%"));
-    box.append(el("p", null, d.detail));
-    host.append(box);
+  host.append(blocks);
+  renderLegend(host);
+}
+
+function renderDivergence(host, d) {
+  const box = el("div", "diverge");
+  box.append(el("b", null, d.provider + " · " + d.subject + "  "
+    + (d.difference > 0 ? "+" : "") + Math.round(d.difference * 100) + "%"));
+  box.append(el("p", null, d.detail));
+  host.append(box);
+}
+
+/* One section per provider: the combined estimate with its confidence and history on
+   top, then the account breakdown beneath it. An account breakdown only exists when
+   more than one account feeds the combined estimate. */
+function renderProvider(host, provider, current, settled, ratios, divergences) {
+  const rows = current.filter(r => r.provider === provider);
+  const hasPlan = rows.some(r => r.account_scope === "plan");
+  const combined = rows.filter(r =>
+    hasPlan ? r.account_scope === "plan" : r.account_scope === "account");
+  const accountIds = [...new Set(
+    rows.filter(r => r.account_scope === "account" && r.account_id).map(r => r.account_id))];
+
+  const section = el("section", "provider");
+  section.append(el("h2", null, provider));
+
+  renderWindowBlocks(section, combined);
+
+  const charts = el("div", "charts");
+  renderCharts(charts, settled.filter(s => s.provider === provider), ratios, provider, null);
+  section.append(charts);
+
+  for (const d of divergences.filter(d => d.provider === provider && d.scope === "window"))
+    renderDivergence(section, d);
+
+  if (accountIds.length > 1) {
+    section.append(el("h3", null, "Accounts feeding this estimate (" + accountIds.length + ")"));
+    section.append(el("p", "note", "Each account measures the same entitlement "
+      + "independently. The provider sells one product, so a difference between accounts "
+      + "is measurement error on our side — not a difference in what the plan delivers."));
+    for (const id of accountIds) {
+      const card = el("div", "account-block");
+      card.append(el("h4", null, "account " + shortId(id)));
+      renderWindowBlocks(card, rows.filter(r => r.account_id === id));
+      const accountCharts = el("div", "charts");
+      renderCharts(accountCharts,
+        settled.filter(s => s.provider === provider && s.account_id === id),
+        ratios, provider, id);
+      card.append(accountCharts);
+      section.append(card);
+    }
+    for (const d of divergences.filter(d => d.provider === provider && d.scope === "account"))
+      renderDivergence(section, d);
+  }
+
+  host.append(section);
+}
+
+function renderWindows(rows) {
+  const host = document.getElementById("windows");
+  host.textContent = "";
+  const groups = new Map();
+  for (const r of rows) {
+    const key = r.provider + "|" + (r.account_id || "");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  for (const [key, group] of groups) {
+    const [provider, accountId] = key.split("|");
+    group.sort((a, b) => String(b.reset_key).localeCompare(String(a.reset_key)));
+    const table = document.createElement("table");
+    const cap = document.createElement("caption");
+    cap.textContent = provider + " · " + (accountId ? "account " + shortId(accountId) : "single account");
+    table.append(cap);
+
+    const head = table.insertRow();
+    for (const c of ["window", "reset", "estimate", "marginal", "80% range", "span", "measured", "tier"])
+      head.append(el("th", null, c));
+
+    for (const r of group) {
+      const via = String(r.reset_key || "").split("~via~");
+      const row = table.insertRow();
+      const cells = [
+        r.window + (via.length > 1 ? " ← " + via[1] : ""),
+        String(r.reset_key || "").slice(0, 16),
+        {n: money(r.estimate_usd)},
+        {n: money(r.marginal_usd)},
+        {n: money(r.lower_usd) + "–" + money(r.upper_usd)},
+        {n: pct(r.quota_span_percent)},
+        {n: pct(r.coverage_percent)},
+        r.tier || "provisional",
+      ];
+      for (const cell of cells) {
+        const td = row.insertCell();
+        if (cell && cell.n != null) { td.className = "num mono"; td.textContent = cell.n; }
+        else td.textContent = cell;
+      }
+    }
+    const wrap = el("div", "scroll");
+    wrap.append(table);
+    host.append(wrap);
   }
 }
 
-function renderTable(node, cols, rows, cells, empty) {
+function renderModels(rows) {
+  const node = document.getElementById("models");
   node.textContent = "";
-  if (!rows.length) { node.append(el("caption", null, empty)); return; }
+  if (!rows.length) { node.append(el("caption", null, "No model mix recorded yet.")); return; }
   const head = node.insertRow();
-  for (const c of cols) head.append(el("th", null, c));
-  for (const row of rows) {
-    const line = node.insertRow();
-    for (const cell of cells(row)) {
-      const td = line.insertCell();
+  for (const c of ["provider", "window", "model", "tokens", "share"]) head.append(el("th", null, c));
+  for (const r of rows) {
+    const row = node.insertRow();
+    for (const cell of [r.provider, String(r.resets_at || "").slice(0, 10), r.model,
+        {n: Number(r.total_tokens).toLocaleString()},
+        {n: Number(r.share_percent).toFixed(1) + "%"}]) {
+      const td = row.insertCell();
       if (cell && cell.n != null) { td.className = "num mono"; td.textContent = cell.n; }
       else td.textContent = cell;
     }
   }
-}
-
-function renderHistory(rows) {
-  renderTable(document.getElementById("history"),
-    ["series", "reset", "estimate", "marginal", "80% range", "span", "measured", "tier"],
-    rows,
-    r => [r.provider + " · " + r.window, String(r.reset_key).slice(0, 16),
-          {n: money(r.estimate_usd)}, {n: money(r.marginal_usd)},
-          {n: money(r.lower_usd) + "–" + money(r.upper_usd)},
-          {n: pct(r.quota_span_percent)}, {n: pct(r.coverage_percent)},
-          r.tier || "provisional"],
-    "No settled reset window yet.");
-}
-
-function renderModels(rows) {
-  renderTable(document.getElementById("models"),
-    ["provider", "window", "model", "tokens", "share"],
-    rows,
-    r => [r.provider, String(r.resets_at || "").slice(0, 10), r.model,
-          {n: Number(r.total_tokens).toLocaleString()},
-          {n: Number(r.share_percent).toFixed(1) + "%"}],
-    "No model mix recorded yet.");
 }
 
 function ago(iso) {
@@ -529,21 +628,24 @@ async function refresh() {
       load("/api/series"), load("/api/health"),
     ]);
 
-    renderPlot(current.current || [], current.window_ratios || []);
-    renderSeries(series);
-    renderDivergences(current.divergences || []);
-    renderHistory((history.windows || []).slice().sort((a, b) =>
-      String(b.reset_key).localeCompare(String(a.reset_key))));
-    renderModels(models.models || []);
+    const currentRows = current.current || [];
+    const settled = series.settled || [];
+    const ratios = series.ratios || [];
+    const divergences = current.divergences || [];
+    const windows = (history.windows || []).slice();
 
-    const ratios = current.window_ratios || [];
-    document.getElementById("axis-note").textContent = ratios.length
-      ? "Short windows are converted to weekly terms using a ratio measured from their own quota "
-        + "movement: " + ratios.map(r => r.provider + " needs "
-        + r.per_long_window.toFixed(2) + " " + r.short_window + " entitlements to fill a "
-        + r.long_window + " one").join("; ") + "."
-      : "Each series is shown in its own window's terms — no cross-window ratio has been "
-        + "measured yet, so they are not directly comparable.";
+    const providers = providerList(currentRows, settled, windows);
+    const host = document.getElementById("providers");
+    host.textContent = "";
+    if (!providers.length) {
+      host.append(el("p", "note", "Collecting. Estimates appear once quota moves with "
+        + "recorded spend beside it."));
+    }
+    for (const provider of providers)
+      renderProvider(host, provider, currentRows, settled, ratios, divergences);
+
+    renderWindows(windows);
+    renderModels(models.models || []);
 
     const stale = health.last_report_at
       && (Date.now() - Date.parse(health.last_report_at)) > 75 * 60 * 1000;

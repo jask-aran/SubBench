@@ -294,14 +294,25 @@ them, in the style of the existing estimator constants.
 
 ## Page
 
-One screen, no navigation:
+One screen, no navigation, three layers you traverse down:
 
-- A card per provider and window: value, marginal rate, tier badge, and the one-line
-  reason for the tier.
-- A convergence chart per series — estimate over observations, the terminal equivalent of
-  `subbench chart` — as inline SVG.
-- A model-mix bar per window.
-- A footer with last ingest time and schema version.
+1. **Per provider** — a section per provider (Codex, Claude). Each window type gets its
+   own value block on its own axis: a five-hour allowance is a different quantity from a
+   weekly one and must not share a scale. Below the value blocks, a value-over-time chart
+   per window type; at this level every account is drawn together, because the accounts
+   measure the same entitlement and their lines are expected to sit on top of each other.
+2. **Per account** — under the provider section, when more than one account feeds the
+   combined estimate. Each account repeats the value blocks and the charts, so the top
+   level estimate can be traced down to the measurements that compose it. Accounts on the
+   same plan are expected to agree; a difference between them is measurement error on our
+   side, not a difference in what the plan delivers.
+3. **Windows per account** — every individual entitlement window of every account in a
+   table, newest first, one table per account. No charts at this layer: with many
+   windows the noise would drown the signal.
+
+The model-mix table sits at the bottom of the page. A missing five-hour meter is shown as
+an empty value block ("no five-hour meter reported yet") rather than as an estimate of
+zero, so the block appears when the meter does.
 
 Rendering is vanilla JavaScript against `/api/*`. Charts are hand-rolled SVG: the data is
 a few hundred points and a charting library would be the page's only external dependency.
