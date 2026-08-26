@@ -134,3 +134,24 @@ def test_similar_accounts_report_nothing():
         estimate("weekly", 110.0, provider="codex", account_id="B"),
     ]
     assert divergences(rows, [], {"A": "plus", "B": "plus"}) == []
+
+
+def test_a_converted_window_keeps_the_readings_behind_it():
+    """A scaled band beside a claim of no readings would never reach a settled tier."""
+    from subbench.crosssolve import combined_estimates
+    from subbench.regression import robust_estimates
+
+    points = []
+    for index in range(20):
+        stamp = f"2026-07-27T{index // 60:02d}:{index % 60:02d}:00Z"
+        for window, step in (("five_hour", 4.0), ("weekly", 1.0)):
+            points.append({
+                "provider": "codex", "account_id": "A", "window": window,
+                "resets_at": "2026-07-27T12:00:00Z", "observed_at": stamp,
+                "used_percent": step * index, "cost_usd": 2.0 * index,
+            })
+    estimates, _ = combined_estimates(points, robust_estimates(points))
+    converted = [e for e in estimates if "~via~" in e.reset_key]
+    assert converted
+    for estimate in converted:
+        assert estimate.interval_count > 0

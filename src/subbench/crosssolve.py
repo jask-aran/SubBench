@@ -163,6 +163,10 @@ def converted_estimates(
             covered_quota_percent=estimate.covered_quota_percent * ratio.ratio,
             unobserved_quota_percent=estimate.unobserved_quota_percent * ratio.ratio,
             plan=estimate.plan,
+            # The evidence is the short window's own increments, restated in long-window
+            # terms. Dropping the count would leave a scaled band beside a claim of no
+            # readings, and hold every converted window at provisional for ever.
+            interval_count=estimate.interval_count,
         ))
     return converted
 
