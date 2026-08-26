@@ -4,7 +4,7 @@ import json
 import os
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -26,12 +26,33 @@ class EntitlementWindow:
     plan: str | None = None
 
 
+# A provider that does not name the plan beside its meter leaves SubBench unable to tell
+# one product from another. Claude's usage endpoint is such a provider: it returns the
+# meters and nothing about the subscription behind them. The plan may then be declared,
+# per provider, as SUBBENCH_PLAN_CLAUDE=pro.
+#
+# A declared plan is asserted by the operator, not measured, so it is only ever a fallback:
+# a plan the provider does report always wins, and an upgrade the provider reports is
+# followed even when a stale declaration disagrees.
+PLAN_ENV_PREFIX = "SUBBENCH_PLAN_"
+
+
+def declared_plan(provider: str) -> str | None:
+    value = os.environ.get(f"{PLAN_ENV_PREFIX}{provider.upper()}", "").strip()
+    return value or None
+
+
 def collect_entitlements(provider: str) -> list[EntitlementWindow]:
     if provider == "codex":
-        return collect_codex()
-    if provider == "claude":
-        return collect_claude()
-    raise ValueError(f"unsupported provider: {provider}")
+        rows = collect_codex()
+    elif provider == "claude":
+        rows = collect_claude()
+    else:
+        raise ValueError(f"unsupported provider: {provider}")
+    fallback = declared_plan(provider)
+    if fallback is None:
+        return rows
+    return [row if row.plan else replace(row, plan=fallback) for row in rows]
 
 
 def collect_codex() -> list[EntitlementWindow]:

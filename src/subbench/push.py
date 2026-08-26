@@ -241,7 +241,11 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
             "products": [row.as_dict() for row in product_estimates(history)],
             "product_series": [row.as_dict() for row in product_series(history)],
         },
-        "series": build_series(points),
+        # replay=False: the replay curve re-runs the whole estimator once per sampled
+        # observation, so its cost grows with the square of the history and reached four
+        # minutes on one month. The page reads history and health only, so paying that on
+        # every push bought nothing. `subbench chart` still computes it on demand.
+        "series": build_series(points, replay=False),
         "models": {"models": models},
         "weights": {"providers": [solve(observations, provider=name).as_dict() for name in providers]},
     }
