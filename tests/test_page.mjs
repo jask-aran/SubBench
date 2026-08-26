@@ -146,13 +146,10 @@ test("a trend point names the accounts it pooled, not one source account", () =>
 
 test("the headline value is the pooled product figure, not one account's window", () => {
   const { page, hosts } = harness();
-  const rows = page.visibleEstimates([
-    windowRow({ account_id: "acct-A", estimate_usd: 105 }),
-    windowRow({ account_id: "acct-B", estimate_usd: 152 }),
-  ]);
   page.renderSummary(
     [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 128, window_count: 2, account_count: 2 }],
-    rows,
+    [windowRow({ account_id: "acct-A", estimate_usd: 105 }),
+     windowRow({ account_id: "acct-B", estimate_usd: 152 })],
   );
   const text = hosts.summary.text;
   assert.match(text, /\$128\b/);
@@ -179,8 +176,20 @@ test("open, unconfirmed and converted windows are all excluded", () => {
   assert.equal(rows.length, 0);
 });
 
-test("a product with no pooled figure says so rather than showing nothing", () => {
+// A product that vanishes is indistinguishable from one nobody is watching.
+test("a measured product with nothing confirmed still gets a card", () => {
   const { page, hosts } = harness();
-  page.renderSummary([], page.visibleEstimates([windowRow()]));
+  page.renderSummary([], [windowRow({ product: "Claude Pro", tier: "provisional" })]);
+  assert.match(hosts.summary.text, /Claude Pro/);
+  assert.match(hosts.summary.text, /Not enough evidence yet/);
+});
+
+test("a product with a figure for one limit and not the other shows both", () => {
+  const { page, hosts } = harness();
+  page.renderSummary(
+    [{ product: "Claude Pro", window: "five_hour", estimate_usd: 31, window_count: 1, account_count: 1 }],
+    [windowRow({ product: "Claude Pro", window: "weekly", tier: "provisional" })],
+  );
+  assert.match(hosts.summary.text, /\$31/);
   assert.match(hosts.summary.text, /Not enough evidence yet/);
 });

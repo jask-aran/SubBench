@@ -610,7 +610,7 @@ async function refresh() {
     ]);
 
     const rows = visibleEstimates(history.windows || []);
-    renderSummary(history.products || [], rows);
+    renderSummary(history.products || [], history.windows || []);
     renderCharts(trendPoints(history.product_series));
     renderTable(rows);
 
