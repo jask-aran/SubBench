@@ -148,6 +148,22 @@
     font-size: .82rem;
     line-height: 1.25;
   }
+  .limit-range {
+    display: block;
+    margin-top: .3rem;
+    color: var(--muted);
+    font-size: .82rem;
+    font-weight: 500;
+  }
+  .limit-open {
+    display: block;
+    margin-top: .5rem;
+    padding-top: .45rem;
+    border-top: 1px dotted var(--grid);
+    color: var(--muted);
+    font-size: .78rem;
+  }
+  .limit-open b { font-weight: 600; }
   .limit-meta {
     display: block;
     margin-top: .35rem;
@@ -274,7 +290,12 @@
       every account on that plan, because one plan held on two accounts is the same
       entitlement measured twice.</p>
     <p class="note">SubBench measures the part of the limit you actually consume and scales
-      that rate to a full limit. A window you never filled is therefore an extrapolation.</p>
+      that rate to a full limit. A window you never filled is therefore an extrapolation. The
+      smaller figure under each value is the range that value is settled to.</p>
+    <p class="note">"In progress" is the weekly limit as it stands now, pooled from every
+      window still running. Accounts are not synchronised, so it pools rates rather than
+      windows and where each account sits in its own cycle does not enter the arithmetic. It
+      is the earliest sign that a provider has changed what it delivers.</p>
     <div class="summary" id="summary"></div>
   </section>
 
@@ -379,19 +400,33 @@ function shortDate(value) {
   return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
-// The headline figures come from the collector, which pools every completed window of a
-// plan across the accounts that hold it. The rows below are the individual windows those
-// figures were pooled from, and are kept separate on purpose.
-function renderSummary(products, rows) {
+const range = row => money(row.lower_usd) + "–" + money(row.upper_usd);
+
+// The figures come from the collector, which pools every window of a plan across the
+// accounts that hold it. The table below keeps the individual windows they were pooled
+// from, with the account each was measured on.
+function renderSummary(products, measured, wide = [], open = []) {
   const host = document.getElementById("summary");
   host.textContent = "";
 
+  const key = row => row.product + " " + row.window;
   const pooled = new Map();
-  for (const row of products) pooled.set(row.product + " " + row.window, row);
-  const names = [...new Set([...products.map(row => row.product), ...productNames(rows)])].sort();
+  for (const row of products) pooled.set(key(row), row);
+  const ranged = new Map();
+  for (const row of wide) ranged.set(key(row), row);
+  const running = new Map();
+  for (const row of open) running.set(key(row), row);
+  // Every product being measured gets a card, including one with nothing settled yet.
+  // Dropping it would leave no way to tell a product still gathering evidence from one
+  // SubBench is not watching at all.
+  const names = [...new Set([
+    ...products.map(row => row.product),
+    ...wide.map(row => row.product),
+    ...productNames(measured),
+  ])].sort();
 
   if (!names.length) {
-    host.append(el("p", "note", "No completed high-confidence estimate yet."));
+    host.append(el("p", "note", "Nothing is being measured yet."));
     return;
   }
 
@@ -403,15 +438,32 @@ function renderSummary(products, rows) {
     for (const window of WINDOWS) {
       const box = el("div", "limit");
       box.append(el("span", "limit-label", window.label));
-      const row = pooled.get(name + " " + window.key);
+      const id = name + " " + window.key;
+      const row = pooled.get(id);
+      const wider = ranged.get(id);
 
       if (row) {
         box.append(el("span", "limit-value mono", money(row.estimate_usd)));
+        box.append(el("span", "limit-range mono", range(row)));
         const windows = row.window_count + " window" + (row.window_count === 1 ? "" : "s");
         const accounts = row.account_count + " account" + (row.account_count === 1 ? "" : "s");
         box.append(el("span", "limit-meta mono", windows + " · " + accounts));
+      } else if (wider) {
+        // Everything but the width of its interval passed, so the range is the whole of
+        // what this window supports. Printing a single figure would invent the rest.
+        box.append(el("span", "limit-range mono", range(wider)));
+        box.append(el("span", "limit-meta mono", "range only, not yet settled"));
       } else {
         box.append(el("span", "limit-empty", "Not enough evidence yet"));
+      }
+
+      const live = running.get(id);
+      if (live) {
+        const note = el("span", "limit-open mono");
+        note.append(el("b", null, "in progress " + money(live.estimate_usd)));
+        note.append(document.createTextNode(
+          " · " + range(live) + " · " + Math.round(live.covered_quota_percent) + "% measured"));
+        box.append(note);
       }
       limits.append(box);
     }
@@ -610,7 +662,8 @@ async function refresh() {
     ]);
 
     const rows = visibleEstimates(history.windows || []);
-    renderSummary(history.products || [], history.windows || []);
+    renderSummary(history.products || [], history.windows || [],
+                  history.products_likely || [], history.products_open || []);
     renderCharts(trendPoints(history.product_series));
     renderTable(rows);
 

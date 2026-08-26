@@ -166,8 +166,8 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
     """
     from .crosssolve import account_plans, combined_estimates, divergences
     from .regression import robust_estimates
-    from .products import product_estimates, product_label, product_series
-    from .server.confidence import classify
+    from .products import open_estimates, product_estimates, product_label, product_series
+    from .server.confidence import LIKELY, classify
     from .store import model_mix, regression_points
     from .timeline import build_series
     from .timeseries import detect_regime_changes, rolling_values, window_history
@@ -239,6 +239,11 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
             # One pooled figure per product and limit, and the same pooling per period so
             # the chart plots what the product was worth rather than what one account saw.
             "products": [row.as_dict() for row in product_estimates(history)],
+            # Windows that cleared every check but the width of their interval. Shown as a
+            # range rather than a figure, because that is all they support.
+            "products_likely": [row.as_dict() for row in product_estimates(history, tiers=(LIKELY,))],
+            # The synthetic current value, pooled from the windows still running.
+            "products_open": [row.as_dict() for row in open_estimates(history)],
             "product_series": [row.as_dict() for row in product_series(history)],
         },
         # replay=False: the replay curve re-runs the whole estimator once per sampled

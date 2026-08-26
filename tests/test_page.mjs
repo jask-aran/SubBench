@@ -193,3 +193,37 @@ test("a product with a figure for one limit and not the other shows both", () =>
   assert.match(hosts.summary.text, /\$31/);
   assert.match(hosts.summary.text, /Not enough evidence yet/);
 });
+
+test("a settled figure shows the range it is settled to", () => {
+  const { page, hosts } = harness();
+  page.renderSummary(
+    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 152,
+       lower_usd: 136, upper_usd: 160, window_count: 3, account_count: 2 }],
+    [windowRow()],
+  );
+  assert.match(hosts.summary.text, /\$152/);
+  assert.match(hosts.summary.text, /\$136–\$160/);
+});
+
+test("a likely window shows a range and no invented figure", () => {
+  const { page, hosts } = harness();
+  page.renderSummary([], [windowRow({ product: "Claude Pro", window: "five_hour" })],
+    [{ product: "Claude Pro", window: "five_hour", estimate_usd: 31.85,
+       lower_usd: 21.5, upper_usd: 44.56, window_count: 2, account_count: 1 }]);
+  assert.match(hosts.summary.text, /\$21\.50–\$44\.56/);
+  assert.match(hosts.summary.text, /range only, not yet settled/);
+  assert.doesNotMatch(hosts.summary.text, /\$31\.85/);
+});
+
+test("the in progress figure appears beside a settled one", () => {
+  const { page, hosts } = harness();
+  page.renderSummary(
+    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 152,
+       lower_usd: 136, upper_usd: 160, window_count: 3, account_count: 2 }],
+    [windowRow()], [],
+    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 93,
+       lower_usd: 81, upper_usd: 106, window_count: 2, account_count: 2,
+       covered_quota_percent: 41.4 }]);
+  assert.match(hosts.summary.text, /in progress \$93/);
+  assert.match(hosts.summary.text, /41% measured/);
+});

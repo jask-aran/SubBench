@@ -20,7 +20,10 @@ def _window(**overrides):
         "window": "weekly",
         "reset_key": (NOW - timedelta(days=2)).isoformat(),
         "estimate_usd": 100.0,
+        "lower_usd": 90.0,
+        "upper_usd": 115.0,
         "covered_quota_percent": 60.0,
+        "latest_observed_at": (NOW - timedelta(days=3)).isoformat(),
         "tier": "confirmed",
     }
     row.update(overrides)
@@ -185,3 +188,74 @@ def test_the_series_keeps_history_beyond_the_headline_pool_period():
     old = (NOW - timedelta(days=POOL_DAYS + 20)).isoformat()
     assert product_estimates([_window(reset_key=old)], now=NOW) == []
     assert len(product_series([_window(reset_key=old)], now=NOW)) == 1
+
+
+def test_only_the_newest_open_window_of_an_account_counts_as_current():
+    """A boundary that moves leaves an older window whose reset has still not passed."""
+    from subbench.products import open_estimates
+
+    superseded = _window(
+        reset_key=(NOW + timedelta(days=2)).isoformat(), estimate_usd=85.0,
+        latest_observed_at=(NOW - timedelta(days=5)).isoformat(),
+    )
+    current = _window(
+        reset_key=(NOW + timedelta(days=6)).isoformat(), estimate_usd=102.0,
+        latest_observed_at=(NOW - timedelta(minutes=5)).isoformat(),
+    )
+    rows = open_estimates([superseded, current], now=NOW)
+    assert len(rows) == 1
+    assert (rows[0].window_count, rows[0].account_count) == (1, 1)
+    assert rows[0].estimate_usd == 102.0
+
+
+def test_unaligned_accounts_both_contribute_to_the_current_figure():
+    """Where each account sits in its own cycle must not enter the arithmetic."""
+    from subbench.products import open_estimates
+
+    early = _window(account_id="acct-A", reset_key=(NOW + timedelta(days=1)).isoformat(),
+                    estimate_usd=100.0, covered_quota_percent=80.0)
+    late = _window(account_id="acct-B", reset_key=(NOW + timedelta(days=6)).isoformat(),
+                   estimate_usd=120.0, covered_quota_percent=30.0)
+    rows = open_estimates([early, late], now=NOW)
+    assert len(rows) == 1
+    assert (rows[0].window_count, rows[0].account_count) == (2, 2)
+    # Weighted by measured quota, so the better-measured account leads.
+    assert rows[0].estimate_usd == 100.0
+    assert rows[0].covered_quota_percent == 80.0
+
+
+def test_a_finished_window_is_never_current():
+    from subbench.products import open_estimates
+
+    assert open_estimates([_window()], now=NOW) == []
+
+
+def test_a_contaminated_window_is_never_current():
+    from subbench.products import open_estimates
+
+    rows = [_window(reset_key=(NOW + timedelta(days=2)).isoformat(), tier="provisional")]
+    assert open_estimates(rows, now=NOW) == []
+
+
+def test_five_hour_windows_are_not_projected_while_open():
+    """An open five-hour window is usually minutes old and says nothing useful."""
+    from subbench.products import open_estimates
+
+    rows = [_window(window="five_hour", reset_key=(NOW + timedelta(hours=2)).isoformat())]
+    assert open_estimates(rows, now=NOW) == []
+
+
+def test_the_pooled_range_is_the_windows_own_bounds():
+    """Not the spread between estimates: that is variation, which the chart already shows."""
+    rows = [
+        _window(account_id="acct-A", estimate_usd=100.0, lower_usd=90.0, upper_usd=115.0),
+        _window(account_id="acct-B", estimate_usd=160.0, lower_usd=150.0, upper_usd=170.0),
+    ]
+    pooled = product_estimates(rows, now=NOW)[0]
+    assert pooled.lower_usd in (90.0, 150.0)
+    assert pooled.upper_usd in (115.0, 170.0)
+
+
+def test_one_window_keeps_its_own_interval_exactly():
+    pooled = product_estimates([_window(lower_usd=21.5, upper_usd=44.56)], now=NOW)[0]
+    assert (pooled.lower_usd, pooled.upper_usd) == (21.5, 44.56)

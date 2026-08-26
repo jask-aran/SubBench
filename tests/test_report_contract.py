@@ -106,3 +106,23 @@ def test_pooled_product_rows_carry_every_field_the_page_reads(tmp_path):
     # The contract is on the shape of a row, whenever one is present.
     for row in build_reports(db)["history"]["products"]:
         assert PRODUCT_FIELDS <= set(row), PRODUCT_FIELDS - set(row)
+
+
+def test_no_source_file_contains_a_null_byte():
+    """A stray NUL makes grep treat a text file as binary and print nothing.
+
+    One reached index.html through an editing mistake and sat there through two commits:
+    it was harmless at runtime, but it made later patches match nothing and fail silently,
+    and it hid the file from every search that would have shown why.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    suspect = [
+        path
+        for folder in ("src", "tests", "worker")
+        for path in (root / folder).rglob("*")
+        if path.is_file() and path.suffix in {".py", ".js", ".mjs", ".html", ".sql", ".json"}
+        and b"\x00" in path.read_bytes()
+    ]
+    assert suspect == [], suspect
