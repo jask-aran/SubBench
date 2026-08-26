@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS entitlement_snapshots (
     resets_at        TEXT,
     duration_minutes INTEGER,
     source           TEXT NOT NULL,
+    -- The plan reported beside the meter. A plan change resizes the entitlement, so the
+    -- reader must treat a new plan as a new product rather than a continuation.
+    plan             TEXT,
     PRIMARY KEY (agent_id, provider, account_key, window, observed_at)
 );
 

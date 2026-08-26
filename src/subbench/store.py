@@ -50,6 +50,10 @@ CREATE TABLE IF NOT EXISTS entitlement_snapshots (
     resets_at TEXT,
     duration_minutes INTEGER,
     source TEXT NOT NULL,
+    -- The plan the provider reported beside this meter. Stored per observation, not per
+    -- account: a plan change resizes the entitlement, so quota points before and after
+    -- measure different things and must never be mixed into one estimate.
+    plan TEXT,
     UNIQUE(provider, account_id, window, observed_at)
 );
 CREATE TABLE IF NOT EXISTS accounts (
@@ -137,8 +141,16 @@ def _migrate(db: sqlite3.Connection) -> None:
             """
         )
     _round_stored_resets(db)
-    if _has_column(db, "entitlement_snapshots", "account_id"):
-        return
+    if not _has_column(db, "entitlement_snapshots", "account_id"):
+        _rebuild_entitlement_snapshots(db)
+    if not _has_column(db, "entitlement_snapshots", "plan"):
+        # Rows recorded before this column stay NULL. A NULL plan is a product in its own
+        # right, so old rows group together and never merge with a named plan. This runs
+        # after the rebuild above, which recreates the table without the column.
+        db.execute("ALTER TABLE entitlement_snapshots ADD COLUMN plan TEXT")
+
+
+def _rebuild_entitlement_snapshots(db: sqlite3.Connection) -> None:
     # Older table used UNIQUE(provider, window, observed_at), which cannot hold
     # two accounts at the same timestamp. Rebuild with the account-aware unique constraint.
     db.executescript(
@@ -290,10 +302,11 @@ def save_entitlements(db: sqlite3.Connection, rows: Iterable[EntitlementWindow],
     with db:
         db.executemany(
             """INSERT OR IGNORE INTO entitlement_snapshots
-               (observed_at, provider, account_id, window, used_percent, resets_at, duration_minutes, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (observed_at, provider, account_id, window, used_percent, resets_at,
+                duration_minutes, source, plan)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(observed_at, row.provider, row.account_id, row.window, row.used_percent,
-              row.resets_at, row.duration_minutes, row.source) for row in values],
+              row.resets_at, row.duration_minutes, row.source, row.plan) for row in values],
         )
     return len(values)
 
@@ -308,7 +321,7 @@ def save_entitlements(db: sqlite3.Connection, rows: Iterable[EntitlementWindow],
 PRICED_WINDOWS_SQL = """
     WITH scoped AS (
         SELECT e.provider, e.account_id, e.window, e.observed_at, e.used_percent,
-               e.resets_at, e.duration_minutes,
+               e.resets_at, e.duration_minutes, e.plan,
                -- Both columns must describe the same row, so pick that row once by the
                -- moment its contents were last confirmed, and measure the age of that
                -- same confirmation. Ranking by imported_at while ageing by last_seen_at
@@ -372,7 +385,7 @@ def regression_points(
     return list(db.execute(
         f"""{PRICED_WINDOWS_SQL}
         SELECT p.provider, p.account_id, p.window, p.observed_at, p.used_percent,
-               p.resets_at, p.duration_minutes, p.cost_usd, p.cost_age_minutes
+               p.resets_at, p.duration_minutes, p.plan, p.cost_usd, p.cost_age_minutes
         FROM priced p
         {where_clause}
         ORDER BY p.provider, p.account_id, p.window, p.resets_at, p.observed_at""",

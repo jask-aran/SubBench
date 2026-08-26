@@ -128,3 +128,37 @@ test("health does not count raw usage rows and the footer does not show them", a
   assert.equal(db.healthSql.includes("COUNT(*) FROM usage_rows"), false);
   assert.equal(page.includes("usage_rows"), false);
 });
+
+test("the plan reported beside a meter is stored, and its absence is not guessed", async () => {
+  const db = new FakeD1();
+  const send = (plan) => worker.fetch(request("/ingest", {
+    method: "POST",
+    headers: { authorization: "Bearer token", "content-type": "application/json" },
+    body: JSON.stringify({
+      schema_version: 1,
+      agent_id: "agent-1",
+      entitlements: [{
+        observed_at: plan === null ? "2026-08-02T00:00:00Z" : "2026-08-01T00:00:00Z",
+        provider: "codex",
+        account_id: "account-1",
+        window: "weekly",
+        used_percent: 10,
+        resets_at: "2026-08-08T00:00:00Z",
+        duration_minutes: 10080,
+        source: "test",
+        ...(plan === undefined ? {} : { plan }),
+      }],
+      usage: [],
+    }),
+  }), env(db));
+
+  assert.equal((await send("plus")).status, 200);
+  assert.equal((await send(null)).status, 200);
+  assert.equal((await send(undefined)).status, 200);
+
+  const inserts = db.bound.filter((statement) =>
+    statement.sql.includes("INSERT INTO entitlement_snapshots"));
+  assert.equal(inserts.length, 3);
+  // The plan is the last bound parameter of the upsert.
+  assert.deepEqual(inserts.map((statement) => statement.params.at(-1)), ["plus", null, null]);
+});

@@ -162,6 +162,7 @@ def converted_estimates(
             marginal_span_percent=estimate.marginal_span_percent * ratio.ratio,
             covered_quota_percent=estimate.covered_quota_percent * ratio.ratio,
             unobserved_quota_percent=estimate.unobserved_quota_percent * ratio.ratio,
+            plan=estimate.plan,
         ))
     return converted
 

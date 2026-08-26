@@ -5,6 +5,9 @@ from datetime import datetime, timedelta
 from statistics import median
 from typing import Iterable, Mapping, Any
 
+# provider, account_id, plan, window, reset_key. One series of comparable quota points.
+SeriesKey = tuple[str, str | None, str | None, str, str]
+
 
 @dataclass(frozen=True)
 class RegressionEstimate:
@@ -34,6 +37,9 @@ class RegressionEstimate:
     # rests on far less of the window than its span suggests.
     covered_quota_percent: float = 0.0
     unobserved_quota_percent: float = 0.0
+    # The plan in force for every observation behind this estimate. Two accounts pool into
+    # one product estimate only when this matches.
+    plan: str | None = None
 
     @property
     def coverage_percent(self) -> float:
@@ -112,21 +118,30 @@ def _cluster_resets(reset_keys: Iterable[str]) -> dict[str, str]:
     return mapping
 
 
-def _group_points(points: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str | None, str, str], list[dict[str, Any]]]:
-    prepared: list[tuple[tuple[str, str | None, str], str, dict[str, Any]]] = []
+def _group_points(points: Iterable[Mapping[str, Any]]) -> dict[SeriesKey, list[dict[str, Any]]]:
+    """Group observations into one series per provider, account, plan, window and reset.
+
+    The plan belongs in the key because a plan change resizes the entitlement. One quota
+    point on Plus and one quota point on Pro are different quantities of value, so slopes
+    measured on either side of an upgrade cannot go into the same median. Splitting here
+    makes the upgrade start a new series instead of corrupting the one in progress.
+    """
+    prepared: list[tuple[tuple[str, str | None, str | None, str], str, dict[str, Any]]] = []
     for source_point in points:
         point = dict(source_point)
         account_id = point.get("account_id")
         account_id = account_id if isinstance(account_id, str) else None
-        series = (str(point["provider"]), account_id, str(point["window"]))
+        plan = point.get("plan")
+        plan = plan if isinstance(plan, str) and plan else None
+        series = (str(point["provider"]), account_id, plan, str(point["window"]))
         prepared.append((series, _reset_key(point.get("resets_at")), point))
 
-    by_series: dict[tuple[str, str | None, str], list[str]] = {}
+    by_series: dict[tuple[str, str | None, str | None, str], list[str]] = {}
     for series, reset_key, _ in prepared:
         by_series.setdefault(series, []).append(reset_key)
     clusters = {series: _cluster_resets(keys) for series, keys in by_series.items()}
 
-    groups: dict[tuple[str, str | None, str, str], list[dict[str, Any]]] = {}
+    groups: dict[SeriesKey, list[dict[str, Any]]] = {}
     for series, reset_key, point in prepared:
         groups.setdefault((*series, clusters[series][reset_key]), []).append(point)
     return groups
@@ -271,10 +286,10 @@ def _valid_pairs(
 
 
 def _peer_reference_rates(
-    groups: list[tuple[tuple[str, str | None, str, str], list[dict[str, Any]]]],
+    groups: list[tuple[SeriesKey, list[dict[str, Any]]]],
     *,
     min_quota_delta: float,
-) -> dict[tuple[str, str | None, str, str], float | None]:
+) -> dict[SeriesKey, float | None]:
     """Return one reference rate per window, using only other reset windows.
 
     A target window must not define the rate that decides whether its own evidence is
@@ -283,17 +298,17 @@ def _peer_reference_rates(
     applied later to the target window.
     """
     by_series: dict[
-        tuple[str, str | None, str],
-        list[tuple[tuple[str, str | None, str, str], list[dict[str, Any]]]],
+        tuple[str, str | None, str | None, str],
+        list[tuple[SeriesKey, list[dict[str, Any]]]],
     ] = {}
     for key, rows in groups:
-        by_series.setdefault(key[:3], []).append((key, rows))
+        by_series.setdefault(key[:4], []).append((key, rows))
 
-    references: dict[tuple[str, str | None, str, str], float | None] = {}
+    references: dict[SeriesKey, float | None] = {}
     for key, _ in groups:
         slopes: list[float] = []
         weights: list[float] = []
-        for peer_key, peer_rows in by_series[key[:3]]:
+        for peer_key, peer_rows in by_series[key[:4]]:
             if peer_key == key:
                 continue
             for _, _, quota_delta, _, slope in _valid_pairs(
@@ -316,11 +331,11 @@ def pairwise_slopes(
     contributions: list[SlopeContribution] = []
     groups = list(_ordered_groups(points))
     references = _peer_reference_rates(groups, min_quota_delta=min_quota_delta)
-    for (provider, account_id, window, reset_key), rows in groups:
+    for (provider, account_id, plan, window, reset_key), rows in groups:
         for left, right, _, _, slope in _valid_pairs(
             rows,
             min_quota_delta=min_quota_delta,
-            reference_rate=references[(provider, account_id, window, reset_key)],
+            reference_rate=references[(provider, account_id, plan, window, reset_key)],
         ):
             contributions.append(SlopeContribution(
                 provider=provider,
@@ -343,20 +358,20 @@ def estimate_progress(
 ) -> list[EstimateProgress]:
     progress: list[EstimateProgress] = []
     groups = list(_ordered_groups(points))
-    for (provider, account_id, window, reset_key), rows in groups:
+    for (provider, account_id, plan, window, reset_key), rows in groups:
         for index in range(1, len(rows)):
             current_at = str(rows[index]["observed_at"])
-            visible_peers: list[tuple[tuple[str, str | None, str, str], list[dict[str, Any]]]] = []
+            visible_peers: list[tuple[SeriesKey, list[dict[str, Any]]]] = []
             for peer_key, peer_rows in groups:
-                if peer_key[:3] != (provider, account_id, window) or peer_key[3] == reset_key:
+                if peer_key[:4] != (provider, account_id, plan, window) or peer_key[4] == reset_key:
                     continue
                 visible = [row for row in peer_rows if str(row["observed_at"]) <= current_at]
                 if visible:
                     visible_peers.append((peer_key, visible))
             reference = _peer_reference_rates(
-                [((provider, account_id, window, reset_key), rows[: index + 1]), *visible_peers],
+                [((provider, account_id, plan, window, reset_key), rows[: index + 1]), *visible_peers],
                 min_quota_delta=min_quota_delta,
-            )[(provider, account_id, window, reset_key)]
+            )[(provider, account_id, plan, window, reset_key)]
             pairs = _valid_pairs(
                 rows[: index + 1],
                 min_quota_delta=min_quota_delta,
@@ -415,8 +430,8 @@ def robust_estimates(
     estimates: list[RegressionEstimate] = []
     groups = list(_ordered_groups(points))
     references = _peer_reference_rates(groups, min_quota_delta=min_quota_delta)
-    for (provider, account_id, window, reset_key), ordered in groups:
-        reference = references[(provider, account_id, window, reset_key)]
+    for (provider, account_id, plan, window, reset_key), ordered in groups:
+        reference = references[(provider, account_id, plan, window, reset_key)]
         pairs = _valid_pairs(
             ordered,
             min_quota_delta=min_quota_delta,
@@ -457,6 +472,7 @@ def robust_estimates(
                 marginal_span_percent=marginal_observed,
                 covered_quota_percent=advanced - unmeasured,
                 unobserved_quota_percent=unmeasured,
+                plan=plan,
             )
         )
 

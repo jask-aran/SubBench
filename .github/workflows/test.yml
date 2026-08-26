@@ -21,3 +21,14 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
       - run: pytest -q --tb=short
+
+  # The Worker and the dashboard page are JavaScript. Their tests need no browser and no
+  # dependencies, so they run once rather than across the Python matrix.
+  javascript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --test "tests/*.mjs"

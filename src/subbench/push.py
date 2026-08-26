@@ -67,7 +67,7 @@ def push_state(db: sqlite3.Connection, endpoint: str) -> PushState:
 def pending_entitlements(db: sqlite3.Connection, cursor: str | None, limit: int) -> list[dict[str, Any]]:
     rows = db.execute(
         """SELECT observed_at, provider, account_id, window, used_percent,
-                  resets_at, duration_minutes, source
+                  resets_at, duration_minutes, source, plan
            FROM entitlement_snapshots
            WHERE ? IS NULL OR observed_at > ?
            ORDER BY observed_at LIMIT ?""",
@@ -166,6 +166,7 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
     """
     from .crosssolve import account_plans, combined_estimates, divergences
     from .regression import robust_estimates
+    from .products import product_estimates, product_label
     from .server.confidence import classify
     from .store import model_mix, regression_points
     from .timeline import build_series
@@ -191,13 +192,19 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
         current.append(row)
 
     tiers = {
-        (e.provider, e.window, e.account_id, e.reset_key): classify(e, estimates).as_dict()
+        (e.provider, e.window, e.account_id, e.plan, e.reset_key): classify(e, estimates).as_dict()
         for e in estimates
     }
     history = []
     for row in window_history(estimates):
-        key = (row["provider"], row["window"], row.get("account_id"), row["reset_key"])
-        history.append({**row, **tiers.get(key, {"tier": "provisional", "reason": ""})})
+        key = (row["provider"], row["window"], row.get("account_id"), row.get("plan"), row["reset_key"])
+        history.append({
+            **row,
+            **tiers.get(key, {"tier": "provisional", "reason": ""}),
+            # The page shows the product, never the raw provider, so the name it displays
+            # is decided here from what the provider reported and not hardcoded there.
+            "product": product_label(str(row["provider"]), row.get("plan")),
+        })
 
     totals: dict[tuple, int] = {}
     for row in mix:
@@ -224,7 +231,10 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
                 for r in ratios
             ],
         },
-        "history": {"windows": history},
+        # products carries one pooled estimate per product and window. The page shows it as
+        # the headline figure, because a product held on two accounts is one entitlement
+        # measured twice and the pooled number uses both.
+        "history": {"windows": history, "products": [row.as_dict() for row in product_estimates(history)]},
         "series": build_series(points),
         "models": {"models": models},
         "weights": {"providers": [solve(observations, provider=name).as_dict() for name in providers]},

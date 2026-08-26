@@ -18,6 +18,8 @@
     --series-2: #6a5687;
     --series-3: #9a7328;
     --series-4: #3f6b9a;
+    --series-5: #8a4f4f;
+    --series-6: #4a7a4a;
     --alert: #a33a26;
   }
   @media (prefers-color-scheme: dark) {
@@ -34,6 +36,8 @@
       --series-2: #b7a1d5;
       --series-3: #d0a453;
       --series-4: #83acd5;
+      --series-5: #d59a9a;
+      --series-6: #96c996;
       --alert: #e07a5f;
     }
   }
@@ -263,17 +267,22 @@
   </header>
 
   <section>
-    <h2>Latest high-confidence value</h2>
+    <h2>Value of one full limit</h2>
     <p class="note">The value is the public API price of the usage delivered inside one full
       limit window. A value stays hidden until that window is complete and the estimator marks
-      it confirmed.</p>
+      it confirmed. Each figure pools every completed window from the last 35 days, across
+      every account on that plan, because one plan held on two accounts is the same
+      entitlement measured twice.</p>
+    <p class="note">SubBench measures the part of the limit you actually consume and scales
+      that rate to a full limit. A window you never filled is therefore an extrapolation.</p>
     <div class="summary" id="summary"></div>
   </section>
 
   <section>
     <h2>Value over time</h2>
     <p class="note">Each point is one completed, confirmed limit window. The horizontal axis is
-      the completion date and the vertical axis is API-equivalent US dollars.</p>
+      the completion date and the vertical axis is API-equivalent US dollars. Each account has
+      its own line, because each account has its own meter.</p>
     <div id="charts"></div>
   </section>
 
@@ -288,16 +297,17 @@
 </main>
 
 <script>
-const PRODUCTS = {
-  codex: "ChatGPT Plus",
-  claude: "Claude Pro",
-};
-const PRODUCT_ORDER = ["ChatGPT Plus", "Claude Pro"];
+// Product names arrive with the data. The collector builds them from the plan the provider
+// reports beside the meter, so an upgrade renames the product here without a code change,
+// and the new plan is charted as a separate product rather than a continuation.
 const WINDOWS = [
   { key: "weekly", label: "Weekly limit" },
   { key: "five_hour", label: "5-hour limit" },
 ];
-const SERIES_COLOURS = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--series-4)"];
+const SERIES_COLOURS = [
+  "var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--series-4)",
+  "var(--series-5)", "var(--series-6)",
+];
 
 const money = value => "$" + Number(value).toFixed(Number(value) >= 100 ? 0 : 2);
 const el = (tag, cls, text) => {
@@ -314,11 +324,17 @@ async function load(path) {
 }
 
 function product(row) {
-  return PRODUCTS[row.provider] || String(row.provider || "Unknown");
+  return String(row.product || row.provider || "Unknown");
 }
 
 function sourceAccount(row) {
   return row.account_id ? String(row.account_id).slice(0, 8) : "single source";
+}
+
+// One chart line per account, never per product: two accounts on one plan have two meters
+// and two independent series. Joining them draws a trend that nobody measured.
+function seriesKey(row) {
+  return product(row) + " · " + sourceAccount(row);
 }
 
 function settled(resetKey) {
@@ -345,25 +361,30 @@ function visibleEstimates(history) {
 }
 
 function productNames(rows) {
-  const found = new Set(rows.map(row => row.product));
-  return [...PRODUCT_ORDER.filter(name => found.has(name) || Object.values(PRODUCTS).includes(name)),
-          ...[...found].filter(name => !PRODUCT_ORDER.includes(name)).sort()];
-}
-
-function latest(rows, name, window) {
-  const matches = rows.filter(row => row.product === name && row.window === window);
-  return matches.length ? matches[matches.length - 1] : null;
+  return [...new Set(rows.map(row => row.product))].sort();
 }
 
 function shortDate(value) {
   return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
-function renderSummary(rows) {
+// The headline figures come from the collector, which pools every completed window of a
+// plan across the accounts that hold it. The rows below are the individual windows those
+// figures were pooled from, and are kept separate on purpose.
+function renderSummary(products, rows) {
   const host = document.getElementById("summary");
   host.textContent = "";
 
-  for (const name of productNames(rows)) {
+  const pooled = new Map();
+  for (const row of products) pooled.set(row.product + " " + row.window, row);
+  const names = [...new Set([...products.map(row => row.product), ...productNames(rows)])].sort();
+
+  if (!names.length) {
+    host.append(el("p", "note", "No completed high-confidence estimate yet."));
+    return;
+  }
+
+  for (const name of names) {
     const card = el("article", "plan");
     card.append(el("h3", null, name));
     const limits = el("div", "limits");
@@ -371,14 +392,13 @@ function renderSummary(rows) {
     for (const window of WINDOWS) {
       const box = el("div", "limit");
       box.append(el("span", "limit-label", window.label));
-      const row = latest(rows, name, window.key);
+      const row = pooled.get(name + " " + window.key);
 
       if (row) {
         box.append(el("span", "limit-value mono", money(row.estimate_usd)));
-        const meta = el("span", "limit-meta mono",
-          shortDate(row.completed_at) + " · " + sourceAccount(row));
-        if (row.account_id) meta.title = String(row.account_id);
-        box.append(meta);
+        const windows = row.window_count + " window" + (row.window_count === 1 ? "" : "s");
+        const accounts = row.account_count + " account" + (row.account_count === 1 ? "" : "s");
+        box.append(el("span", "limit-meta mono", windows + " · " + accounts));
       } else {
         box.append(el("span", "limit-empty", "Not enough evidence yet"));
       }
@@ -421,8 +441,9 @@ function renderChart(host, rows, window) {
 
   const groups = new Map();
   for (const row of points) {
-    if (!groups.has(row.product)) groups.set(row.product, []);
-    groups.get(row.product).push(row);
+    const key = seriesKey(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
   }
   for (const series of groups.values()) series.sort((a, b) => a.completed_ms - b.completed_ms);
 
@@ -469,7 +490,7 @@ function renderChart(host, rows, window) {
     svg.append(tick);
   }
 
-  const names = productNames(points).filter(name => groups.has(name));
+  const names = [...groups.keys()].sort();
   names.forEach((name, index) => {
     const series = groups.get(name);
     const colour = SERIES_COLOURS[index % SERIES_COLOURS.length];
@@ -575,7 +596,7 @@ async function refresh() {
     ]);
 
     const rows = visibleEstimates(history.windows || []);
-    renderSummary(rows);
+    renderSummary(history.products || [], rows);
     renderCharts(rows);
     renderTable(rows);
 

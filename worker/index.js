@@ -91,6 +91,9 @@ function entitlementRow(row, agentId) {
       ? null
       : count(row.duration_minutes, "duration_minutes"),
     text(row.source, "source", { allowNull: true }) ?? "pushed",
+    // Older collectors do not send a plan. Null is a product in its own right, so an
+    // absent plan is stored as absent rather than guessed.
+    text(row.plan, "plan", { allowNull: true }),
   ];
 }
 
@@ -120,12 +123,13 @@ function usageRow(row, agentId) {
 const ENTITLEMENT_UPSERT = `
 INSERT INTO entitlement_snapshots
   (agent_id, observed_at, provider, account_id, account_key, window,
-   used_percent, resets_at, duration_minutes, source)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   used_percent, resets_at, duration_minutes, source, plan)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (agent_id, provider, account_key, window, observed_at) DO UPDATE SET
   used_percent = excluded.used_percent,
   resets_at = excluded.resets_at,
-  duration_minutes = excluded.duration_minutes`;
+  duration_minutes = excluded.duration_minutes,
+  plan = excluded.plan`;
 
 const USAGE_UPSERT = `
 INSERT INTO usage_rows
