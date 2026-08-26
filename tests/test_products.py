@@ -5,6 +5,7 @@ from subbench.products import (
     completed_direct,
     product_estimates,
     product_label,
+    product_series,
 )
 from subbench.regression import robust_estimates
 
@@ -133,3 +134,54 @@ def test_a_plan_change_splits_the_series_instead_of_mixing_quota_points():
     # 20 dollars over 20 quota points is 100 dollars a limit; 80 over 20 is 400.
     assert by_plan["plus"].estimate_usd == 100.0
     assert by_plan["pro"].estimate_usd == 400.0
+
+
+def test_the_series_pools_accounts_into_one_point_per_period():
+    """Two accounts finishing in one week are one measurement of the product, not two."""
+    monday = datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
+    rows = [
+        _window(account_id="acct-A", reset_key=monday.isoformat(), estimate_usd=100.0),
+        _window(account_id="acct-B", reset_key=(monday + timedelta(days=2)).isoformat(),
+                estimate_usd=120.0),
+    ]
+    series = product_series(rows, now=NOW)
+    assert len(series) == 1
+    assert series[0].product == "ChatGPT Plus"
+    assert series[0].period_start == "2026-08-03"
+    assert series[0].window_count == 2
+    assert series[0].account_count == 2
+
+
+def test_weekly_periods_are_weeks_and_five_hour_periods_are_days():
+    monday = datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
+    wednesday = monday + timedelta(days=2)
+    weekly = product_series(
+        [_window(reset_key=monday.isoformat()), _window(reset_key=wednesday.isoformat())],
+        now=NOW,
+    )
+    assert [row.period_start for row in weekly] == ["2026-08-03"]
+
+    hourly = product_series([
+        _window(window="five_hour", reset_key=monday.isoformat()),
+        _window(window="five_hour", reset_key=wednesday.isoformat()),
+    ], now=NOW)
+    assert [row.period_start for row in hourly] == ["2026-08-03", "2026-08-05"]
+
+
+def test_different_products_never_share_a_line():
+    monday = datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
+    series = product_series([
+        _window(plan="plus", reset_key=monday.isoformat(), estimate_usd=100.0),
+        _window(plan="pro", account_id="acct-B", reset_key=monday.isoformat(), estimate_usd=400.0),
+    ], now=NOW)
+    assert {row.product: row.estimate_usd for row in series} == {
+        "ChatGPT Plus": 100.0,
+        "ChatGPT Pro": 400.0,
+    }
+
+
+def test_the_series_keeps_history_beyond_the_headline_pool_period():
+    """The headline answers "what is it worth now"; the chart has to show the past too."""
+    old = (NOW - timedelta(days=POOL_DAYS + 20)).isoformat()
+    assert product_estimates([_window(reset_key=old)], now=NOW) == []
+    assert len(product_series([_window(reset_key=old)], now=NOW)) == 1

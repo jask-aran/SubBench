@@ -398,3 +398,81 @@ def test_no_peer_uses_only_the_absolute_floor():
     assert len(estimates) == 1
     assert estimates[0].slope_count == 3
     assert estimates[0].estimate_usd == pytest.approx(51.25)
+
+
+def test_spend_at_the_ceiling_is_excluded():
+    """A limit at 100% cannot buy quota, so dollars spent there are not part of its rate."""
+    clean = [
+        point(0, 0.0, "2026-07-27T00:00:00Z"),
+        point(50, 50.0, "2026-07-27T01:00:00Z"),
+        point(100, 100.0, "2026-07-27T02:00:00Z"),
+    ]
+    honest = robust_estimates(clean)[0].estimate_usd
+
+    # The same window, then four hours of extra-credit work after the limit is spent.
+    with_extra = clean + [
+        point(100, 160.0, "2026-07-27T04:00:00Z"),
+        point(100, 220.0, "2026-07-27T06:00:00Z"),
+    ]
+    assert robust_estimates(with_extra)[0].estimate_usd == honest
+
+
+def test_a_stalled_meter_below_the_ceiling_is_kept():
+    """Cost and an integer meter arrive out of phase constantly; that is not lost spend."""
+    rows = [
+        point(0, 0.0, "2026-07-27T00:00:00Z"),
+        point(0, 20.0, "2026-07-27T00:40:00Z"),   # dollars recorded, meter not yet ticked
+        point(50, 50.0, "2026-07-27T01:00:00Z"),  # meter catches up
+        point(100, 100.0, "2026-07-27T02:00:00Z"),
+    ]
+    assert robust_estimates(rows)[0].estimate_usd == pytest.approx(100.0, rel=0.2)
+
+
+def test_independent_intervals_are_blocks_not_readings():
+    from subbench.regression import independent_intervals
+
+    rows = [
+        point(0, 0.0, "2026-07-27T00:00:00Z"),
+        point(0, 5.0, "2026-07-27T00:10:00Z"),   # value only
+        point(4, 5.0, "2026-07-27T00:20:00Z"),   # quota only
+        point(8, 12.0, "2026-07-27T00:30:00Z"),
+    ]
+    intervals = independent_intervals(rows, unobserved=[0, 0, 0, 0])
+    # Two blocks, and between them they hold all 8 quota points and all $12 spent.
+    assert sum(quota for quota, _ in intervals) == 8
+    assert sum(value for _, value in intervals) == 12.0
+
+
+def test_the_band_needs_independent_readings_not_pairs():
+    """Three readings make three pairs but only two blocks, which cannot bound anything."""
+    estimates = robust_estimates([
+        point(10, 2.0, "2026-07-27T00:00:00Z"),
+        point(20, 5.0, "2026-07-27T00:10:00Z"),
+        point(30, 8.0, "2026-07-27T00:20:00Z"),
+    ])
+    assert estimates[0].slope_count == 3
+    assert estimates[0].interval_count == 0
+
+
+def test_the_band_is_stable_for_the_same_evidence():
+    rows = [point(2 * i, 2.0 * i, f"2026-07-27T{i:02d}:00:00Z") for i in range(1, 21)]
+    first, second = robust_estimates(rows)[0], robust_estimates(rows)[0]
+    assert (first.lower_usd, first.upper_usd) == (second.lower_usd, second.upper_usd)
+    assert first.interval_count > 0
+
+
+def test_the_band_narrows_as_readings_accumulate():
+    """A real interval must buy its confidence with evidence, not with more pairs."""
+    def width(count):
+        rows = [point(0, 0.0, "2026-07-27T00:00:00Z")]
+        used = cost = 0.0
+        for index in range(1, count):
+            used += 2.0
+            # A rate that wobbles, so there is genuine uncertainty left to narrow.
+            cost += 2.0 * (1.0 + 0.4 * ((index % 3) - 1))
+            rows.append(point(used, cost, f"2026-07-27T{index // 60:02d}:{index % 60:02d}:00Z"))
+        estimate = robust_estimates(rows)[0]
+        assert estimate.interval_count > 0
+        return (estimate.upper_usd - estimate.lower_usd) / estimate.estimate_usd
+
+    assert width(60) < width(15)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
+from random import Random
 from statistics import median
 from typing import Iterable, Mapping, Any
 
@@ -40,6 +41,9 @@ class RegressionEstimate:
     # The plan in force for every observation behind this estimate. Two accounts pool into
     # one product estimate only when this matches.
     plan: str | None = None
+    # Independent increments behind the estimate. slope_count counts pairs, which grow as
+    # the square of this and overstate how much evidence there is.
+    interval_count: int = 0
 
     @property
     def coverage_percent(self) -> float:
@@ -184,6 +188,32 @@ UNOBSERVED_RATE_MIN_QUOTA = 5.0
 # evidence. Usage genuinely consumed off-machine shows up over hours, not minutes.
 UNOBSERVED_MIN_MINUTES = 30.0
 
+# The mirror of the two rules above. They catch quota that moved with no spend beside it,
+# which understates value. Spend that moved with no quota beside it overstates it by the
+# same mechanism, and happens for real: a limit sitting at 100% while work continues on
+# extra credits, or an API key billed to the same logs but charged to no meter at all.
+# Measured over the month before this guard existed, 21 intervals showed it, one of them
+# $41 of recorded spend against a meter that never ticked.
+#
+# Only spend against a meter at its ceiling counts, and the narrowness is deliberate.
+#
+# Two wider rules were tried against a month of real observations and both did damage. A
+# rate test against the peer reference discards a healthy window measured against a
+# contaminated peer, because the reference is depressed by exactly the missing usage the
+# opposite rule looks for. Flagging any frozen meter is worse: cost and the meter arrive
+# out of phase constantly -- 513 stalls in that month, median nine minutes -- because the
+# provider ticks a whole percent while ccusage reports dollars continuously. That rule cut
+# one window's widest usable pair from 100 quota points to 21 and put its estimate $80 out.
+#
+# Out-of-phase spend is not lost: the meter ticks later and accounts for it. Spend at the
+# ceiling is different in kind. The meter cannot advance, so the quota is provably not
+# being bought, and no reference rate is needed to see it. That is the extra-credit case:
+# a limit reached, work continuing, dollars still recorded. It appeared as $32 of such
+# spend across both providers in one month.
+QUOTA_CEILING_PERCENT = 100.0
+# Below this, a reading at the ceiling is rounding rather than spend charged elsewhere.
+UNMETERED_MIN_VALUE_USD = 0.25
+
 # A quota reading is only usable if the cost total beside it was confirmed at roughly the
 # same moment. When collection stops, quota keeps advancing while cost stands still, and
 # the pair understates the value of that quota badly.
@@ -192,6 +222,23 @@ MAX_COST_AGE_MINUTES = 30.0
 # How much recent quota the marginal estimate looks back over. Wide enough that several
 # pairs survive the floor, narrow enough to follow a mid-window change in model mix.
 MARGINAL_QUOTA_SPAN_PERCENT = 20.0
+
+# The band is a bootstrap interval over the window's independent increments, not a spread
+# of its pairs.
+#
+# Every ordered pair is a sum of consecutive intervals, so n observations give about n^2/2
+# pairs but only n-1 independent readings. A spread taken over the pairs therefore narrows
+# as n^2 while the evidence grows as n, and it reports a window as settled long before it
+# is. Resampling the increments instead keeps the dependence honest: the interval narrows
+# with the square root of the number of increments, which is the rate real evidence buys.
+#
+# Resampling is seeded, so the same evidence always produces the same band. Two hundred
+# resamples is ample for a tenth and a ninetieth percentile.
+BOOTSTRAP_SAMPLES = 200
+BOOTSTRAP_SEED = 20260826
+# Below this many increments a resampled interval says more about the resampling than the
+# window, so no band is reported and the window cannot reach the top tier on width.
+MIN_BOOTSTRAP_INTERVALS = 8
 
 
 def _interval_minutes(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
@@ -241,6 +288,16 @@ def _unobserved_intervals(
                 # the quota it accompanied means most of that quota was consumed elsewhere.
                 rate = value_delta / (quota_delta / 100.0)
                 unobserved = rate < reference_rate * UNOBSERVED_RATE_FRACTION
+            if (
+                not unobserved
+                and quota_delta <= 0
+                and value_delta >= UNMETERED_MIN_VALUE_USD
+                and float(left["used_percent"]) >= QUOTA_CEILING_PERCENT
+            ):
+                # The limit is spent and work continues on extra credit. A pair spanning
+                # this divides real dollars by quota that could not move, so it reads as a
+                # far richer subscription than the one being measured.
+                unobserved = True
             if unobserved:
                 flagged[start:end] = [True] * (end - start)
 
@@ -255,6 +312,71 @@ def _unobserved_intervals(
             unmeasured += quota_delta
         counts.append(counts[-1] + (1 if flagged[index] else 0))
     return counts, advanced, unmeasured
+
+
+def independent_intervals(
+    rows: list[Mapping[str, Any]],
+    *,
+    unobserved: list[int],
+    min_quota_delta: float = MIN_QUOTA_DELTA_PERCENT,
+) -> list[tuple[float, float]]:
+    """The window as consecutive non-overlapping (quota, value) blocks.
+
+    These are the window's independent evidence: every valid pair is a sum of a run of
+    them, so they carry the same information without counting any of it twice.
+
+    A block closes once the meter has moved far enough to be worth dividing by, never on
+    every reading. Requiring both to move within one reading looks equivalent and is not:
+    the provider ticks a whole percent at a time while ccusage reports dollars
+    continuously, so the two arrive out of phase and most readings move one or the other.
+    On one real window that filter kept 97 blocks holding $26.56 of the $93.57 actually
+    spent, and valued a full limit at a third of its true rate.
+    """
+    intervals: list[tuple[float, float]] = []
+    start = 0
+    for index in range(1, len(rows)):
+        if unobserved[index] > unobserved[index - 1]:
+            # A flagged step contaminates the block being built, so drop it and restart.
+            start = index
+            continue
+        quota_delta = float(rows[index]["used_percent"]) - float(rows[start]["used_percent"])
+        value_delta = float(rows[index]["cost_usd"]) - float(rows[start]["cost_usd"])
+        if quota_delta >= min_quota_delta and value_delta > 0:
+            intervals.append((quota_delta, value_delta))
+            start = index
+    return intervals
+
+
+def bootstrap_band(
+    intervals: list[tuple[float, float]],
+    *,
+    samples: int = BOOTSTRAP_SAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[float | None, float | None]:
+    """A tenth-to-ninetieth interval for the window's rate, by resampling increments.
+
+    The statistic is total value over total quota, which is what the widest pair of a
+    window measures and what the quota-weighted median of its pairs approximates. Both
+    describe one full limit, so the interval is on the same scale as the estimate.
+    """
+    if len(intervals) < MIN_BOOTSTRAP_INTERVALS:
+        return None, None
+    rng = Random(seed)
+    count = len(intervals)
+    rates: list[float] = []
+    for _ in range(samples):
+        quota = value = 0.0
+        for _ in range(count):
+            drawn_quota, drawn_value = intervals[rng.randrange(count)]
+            quota += drawn_quota
+            value += drawn_value
+        if quota > 0:
+            rates.append(value / (quota / 100.0))
+    if not rates:
+        return None, None
+    rates.sort()
+    pick = lambda p: rates[min(int(p * (len(rates) - 1) + 0.5), len(rates) - 1)]
+    return pick(0.10), pick(0.90)
 
 
 def _valid_pairs(
@@ -445,10 +567,12 @@ def robust_estimates(
             _marginal_estimate(pairs, marginal_span=marginal_span)
         )
 
-        _, advanced, unmeasured = _unobserved_intervals(
+        unobserved_prefix, advanced, unmeasured = _unobserved_intervals(
             ordered, min_value_per_quota_point=MIN_VALUE_PER_QUOTA_POINT,
             reference_rate=reference,
         )
+        intervals = independent_intervals(ordered, unobserved=unobserved_prefix)
+        lower, upper = bootstrap_band(intervals)
         quota_values = [float(row["used_percent"]) for row in ordered]
         cost_values = [float(row["cost_usd"]) for row in ordered]
         estimates.append(
@@ -457,8 +581,10 @@ def robust_estimates(
                 window=window,
                 reset_key=reset_key,
                 estimate_usd=weighted_quantile(slopes, weights, 0.5),
-                lower_usd=weighted_quantile(slopes, weights, 0.10),
-                upper_usd=weighted_quantile(slopes, weights, 0.90),
+                # None when there are too few increments to resample. The confidence tier
+                # treats an absent band as "not shown to be settled", never as a narrow one.
+                lower_usd=lower if lower is not None else 0.0,
+                upper_usd=upper if upper is not None else 0.0,
                 observation_count=len(ordered),
                 slope_count=len(slopes),
                 quota_span_percent=max(quota_values) - min(quota_values),
@@ -473,6 +599,7 @@ def robust_estimates(
                 covered_quota_percent=advanced - unmeasured,
                 unobserved_quota_percent=unmeasured,
                 plan=plan,
+                interval_count=len(intervals) if lower is not None else 0,
             )
         )
 

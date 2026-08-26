@@ -59,6 +59,10 @@ VERSIONED_CONSTANTS: tuple[tuple[Any, str], ...] = (
     (regression, "UNOBSERVED_RATE_FRACTION"),
     (regression, "UNOBSERVED_RATE_MIN_QUOTA"),
     (regression, "UNOBSERVED_MIN_MINUTES"),
+    # The mirror of the rules above: they decide which pairs are contaminated by missing
+    # spend, this decides which are contaminated by spend charged to no meter.
+    (regression, "UNMETERED_MIN_VALUE_USD"),
+    (regression, "QUOTA_CEILING_PERCENT"),
     (regression, "MARGINAL_QUOTA_SPAN_PERCENT"),
     (regression, "RESET_CLUSTER_MINUTES"),
     (regression, "MAX_COST_AGE_MINUTES"),
@@ -80,7 +84,7 @@ TARGET_WINDOWS = ("weekly", "five_hour")
 
 # A policy marker is versioned with the estimator so replay data cannot make a policy
 # change look like a provider change when the numeric thresholds stay the same.
-ESTIMATOR_POLICY = "peer-reset-reference-v1"
+ESTIMATOR_POLICY = "peer-reset-reference-v2-unmetered-guard-bootstrap-band"
 
 # Replaying every observation is quadratic in pairs and cubic overall. The shape of a
 # convergence curve survives sampling; its cost does not.

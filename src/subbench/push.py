@@ -166,7 +166,7 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
     """
     from .crosssolve import account_plans, combined_estimates, divergences
     from .regression import robust_estimates
-    from .products import product_estimates, product_label
+    from .products import product_estimates, product_label, product_series
     from .server.confidence import classify
     from .store import model_mix, regression_points
     from .timeline import build_series
@@ -234,7 +234,13 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
         # products carries one pooled estimate per product and window. The page shows it as
         # the headline figure, because a product held on two accounts is one entitlement
         # measured twice and the pooled number uses both.
-        "history": {"windows": history, "products": [row.as_dict() for row in product_estimates(history)]},
+        "history": {
+            "windows": history,
+            # One pooled figure per product and limit, and the same pooling per period so
+            # the chart plots what the product was worth rather than what one account saw.
+            "products": [row.as_dict() for row in product_estimates(history)],
+            "product_series": [row.as_dict() for row in product_series(history)],
+        },
         "series": build_series(points),
         "models": {"models": models},
         "weights": {"providers": [solve(observations, provider=name).as_dict() for name in providers]},

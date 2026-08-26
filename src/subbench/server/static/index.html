@@ -280,16 +280,17 @@
 
   <section>
     <h2>Value over time</h2>
-    <p class="note">Each point is one completed, confirmed limit window. The horizontal axis is
-      the completion date and the vertical axis is API-equivalent US dollars. Each account has
-      its own line, because each account has its own meter.</p>
+    <p class="note">One line per product. Each point pools every completed, confirmed limit
+      window that finished in that period, across every account holding the plan, so a point
+      measures the product rather than one subscriber. The horizontal axis is the period and
+      the vertical axis is API-equivalent US dollars.</p>
     <div id="charts"></div>
   </section>
 
   <section>
     <h2>Completed estimates</h2>
-    <p class="note">This is the same data as the charts, with the source account kept visible.
-      Lower-confidence and open-window estimates are not included.</p>
+    <p class="note">The individual windows behind the figures above, each with the account it
+      was measured on. Lower-confidence and open-window estimates are not included.</p>
     <div class="scroll"><table id="estimates"></table></div>
   </section>
 
@@ -331,10 +332,20 @@ function sourceAccount(row) {
   return row.account_id ? String(row.account_id).slice(0, 8) : "single source";
 }
 
-// One chart line per account, never per product: two accounts on one plan have two meters
-// and two independent series. Joining them draws a trend that nobody measured.
-function seriesKey(row) {
-  return product(row) + " · " + sourceAccount(row);
+// Trend points arrive already pooled per product and period, so the chart plots what a
+// product is worth rather than what one account measured. The per-account windows behind
+// each point stay visible in the table below.
+function trendPoints(series) {
+  return (series || [])
+    .filter(row => Number(row.estimate_usd) > 0)
+    .map(row => ({
+      ...row,
+      product: product(row),
+      completed_at: row.period_start,
+      completed_ms: Date.parse(row.period_start),
+    }))
+    .filter(row => Number.isFinite(row.completed_ms))
+    .sort((a, b) => a.completed_ms - b.completed_ms);
 }
 
 function settled(resetKey) {
@@ -430,7 +441,10 @@ function renderChart(host, rows, window) {
   const box = el("div", "chart");
   const head = el("div", "chart-head");
   head.append(el("h3", null, window.label));
-  head.append(el("span", "count mono", points.length + " confirmed window" + (points.length === 1 ? "" : "s")));
+  const windows = points.reduce((total, row) => total + (row.window_count || 1), 0);
+  head.append(el("span", "count mono",
+    windows + " confirmed window" + (windows === 1 ? "" : "s")
+    + " over " + points.length + " point" + (points.length === 1 ? "" : "s")));
   box.append(head);
 
   if (!points.length) {
@@ -441,9 +455,8 @@ function renderChart(host, rows, window) {
 
   const groups = new Map();
   for (const row of points) {
-    const key = seriesKey(row);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(row);
+    if (!groups.has(row.product)) groups.set(row.product, []);
+    groups.get(row.product).push(row);
   }
   for (const series of groups.values()) series.sort((a, b) => a.completed_ms - b.completed_ms);
 
@@ -515,7 +528,8 @@ function renderChart(host, rows, window) {
       const tip = svgEl("title");
       tip.textContent = row.product + "\n"
         + money(row.estimate_usd) + " · " + shortDate(row.completed_at) + "\n"
-        + "source " + sourceAccount(row);
+        + row.window_count + " window" + (row.window_count === 1 ? "" : "s")
+        + " · " + row.account_count + " account" + (row.account_count === 1 ? "" : "s");
       dot.append(tip);
       svg.append(dot);
     }
@@ -536,10 +550,10 @@ function renderChart(host, rows, window) {
   host.append(box);
 }
 
-function renderCharts(rows) {
+function renderCharts(points) {
   const host = document.getElementById("charts");
   host.textContent = "";
-  for (const window of WINDOWS) renderChart(host, rows, window);
+  for (const window of WINDOWS) renderChart(host, points, window);
 }
 
 function renderTable(rows) {
@@ -597,7 +611,7 @@ async function refresh() {
 
     const rows = visibleEstimates(history.windows || []);
     renderSummary(history.products || [], rows);
-    renderCharts(rows);
+    renderCharts(trendPoints(history.product_series));
     renderTable(rows);
 
     const meta = document.getElementById("meta");

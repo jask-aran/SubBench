@@ -22,6 +22,9 @@ PAGE_FIELDS = {
 # Exactly what the page reads from a pooled product row.
 PRODUCT_FIELDS = {"product", "window", "estimate_usd", "window_count", "account_count"}
 
+# Exactly what the page reads from a pooled trend point.
+SERIES_FIELDS = {"product", "window", "period_start", "estimate_usd", "window_count", "account_count"}
+
 
 def _seed(db, *, account_id="acct-A", plan="plus", provider="codex"):
     """Three readings where both the meter and the recorded spend advance."""
@@ -81,6 +84,19 @@ def test_an_absent_plan_names_the_provider_alone(tmp_path):
     _seed(db, provider="claude", account_id=None, plan=None)
     products = {row["product"] for row in build_reports(db)["history"]["windows"]}
     assert products == {"Claude"}
+
+
+def test_history_carries_a_pooled_trend_series(tmp_path):
+    db = connect(tmp_path / "s.sqlite3")
+    _seed(db)
+    assert isinstance(build_reports(db)["history"]["product_series"], list)
+
+
+def test_pooled_trend_points_carry_every_field_the_page_reads(tmp_path):
+    db = connect(tmp_path / "s.sqlite3")
+    _seed(db)
+    for row in build_reports(db)["history"]["product_series"]:
+        assert SERIES_FIELDS <= set(row), SERIES_FIELDS - set(row)
 
 
 def test_pooled_product_rows_carry_every_field_the_page_reads(tmp_path):

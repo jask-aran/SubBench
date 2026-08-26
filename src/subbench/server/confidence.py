@@ -13,22 +13,36 @@ from typing import Any, Iterable, Mapping
 from ..regression import RegressionEstimate
 
 # A window must have measured real quota movement, most of the movement it saw, and
-# enough pairs that the weighted median is not resting on a handful of them.
+# enough independent readings that the estimate is not resting on a handful of them.
 MIN_COVERED_QUOTA_PERCENT = 25.0
 MIN_COVERAGE_PERCENT = 70.0
-MIN_SLOPE_COUNT = 50
 
-# Relative width of the 10th-90th percentile slope band, as a fraction of the estimate.
-# Set to 0.7 rather than 1.0 deliberately: at 1.0 every series observed so far passes
-# (0.77, 0.61, 0.53), so the rule would be decorative -- present but never deciding
-# anything. At 0.7 it filters estimates that reached `likely` but remain unstable.
-MAX_RELATIVE_BAND_WIDTH = 0.7
+# Increments, not pairs. Every pair is a sum of consecutive increments, so n observations
+# yield about n^2/2 pairs from n-1 independent readings: a pair count reads as far more
+# evidence than it is, and it grows quadratically while the evidence grows linearly. The
+# old rule asked for 50 pairs, which is about eleven observations; this asks for twelve
+# readings directly.
+MIN_INTERVAL_COUNT = 12
 
-# Two windows of the same account are independent measurements of one entitlement. When
-# a short window's rate predicts the long window's to within this margin, that is
-# evidence no single series can provide, because it catches systematic error rather than
-# noise. Sufficient for `confirmed`, never necessary -- providers exposing one window
-# must be able to reach the top tier too.
+# Relative width of the bootstrap interval, as a fraction of the estimate. The interval is
+# resampled from the window's independent increments, so unlike the old spread-of-pairs
+# band it narrows only as real evidence arrives.
+#
+# Re-derived when the band changed meaning. The old 0.7 was set against a spread that
+# narrowed as the square of the readings, so it was passed by almost anything given time.
+# Against a real interval it is far too loose: replayed over a month of observations it
+# confirmed a weekly limit at $885 whose interval ran from $498 to $1002, which is not a
+# figure to headline. Half the estimate keeps every window whose value is settled to
+# roughly plus or minus a quarter and drops the rest to a lower tier.
+MAX_RELATIVE_BAND_WIDTH = 0.5
+
+# Agreement between an account's short and long window is reported, never promoting.
+#
+# It once promoted a window to `confirmed` on its own, justified as catching systematic
+# error. It cannot. Both windows divide the same recorded spend by their own meter, so a
+# numerator that is wrong is wrong in both and the two still agree. What the comparison
+# does test is that the two meters advance together, which is worth saying and is not
+# evidence about the dollar figure.
 MAX_CORROBORATION_DIFFERENCE = 0.15
 
 CONFIRMED = "confirmed"
@@ -46,7 +60,10 @@ class Confidence:
 
 
 def relative_band_width(estimate: RegressionEstimate) -> float | None:
-    if estimate.estimate_usd <= 0:
+    """Width of the bootstrap interval relative to the estimate, or None if unbounded."""
+    if estimate.estimate_usd <= 0 or estimate.interval_count <= 0:
+        return None
+    if estimate.upper_usd <= 0 and estimate.lower_usd <= 0:
         return None
     return (estimate.upper_usd - estimate.lower_usd) / estimate.estimate_usd
 
@@ -58,8 +75,11 @@ def corroboration(
 
     Two windows of one account advance together: consuming a five-hour allowance also
     consumes part of the weekly one. The ratio of their observed quota movement converts
-    a rate measured on one into a prediction for the other, and the two were measured
-    independently, so agreement is meaningful.
+    a rate measured on one into a prediction for the other.
+
+    The two are not independent measurements. They share a numerator, the same recorded
+    spend, so agreement tells you the meters move together and says nothing about whether
+    the spend behind them was recorded correctly. Reported, never promoting.
     """
     if estimate.quota_span_percent <= 0 or estimate.estimate_usd <= 0:
         return None
@@ -98,26 +118,23 @@ def classify(
             PROVISIONAL,
             f"{100 - coverage:.0f}% of quota movement had no recorded spend beside it",
         )
-    if estimate.slope_count < MIN_SLOPE_COUNT:
+    if estimate.interval_count < MIN_INTERVAL_COUNT:
         return Confidence(
             PROVISIONAL,
-            f"{estimate.slope_count} valid pairs, need {MIN_SLOPE_COUNT}",
+            f"{estimate.interval_count} independent readings, need {MIN_INTERVAL_COUNT}",
         )
-
-    width = relative_band_width(estimate)
-    if width is not None and width <= MAX_RELATIVE_BAND_WIDTH:
-        return Confidence(CONFIRMED, f"slope band is {width:.0%} of the estimate")
 
     agreement = corroboration(estimate, peers)
+    note = ""
     if agreement is not None and agreement[0] <= MAX_CORROBORATION_DIFFERENCE:
-        difference, peer = agreement
-        return Confidence(
-            CONFIRMED,
-            f"agrees with the {peer.window} window to {difference:.1%}",
-        )
+        note = f"; meters agree with the {agreement[1].window} window to {agreement[0]:.1%}"
 
-    detail = f"slope band is {width:.0%} of the estimate" if width is not None else "wide slope band"
-    return Confidence(LIKELY, detail)
+    width = relative_band_width(estimate)
+    if width is None:
+        return Confidence(PROVISIONAL, "not enough readings to bound the estimate" + note)
+    if width <= MAX_RELATIVE_BAND_WIDTH:
+        return Confidence(CONFIRMED, f"estimate is bounded to {width:.0%} of itself" + note)
+    return Confidence(LIKELY, f"estimate is bounded only to {width:.0%} of itself" + note)
 
 
 def annotate(estimates: Iterable[RegressionEstimate]) -> list[dict[str, Any]]:

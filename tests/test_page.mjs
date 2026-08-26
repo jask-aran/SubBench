@@ -68,7 +68,7 @@ function harness() {
   let source = readFileSync(PAGE, "utf8").match(/<script>([\s\S]*)<\/script>/)[1];
   // The page refreshes itself on load and on a timer. Neither belongs in a unit test.
   source = source.replace(/\nrefresh\(\);\n\s*setInterval\([^)]*\);\s*$/, "\n");
-  source += "\nglobalThis.page = { renderSummary, renderCharts, renderTable, visibleEstimates, seriesKey };";
+  source += "\nglobalThis.page = { renderSummary, renderCharts, renderTable, visibleEstimates, trendPoints };";
 
   const context = vm.createContext({ document, setInterval() {}, fetch() {}, console });
   vm.runInContext(source, context);
@@ -93,33 +93,55 @@ function windowRow(overrides = {}) {
   };
 }
 
-test("two accounts on one plan are charted as two separate lines", () => {
-  const { page, hosts } = harness();
-  const rows = page.visibleEstimates([
-    windowRow({ account_id: "acct-A", reset_key: past(9), estimate_usd: 105 }),
-    windowRow({ account_id: "acct-B", reset_key: past(6), estimate_usd: 152 }),
-    windowRow({ account_id: "acct-A", reset_key: past(3), estimate_usd: 166 }),
-  ]);
-  page.renderCharts(rows);
+function trendRow(overrides = {}) {
+  return {
+    product: "ChatGPT Plus",
+    provider: "codex",
+    plan: "plus",
+    window: "weekly",
+    period_start: new Date(Date.now() - 7 * DAY).toISOString().slice(0, 10),
+    estimate_usd: 100,
+    window_count: 2,
+    account_count: 2,
+    ...overrides,
+  };
+}
 
-  // acct-A has two points and draws a line; acct-B has one and draws none. A single
-  // product-wide series would have drawn one line through all three.
+test("one line per product, whatever the accounts behind it", () => {
+  const { page, hosts } = harness();
+  const points = page.trendPoints([
+    trendRow({ period_start: "2026-08-03", estimate_usd: 105, window_count: 2, account_count: 2 }),
+    trendRow({ period_start: "2026-08-10", estimate_usd: 152, window_count: 3, account_count: 2 }),
+    trendRow({ product: "Claude", provider: "claude", plan: null, period_start: "2026-08-10",
+               estimate_usd: 300, window_count: 1, account_count: 1 }),
+  ]);
+  page.renderCharts(points);
+
   const weekly = hosts.charts.children[0];
+  // ChatGPT Plus has two periods and draws a line; Claude has one period and draws none.
   assert.equal(weekly.find("path").length, 1);
   assert.equal(weekly.find("circle").length, 3);
 
   const legend = weekly.children.find((child) => child.className === "legend");
-  assert.equal(legend.children.length, 2);
+  assert.deepEqual(legend.children.map((item) => item.text.trim()), ["ChatGPT Plus", "Claude"]);
 });
 
-test("one account draws one line", () => {
+test("the chart counts the windows pooled into its points", () => {
   const { page, hosts } = harness();
-  const rows = page.visibleEstimates([
-    windowRow({ reset_key: past(9) }),
-    windowRow({ reset_key: past(3) }),
-  ]);
-  page.renderCharts(rows);
-  assert.equal(hosts.charts.children[0].find("path").length, 1);
+  page.renderCharts(page.trendPoints([
+    trendRow({ period_start: "2026-08-03", window_count: 2 }),
+    trendRow({ period_start: "2026-08-10", window_count: 3 }),
+  ]));
+  assert.match(hosts.charts.children[0].text, /5 confirmed windows over 2 points/);
+});
+
+test("a trend point names the accounts it pooled, not one source account", () => {
+  const { page, hosts } = harness();
+  page.renderCharts(page.trendPoints([
+    trendRow({ period_start: "2026-08-03" }),
+    trendRow({ period_start: "2026-08-10" }),
+  ]));
+  assert.match(hosts.charts.children[0].text, /2 windows · 2 accounts/);
 });
 
 test("the headline value is the pooled product figure, not one account's window", () => {
