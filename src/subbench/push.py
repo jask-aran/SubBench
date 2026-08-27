@@ -155,6 +155,49 @@ def build_payload(
     return payload
 
 
+def value_report(db: sqlite3.Connection) -> dict[str, Any]:
+    """Every measurement the dashboard shows, and the only place they are derived.
+
+    The command line renders this too, so a figure in the terminal and the same figure on
+    the site come from one function rather than two that can drift apart.
+    """
+    from .crosssolve import combined_estimates
+    from .products import open_estimates, product_estimates, product_label, product_series
+    from .regression import robust_estimates
+    from .server.confidence import LIKELY, classify
+    from .store import regression_points
+    from .timeseries import window_history
+
+    points = [dict(row) for row in regression_points(db)]
+    estimates, _ratios = combined_estimates(points, robust_estimates(points))
+    tiers = {
+        (e.provider, e.window, e.account_id, e.plan, e.reset_key): classify(e, estimates).as_dict()
+        for e in estimates
+    }
+    windows = []
+    for row in window_history(estimates):
+        key = (row["provider"], row["window"], row.get("account_id"), row.get("plan"), row["reset_key"])
+        windows.append({
+            **row,
+            **tiers.get(key, {"tier": "provisional", "reason": ""}),
+            # The page shows the product, never the raw provider, so the name it displays
+            # is decided here from what the provider reported and not hardcoded there.
+            "product": product_label(str(row["provider"]), row.get("plan")),
+        })
+    return {
+        "windows": windows,
+        # One pooled figure per product and limit, and the same pooling per period so the
+        # chart plots what the product was worth rather than what one account saw.
+        "products": [row.as_dict() for row in product_estimates(windows)],
+        # Windows that cleared every check but the width of their interval. Shown as a
+        # range rather than a figure, because that is all they support.
+        "products_likely": [row.as_dict() for row in product_estimates(windows, tiers=(LIKELY,))],
+        # The synthetic current value, pooled from the windows still running.
+        "products_open": [row.as_dict() for row in open_estimates(windows)],
+        "product_series": [row.as_dict() for row in product_series(windows)],
+    }
+
+
 def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
     """Everything the dashboard displays, computed here rather than on the server.
 
@@ -234,18 +277,7 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
         # products carries one pooled estimate per product and window. The page shows it as
         # the headline figure, because a product held on two accounts is one entitlement
         # measured twice and the pooled number uses both.
-        "history": {
-            "windows": history,
-            # One pooled figure per product and limit, and the same pooling per period so
-            # the chart plots what the product was worth rather than what one account saw.
-            "products": [row.as_dict() for row in product_estimates(history)],
-            # Windows that cleared every check but the width of their interval. Shown as a
-            # range rather than a figure, because that is all they support.
-            "products_likely": [row.as_dict() for row in product_estimates(history, tiers=(LIKELY,))],
-            # The synthetic current value, pooled from the windows still running.
-            "products_open": [row.as_dict() for row in open_estimates(history)],
-            "product_series": [row.as_dict() for row in product_series(history)],
-        },
+        "history": value_report(db),
         # replay=False: the replay curve re-runs the whole estimator once per sampled
         # observation, so its cost grows with the square of the history and reached four
         # minutes on one month. The page reads history and health only, so paying that on

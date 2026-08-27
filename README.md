@@ -265,14 +265,22 @@ are important only at the edges of a reset window.
 
 ## 3. How the data reaches subbench.jask-aran.com
 
+Put the endpoint and the token in `~/.config/subbench/push.env`, which the service reads
+through systemd and the command line reads directly:
+
+```
+SUBBENCH_PUSH_URL=https://subbench.jask-aran.com/ingest
+SUBBENCH_PUSH_TOKEN=...
+```
+
 ```bash
-export SUBBENCH_PUSH_URL=https://subbench.jask-aran.com/ingest
-export SUBBENCH_PUSH_TOKEN=...
-subbench push
+subbench sync push      # send now
+subbench sync status    # endpoint, agent identity, cursor, last error
 ```
 
 `subbench watch` pushes every 30 minutes on its own clock when these two variables exist.
-It sends nothing when there is no new evidence.
+It sends nothing when there is no new evidence. A variable exported in the shell overrides
+the file, so a one-off endpoint needs no edit.
 
 Normal pushes are measurement-only. They send quota snapshots and the derived reports;
 raw usage rows stay in the local SQLite database. To send normalised usage rows for a
@@ -280,7 +288,7 @@ deliberate multi-machine aggregation test, set the exact opt-in before pushing:
 
 ```bash
 export SUBBENCH_PUSH_RAW_USAGE=1
-subbench push
+subbench sync push
 ```
 
 The usage cursor, whole-import batching, retry behavior, and server idempotency apply only
@@ -401,23 +409,40 @@ have systemd enabled.
 ## Commands
 
 ```bash
+subbench status                          # what each product is worth, and is collection healthy
+subbench values                          # every window measurement
+subbench values --tier confirmed         # only the settled ones
+subbench values --product Claude         # one product
+subbench values --account 9cb152f0       # one account
+subbench values --window weekly --json   # machine-readable
+subbench chart                           # the same pooled series the site plots
+subbench chart --window weekly --product ChatGPT
+
 subbench watch                           # continuous collection
 subbench watch --provider codex --once   # one diagnostic snapshot
-subbench doctor                          # check the dependencies and the freshness
-subbench report                          # rolling value and changes of limit
-subbench report --history                # one estimate for each reset window
-subbench report --intervals              # raw adjacent-interval diagnostics
-subbench report --json                   # stable machine-readable output
-subbench chart                           # terminal chart of the current window
-subbench chart --slopes                  # every slope in the current window
-subbench models                          # token share of each model
-subbench weights                         # per-model quota weights
-subbench accounts                        # known accounts and plans
-subbench imports                         # audit the raw usage imports
-subbench push                            # send the evidence to the server
 subbench collect codex --report daily    # manual or backfill collection
-subbench ingest payload.json --provider claude --report daily
+subbench doctor                          # check the dependencies and the freshness
+
+subbench sync push                       # send the evidence to the site
+subbench sync status                     # endpoint, agent, cursor, last error
+subbench sync reset --yes                # new agent identity, send everything again
+
+subbench data path                       # where the database is, and how big
+subbench data imports                    # audit the raw usage imports
+subbench data import payload.json --provider claude
+subbench data backup ~/subbench-backup.sqlite3
+subbench data prune --days 90 --yes      # drop raw usage older than the cutoff
+subbench data reset --yes                # delete every observation
+
+subbench detail models                   # token share of each model
+subbench detail weights                  # per-model quota weights
+subbench detail accounts                 # known accounts and plans
+subbench detail estimator --history      # raw estimator output
+subbench detail convergence --provider claude   # how one estimate settled
 ```
+
+The former names (`push`, `report`, `chart`, `models`, `weights`, `accounts`, `ingest`,
+`imports`, `init`) still work and map onto the commands above.
 
 `subbench chart` draws in a normal terminal with `plotext`. SubBench stays a CLI. It does
 not become an interactive TUI.

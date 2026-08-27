@@ -20,8 +20,8 @@ subbench doctor --json
 pytest
 subbench doctor --provider codex
 subbench watch --provider codex --once
-subbench report --provider codex --history
-subbench chart --provider codex
+subbench values --product ChatGPT
+subbench chart --product ChatGPT
 ```
 
 Then leave the watcher running, complete several Codex turns and verify:

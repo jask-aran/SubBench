@@ -193,3 +193,54 @@ def _key_account(row: Mapping[str, Any] | EstimateProgress | SlopeContribution) 
     if isinstance(account_id, str) and account_id:
         return account_id
     return None
+
+
+WINDOW_LABELS = {"weekly": "Weekly limit", "five_hour": "5-hour limit"}
+
+
+def render_product_series(
+    points: Iterable[Mapping[str, Any]],
+    *,
+    window: str | None = None,
+    product: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> bool:
+    """Plot the pooled product series, exactly as the site plots it.
+
+    One line per product, one point per period, each point already pooled across every
+    account holding the plan. The terminal and the site therefore draw the same thing from
+    the same numbers, rather than two renderings that can disagree.
+    """
+    rows = [dict(row) for row in points]
+    if product:
+        needle = product.lower()
+        rows = [row for row in rows if needle in str(row["product"]).lower()]
+    windows = [window] if window else sorted({str(row["window"]) for row in rows}, reverse=True)
+
+    drawn = False
+    for name in windows:
+        group = [row for row in rows if str(row["window"]) == name]
+        if not group:
+            continue
+        plt.clear_figure()
+        plt.plotsize(width or DEFAULT_WIDTH, height or DEFAULT_HEIGHT)
+        plt.title(WINDOW_LABELS.get(name, name) + " — API-equivalent US dollars")
+
+        periods = sorted({str(row["period_start"]) for row in group})
+        positions = {period: index + 1 for index, period in enumerate(periods)}
+        by_product: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+        for row in group:
+            by_product[str(row["product"])].append(row)
+        for label, series in sorted(by_product.items()):
+            ordered = sorted(series, key=lambda row: str(row["period_start"]))
+            plt.plot(
+                [positions[str(row["period_start"])] for row in ordered],
+                [float(row["estimate_usd"]) for row in ordered],
+                marker="dot",
+                label=label,
+            )
+        _apply_time_ticks(periods, _date_label)
+        plt.show()
+        drawn = True
+    return drawn
