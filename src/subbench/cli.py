@@ -478,7 +478,16 @@ def _print_status(db, database: Path, *, as_json: bool, refresh: bool) -> int:
 
     print(f"{readings:,} quota readings · newest {_ago(newest)} · {database}")
     if generated:
-        print(f"measurements computed {_ago(generated)} · `--refresh` re-derives them now")
+        # Counting the readings taken since says plainly whether the figures below have
+        # seen your recent use. "computed 3 h ago" is true and easy to read past.
+        behind = db.execute(
+            "SELECT COUNT(*) FROM entitlement_snapshots WHERE observed_at > ?", (generated,)
+        ).fetchone()[0]
+        if behind:
+            print(f"measurements computed {_ago(generated)}, before {behind:,} of the readings "
+                  f"below · `--refresh` re-derives them now")
+        else:
+            print(f"measurements computed {_ago(generated)}, current")
     if push:
         pending = db.execute(
             "SELECT COUNT(*) FROM entitlement_snapshots WHERE ? IS NULL OR observed_at > ?",

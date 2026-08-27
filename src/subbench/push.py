@@ -339,8 +339,13 @@ def push_once(
     token: str,
     sender: Callable[[str, str, dict[str, Any], float], dict[str, Any]] = _post,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    reports: dict[str, Any] | None = None,
 ) -> PushResult:
-    """Send one batch. Returns whether the local backlog is now drained."""
+    """Send one batch. Returns whether the local backlog is now drained.
+
+    `reports` lets a caller that has just derived them pass them in rather than have them
+    derived a second time.
+    """
     state = push_state(db, url)
     entitlements = pending_entitlements(db, state.entitlement_cursor, MAX_ENTITLEMENT_ROWS_PER_BATCH)
     usage = []
@@ -351,7 +356,8 @@ def push_once(
 
     # Reports go with the first batch of a push so the dashboard is never showing
     # numbers derived from evidence the server has not finished receiving.
-    payload = build_payload(state.agent_id, entitlements, usage, reports=build_reports(db))
+    payload = build_payload(state.agent_id, entitlements, usage,
+                            reports=reports if reports is not None else build_reports(db))
     try:
         sender(url, token, payload, timeout)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as error:
@@ -377,12 +383,13 @@ def push_all(
     token: str,
     sender: Callable[[str, str, dict[str, Any], float], dict[str, Any]] = _post,
     max_batches: int = 50,
+    reports: dict[str, Any] | None = None,
 ) -> PushResult:
     """Push until drained, a batch fails, or the batch limit is reached."""
     total_entitlements = total_usage = 0
     message = "nothing to push"
     for _ in range(max_batches):
-        result = push_once(db, url=url, token=token, sender=sender)
+        result = push_once(db, url=url, token=token, sender=sender, reports=reports)
         total_entitlements += result.sent_entitlements
         total_usage += result.sent_usage
         message = result.message

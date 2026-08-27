@@ -193,3 +193,32 @@ def test_refresh_re_derives(tmp_path, capsys, monkeypatch):
 
     assert main(["--database", str(path), "values", "--refresh"]) == 0
     assert "ChatGPT Plus" in capsys.readouterr().out
+
+
+def test_status_says_how_many_readings_the_measurements_predate(tmp_path, capsys):
+    """Stale figures must announce themselves, not sit under a line that reads as fine."""
+    from subbench.push import VALUE_REPORT_KIND
+    from subbench.store import save_report
+
+    path = _database(tmp_path)
+    db = connect(path)
+    save_report(db, VALUE_REPORT_KIND, {"windows": [], "products": [], "products_likely": [],
+                                        "products_open": [], "product_series": []},
+                "2026-08-01T00:30:00+00:00")
+    db.close()
+    assert main(["--database", str(path), "status"]) == 0
+    assert "before 2 of the readings below" in capsys.readouterr().out
+
+
+def test_status_says_current_when_nothing_arrived_since(tmp_path, capsys):
+    from subbench.push import VALUE_REPORT_KIND
+    from subbench.store import save_report
+
+    path = _database(tmp_path)
+    db = connect(path)
+    save_report(db, VALUE_REPORT_KIND, {"windows": [], "products": [], "products_likely": [],
+                                        "products_open": [], "product_series": []},
+                "2026-09-01T00:00:00+00:00")
+    db.close()
+    assert main(["--database", str(path), "status"]) == 0
+    assert "current" in capsys.readouterr().out

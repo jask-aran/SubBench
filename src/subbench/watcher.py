@@ -12,7 +12,7 @@ from . import account
 from .ccusage import CcusageSchemaError, normalise_payload
 from .entitlement import collect_entitlements
 from .incremental import AuthFileDetector, LogChangeDetector
-from .push import push_all
+from .push import build_reports, push_all
 from .store import dropped_periods, save_entitlements, save_import, upsert_account
 
 
@@ -43,13 +43,28 @@ TRUNCATION_RETRIES = 2
 PUSH_INTERVAL_SECONDS = 1800.0
 
 
-def push_if_due(db, *, last_pushed: float, now: float, emit) -> float:
+def refresh_if_due(db, *, last_refreshed: float, now: float, emit) -> float:
+    """Re-derive the measurements, then send them if there is anywhere to send them.
+
+    Deriving happens whether or not pushing is configured, and whether or not there is
+    anything new to send. It used to happen only as a side effect of a push that had rows
+    to carry, which left the stored measurements silently hours behind the readings on a
+    machine that was collecting and pushing perfectly well.
+    """
+    if now - last_refreshed < PUSH_INTERVAL_SECONDS:
+        return last_refreshed
+    try:
+        reports = build_reports(db)
+    except Exception as error:  # noqa: BLE001 - collection must survive any derivation failure
+        emit(f"{datetime.now(timezone.utc).isoformat()} derive failed: {error}")
+        return now
+
     url = os.environ.get("SUBBENCH_PUSH_URL")
     token = os.environ.get("SUBBENCH_PUSH_TOKEN")
-    if not url or not token or now - last_pushed < PUSH_INTERVAL_SECONDS:
-        return last_pushed
+    if not url or not token:
+        return now
     try:
-        result = push_all(db, url=url, token=token)
+        result = push_all(db, url=url, token=token, reports=reports)
         if result.sent_entitlements or result.sent_usage or not result.drained:
             emit(f"{datetime.now(timezone.utc).isoformat()} push: {result.message}")
     except Exception as error:  # noqa: BLE001 - collection must survive any push failure
@@ -140,7 +155,7 @@ def watch(
     pending_since: dict[str, float] = {}
     pending_debounce: dict[str, float] = {}
     last_collected: dict[str, float] = {target.provider: 0.0 for target in targets}
-    last_pushed = time.monotonic()
+    last_refreshed = time.monotonic()
 
     # Prime the auth detectors so a switch at runtime is reported as a change,
     # without treating the initial on-disk state as one.
@@ -172,7 +187,7 @@ def watch(
                 pending_since.pop(provider, None)
                 pending_debounce.pop(provider, None)
 
-        last_pushed = push_if_due(db, last_pushed=last_pushed, now=now, emit=emit)
+        last_refreshed = refresh_if_due(db, last_refreshed=last_refreshed, now=now, emit=emit)
 
         if once:
             return 1 if failed else 0
