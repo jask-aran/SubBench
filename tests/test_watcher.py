@@ -49,3 +49,28 @@ def test_watch_once_reports_failure() -> None:
         )
 
     assert result == 1
+
+
+def test_the_first_cycle_derives_rather_than_waiting_half_an_hour(monkeypatch):
+    """A restart must not leave the stored measurements stale for the next thirty minutes."""
+    from subbench import watcher as module
+
+    derived = []
+    monkeypatch.setattr(module, "build_reports", lambda db: derived.append(db) or {})
+    monkeypatch.delenv("SUBBENCH_PUSH_URL", raising=False)
+    monkeypatch.delenv("SUBBENCH_PUSH_TOKEN", raising=False)
+
+    module.refresh_if_due(None, last_refreshed=0.0, now=1.0, emit=lambda _m: None)
+    assert derived == [None]
+
+
+def test_a_derivation_failure_does_not_stop_collection(monkeypatch):
+    from subbench import watcher as module
+
+    def explode(_db):
+        raise RuntimeError("estimator fell over")
+
+    monkeypatch.setattr(module, "build_reports", explode)
+    messages = []
+    assert module.refresh_if_due(None, last_refreshed=0.0, now=1.0, emit=messages.append) == 1.0
+    assert "derive failed" in messages[0]

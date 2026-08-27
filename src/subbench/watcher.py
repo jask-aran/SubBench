@@ -51,7 +51,10 @@ def refresh_if_due(db, *, last_refreshed: float, now: float, emit) -> float:
     to carry, which left the stored measurements silently hours behind the readings on a
     machine that was collecting and pushing perfectly well.
     """
-    if now - last_refreshed < PUSH_INTERVAL_SECONDS:
+    # Zero means nothing has been derived in this run yet, which is due immediately. The
+    # clock cannot stand in for that: it counts from boot, so on a machine started minutes
+    # ago every interval looks as though it has only just begun.
+    if last_refreshed > 0 and now - last_refreshed < PUSH_INTERVAL_SECONDS:
         return last_refreshed
     try:
         reports = build_reports(db)
@@ -155,7 +158,9 @@ def watch(
     pending_since: dict[str, float] = {}
     pending_debounce: dict[str, float] = {}
     last_collected: dict[str, float] = {target.provider: 0.0 for target in targets}
-    last_refreshed = time.monotonic()
+    # Zero rather than now, so the first cycle derives instead of leaving the stored
+    # measurements half an hour behind from the moment the collector starts.
+    last_refreshed = 0.0
 
     # Prime the auth detectors so a switch at runtime is reported as a change,
     # without treating the initial on-disk state as one.
