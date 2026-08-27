@@ -72,6 +72,28 @@ CREATE TABLE IF NOT EXISTS push_state (
     last_pushed_at      TEXT,
     last_error          TEXT
 );
+-- Quota readings with the spend recorded beside them, worked out once and kept. Pricing a
+-- reading asks which import was current at that moment and sums the days inside its window,
+-- and the answer cannot change once both are in the past. import_seen_at records which
+-- import supplied the figure, so the one case that does change is detectable: an import
+-- whose last_seen_at moves forward becomes eligible for readings it was not eligible for
+-- before, and only those readings are dropped and priced again.
+CREATE TABLE IF NOT EXISTS priced_points (
+    provider         TEXT NOT NULL,
+    account_key      TEXT NOT NULL,
+    window           TEXT NOT NULL,
+    observed_at      TEXT NOT NULL,
+    account_id       TEXT,
+    used_percent     REAL NOT NULL,
+    resets_at        TEXT,
+    duration_minutes INTEGER,
+    plan             TEXT,
+    cost_usd         REAL NOT NULL,
+    cost_age_minutes REAL NOT NULL,
+    import_seen_at   TEXT NOT NULL,
+    PRIMARY KEY (provider, account_key, window, observed_at)
+);
+
 -- The derived measurements, kept so reading them is not re-deriving them. Every push
 -- refreshes this, and the command line reads it rather than replaying the estimator over
 -- the whole history to print one table.
@@ -79,6 +101,14 @@ CREATE TABLE IF NOT EXISTS reports (
     kind         TEXT PRIMARY KEY,
     generated_at TEXT NOT NULL,
     payload      TEXT NOT NULL
+);
+-- Invalidation is driven by the handful of imports that moved, and finds the readings they
+-- affect by provider, account and moment.
+CREATE INDEX IF NOT EXISTS priced_by_reading
+    ON priced_points(provider, account_key, observed_at);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS entitlement_lookup
     ON entitlement_snapshots(provider, window, observed_at);
@@ -333,7 +363,7 @@ def save_entitlements(db: sqlite3.Connection, rows: Iterable[EntitlementWindow],
 # depend on the days being valued and nothing else. The window opens mid-day, so the
 # first day carries some pre-window spend; that offset is constant within a window
 # and cancels in every pairwise difference.
-PRICED_WINDOWS_SQL = """
+_PRICED_WINDOWS_TEMPLATE = """
     WITH scoped AS (
         SELECT e.provider, e.account_id, e.window, e.observed_at, e.used_percent,
                e.resets_at, e.duration_minutes, e.plan,
@@ -351,12 +381,17 @@ PRICED_WINDOWS_SQL = """
                  WHERE i.provider = e.provider AND i.account_id IS e.account_id
                    AND COALESCE(i.last_seen_at, i.imported_at) <= e.observed_at
                  ORDER BY COALESCE(i.last_seen_at, i.imported_at) DESC LIMIT 1) AS cost_age_minutes,
+               (SELECT COALESCE(i.last_seen_at, i.imported_at) FROM imports i
+                 WHERE i.provider = e.provider AND i.account_id IS e.account_id
+                   AND COALESCE(i.last_seen_at, i.imported_at) <= e.observed_at
+                 ORDER BY COALESCE(i.last_seen_at, i.imported_at) DESC LIMIT 1) AS import_seen_at,
                DATE(e.resets_at, '-' || COALESCE(
                    e.duration_minutes,
                    CASE e.window WHEN 'five_hour' THEN 300 ELSE 10080 END
                ) || ' minutes') AS window_start_date,
                DATE(e.resets_at) AS window_end_date
         FROM entitlement_snapshots e
+        {unpriced_only}
     ), priced AS (
         SELECT s.*,
                (SELECT COALESCE(SUM(CAST(COALESCE(u.reported_cost_usd, '0') AS REAL)), 0.0)
@@ -373,6 +408,31 @@ PRICED_WINDOWS_SQL = """
          WHERE s.import_id IS NOT NULL
     )
 """
+
+# Every reading, for callers that summarise the lot.
+PRICED_WINDOWS_SQL = _PRICED_WINDOWS_TEMPLATE.format(unpriced_only="")
+
+# Only the readings not priced yet. The filter belongs inside the query rather than after
+# it: pricing every reading and then discarding the ones already stored costs the same as
+# not having stored them.
+_UNPRICED_ONLY = """
+        WHERE e.id IN (SELECT id FROM unpriced_ids)"""
+
+# Which readings still need pricing, decided by index lookups alone. Naming them first and
+# pricing only those is what makes a refresh cheap: leaving the test inside the pricing
+# query let SQLite run the import lookup and the usage sum for every reading before
+# discarding the ones already stored.
+_UNPRICED_IDS_SQL = """
+    CREATE TEMP TABLE unpriced_ids AS
+    SELECT e.id FROM entitlement_snapshots e
+     WHERE NOT EXISTS (
+         SELECT 1 FROM priced_points q
+          WHERE q.provider = e.provider
+            AND q.account_key = COALESCE(e.account_id, '')
+            AND q.window = e.window
+            AND q.observed_at = e.observed_at
+     )"""
+_PRICE_UNPRICED_SQL = _PRICED_WINDOWS_TEMPLATE.format(unpriced_only=_UNPRICED_ONLY)
 
 
 # Defined with the estimator so the server can import it without dragging in this
@@ -397,15 +457,89 @@ def regression_points(
         where.append("p.account_id IS ?")
         params.append(account_id)
     where_clause = "WHERE " + " AND ".join(where)
+    refresh_priced_points(db)
     return list(db.execute(
-        f"""{PRICED_WINDOWS_SQL}
-        SELECT p.provider, p.account_id, p.window, p.observed_at, p.used_percent,
+        f"""SELECT p.provider, p.account_id, p.window, p.observed_at, p.used_percent,
                p.resets_at, p.duration_minutes, p.plan, p.cost_usd, p.cost_age_minutes
-        FROM priced p
+        FROM priced_points p
         {where_clause}
         ORDER BY p.provider, p.account_id, p.window, p.resets_at, p.observed_at""",
         params,
     ))
+
+
+# The newest import seen at the last refresh. Confirming a payload sets last_seen_at to
+# now, so anything that moved sits above this mark.
+_IMPORT_WATERMARK = "priced_points.import_watermark"
+# The highest import id at the last refresh. An import written with a back-dated timestamp
+# would sit below the mark above while still being new, and this catches it.
+_IMPORT_ID_WATERMARK = "priced_points.import_id_watermark"
+
+# Columns of priced_points, in the order the pricing query produces them.
+_PRICED_COLUMNS = (
+    "provider, account_key, window, observed_at, account_id, used_percent, resets_at, "
+    "duration_minutes, plan, cost_usd, cost_age_minutes, import_seen_at"
+)
+
+
+def refresh_priced_points(db: sqlite3.Connection) -> tuple[int, int]:
+    """Price the readings that are not priced yet, and re-price the few that changed.
+
+    Returns how many rows were dropped as stale and how many were added. Readings are only
+    ever appended, so in the steady state this prices the handful collected since the last
+    call rather than all of them again.
+    """
+    with db:
+        # An import whose last_seen_at moved forward is now the current one for readings it
+        # was not current for before. Those readings, and only those, are priced again.
+        #
+        # Driven by the imports rather than by the readings. Asking every stored reading
+        # whether some import overtook it scanned the whole table for an answer that is
+        # almost always no; only an import seen since the last refresh can overtake
+        # anything, and moving last_seen_at forward sets it to now, so nothing that
+        # changed can sit below the mark.
+        marks = {row["key"]: row["value"] for row in db.execute("SELECT key, value FROM meta")}
+        seen_before = marks.get(_IMPORT_WATERMARK, "")
+        id_before = int(marks.get(_IMPORT_ID_WATERMARK, 0) or 0)
+        stale = db.execute(
+            """DELETE FROM priced_points WHERE rowid IN (
+                   SELECT p.rowid
+                     FROM imports i
+                     JOIN priced_points p
+                       ON p.provider = i.provider
+                      AND p.account_key = COALESCE(i.account_id, '')
+                    WHERE (COALESCE(i.last_seen_at, i.imported_at) > ? OR i.id > ?)
+                      AND COALESCE(i.last_seen_at, i.imported_at) <= p.observed_at
+                      AND COALESCE(i.last_seen_at, i.imported_at) > p.import_seen_at
+               )""",
+            (seen_before, id_before),
+        ).rowcount
+        db.execute("DROP TABLE IF EXISTS temp.unpriced_ids")
+        db.execute(_UNPRICED_IDS_SQL)
+        pending = db.execute("SELECT COUNT(*) FROM unpriced_ids").fetchone()[0]
+        added = 0
+        if pending:
+            db.execute(
+                f"""{_PRICE_UNPRICED_SQL}
+                INSERT OR REPLACE INTO priced_points ({_PRICED_COLUMNS})
+                SELECT p.provider, COALESCE(p.account_id, ''), p.window, p.observed_at,
+                       p.account_id, p.used_percent, p.resets_at, p.duration_minutes, p.plan,
+                       p.cost_usd, p.cost_age_minutes, p.import_seen_at
+                  FROM priced p
+                 WHERE p.import_seen_at IS NOT NULL"""
+            )
+            added = db.execute("SELECT changes()").fetchone()[0]
+        db.execute("DROP TABLE IF EXISTS temp.unpriced_ids")
+        watermark, highest_id = db.execute(
+            "SELECT COALESCE(MAX(COALESCE(last_seen_at, imported_at)), ''), COALESCE(MAX(id), 0) "
+            "FROM imports"
+        ).fetchone()
+        db.executemany(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            ((_IMPORT_WATERMARK, watermark), (_IMPORT_ID_WATERMARK, str(highest_id))),
+        )
+    return stale, added
 
 
 def model_mix(
