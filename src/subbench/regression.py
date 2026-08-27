@@ -462,17 +462,42 @@ def _peer_reference_rates(
             weights.append(quota_delta)
         contributions[key] = (slopes, weights)
 
+    # One sort per series rather than one per target. Every target needs the weighted
+    # median of the same pooled slopes minus its own, so pooling and sorting once and then
+    # walking that order while skipping the target's own contributions gives each answer
+    # exactly, without re-sorting tens of thousands of slopes K times over.
     references: dict[SeriesKey, float | None] = {}
-    for key, _ in groups:
-        slopes = []
-        weights = []
-        for peer_key, _peer_rows in by_series[key[:4]]:
-            if peer_key == key:
+    for series, members in by_series.items():
+        slopes: list[float] = []
+        weights: list[float] = []
+        sources: list[int] = []
+        totals: list[float] = []
+        for index, (member_key, _rows) in enumerate(members):
+            member_slopes, member_weights = contributions[member_key]
+            slopes.extend(member_slopes)
+            weights.extend(member_weights)
+            sources.extend([index] * len(member_slopes))
+            totals.append(sum(member_weights))
+        order = sorted(range(len(slopes)), key=slopes.__getitem__)
+        grand_total = sum(totals)
+
+        for index, (member_key, _rows) in enumerate(members):
+            threshold = (grand_total - totals[index]) * 0.5
+            if threshold <= 0:
+                # No peer contributed a usable pair, so this window has no reference and
+                # only the absolute floor applies to it.
+                references[member_key] = None
                 continue
-            peer_slopes, peer_weights = contributions[peer_key]
-            slopes.extend(peer_slopes)
-            weights.extend(peer_weights)
-        references[key] = weighted_quantile(slopes, weights, 0.5) if slopes else None
+            cumulative = 0.0
+            for position in order:
+                if sources[position] == index:
+                    continue
+                cumulative += weights[position]
+                if cumulative >= threshold:
+                    references[member_key] = slopes[position]
+                    break
+            else:
+                references[member_key] = slopes[order[-1]]
     return references
 
 

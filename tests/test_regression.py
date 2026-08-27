@@ -476,3 +476,55 @@ def test_the_band_narrows_as_readings_accumulate():
         return (estimate.upper_usd - estimate.lower_usd) / estimate.estimate_usd
 
     assert width(60) < width(15)
+
+
+def test_reference_rates_match_the_plain_definition():
+    """The fast path must agree with pooling every peer's slopes and taking the median.
+
+    _peer_reference_rates sorts once per series and walks that order per target, skipping
+    the target's own contributions, rather than concatenating and re-sorting for each. That
+    is an optimisation of a definition, so the definition is written out here and compared.
+    """
+    from subbench.regression import (
+        _ordered_groups, _peer_reference_rates, _valid_pairs, weighted_quantile,
+    )
+
+    points = []
+    for window_index, reset in enumerate(("a", "b", "c")):
+        used = cost = 0.0
+        for step in range(14):
+            used += 2.0
+            cost += 2.0 * (1.0 + 0.25 * ((step + window_index) % 4 - 1))
+            points.append(point(used, cost, f"2026-07-2{window_index}T{step:02d}:00:00Z", reset=reset))
+
+    groups = list(_ordered_groups(points))
+
+    def plainly(min_quota_delta):
+        by_series = {}
+        for key, rows in groups:
+            by_series.setdefault(key[:4], []).append((key, rows))
+        expected = {}
+        for key, _rows in groups:
+            slopes, weights = [], []
+            for peer_key, peer_rows in by_series[key[:4]]:
+                if peer_key == key:
+                    continue
+                for _, _, quota_delta, _, slope in _valid_pairs(peer_rows, min_quota_delta=min_quota_delta):
+                    slopes.append(slope)
+                    weights.append(quota_delta)
+            expected[key] = weighted_quantile(slopes, weights, 0.5) if slopes else None
+        return expected
+
+    assert _peer_reference_rates(groups, min_quota_delta=MIN_QUOTA_DELTA_PERCENT) == plainly(MIN_QUOTA_DELTA_PERCENT)
+
+
+def test_a_window_with_no_peers_has_no_reference():
+    from subbench.regression import _ordered_groups, _peer_reference_rates
+
+    points = [
+        point(10, 2.0, "2026-07-27T00:00:00Z"),
+        point(20, 5.0, "2026-07-27T01:00:00Z"),
+        point(30, 8.0, "2026-07-27T02:00:00Z"),
+    ]
+    groups = list(_ordered_groups(points))
+    assert set(_peer_reference_rates(groups, min_quota_delta=MIN_QUOTA_DELTA_PERCENT).values()) == {None}
