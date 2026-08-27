@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from . import account
+from . import account, config
 from .ccusage import CcusageSchemaError, normalise_payload
 from .charts import render_value_history
 from .doctor import exit_code as doctor_exit_code
@@ -93,6 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # Before the parser is built: --url and --token take their defaults from the
+    # environment, so the file has to be in it by then.
+    config.load()
     args = build_parser().parse_args(argv)
     db = connect(args.database)
     if args.command == "init":
