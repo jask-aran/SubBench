@@ -29,6 +29,8 @@ MAX_USAGE_ROWS_PER_BATCH = 5000
 MAX_ENTITLEMENT_ROWS_PER_BATCH = 5000
 DEFAULT_TIMEOUT_SECONDS = 30.0
 RAW_USAGE_ENV = "SUBBENCH_PUSH_RAW_USAGE"
+# The stored copy of every measurement the dashboard and the command line show.
+VALUE_REPORT_KIND = "value"
 
 
 @dataclass(frozen=True)
@@ -165,7 +167,8 @@ def value_report(db: sqlite3.Connection) -> dict[str, Any]:
     from .products import open_estimates, product_estimates, product_label, product_series
     from .regression import robust_estimates
     from .server.confidence import LIKELY, classify
-    from .store import regression_points
+    from .ccusage import imported_at
+    from .store import regression_points, save_report
     from .timeseries import window_history
 
     points = [dict(row) for row in regression_points(db)]
@@ -184,7 +187,7 @@ def value_report(db: sqlite3.Connection) -> dict[str, Any]:
             # is decided here from what the provider reported and not hardcoded there.
             "product": product_label(str(row["provider"]), row.get("plan")),
         })
-    return {
+    report = {
         "windows": windows,
         # One pooled figure per product and limit, and the same pooling per period so the
         # chart plots what the product was worth rather than what one account saw.
@@ -196,6 +199,11 @@ def value_report(db: sqlite3.Connection) -> dict[str, Any]:
         "products_open": [row.as_dict() for row in open_estimates(windows)],
         "product_series": [row.as_dict() for row in product_series(windows)],
     }
+    # Stored so the next reader does not repeat the work. Deriving these takes seconds over
+    # a long history, which is fine once every half hour on a push and is not fine on every
+    # command someone types.
+    save_report(db, VALUE_REPORT_KIND, report, imported_at())
+    return report
 
 
 def build_reports(db: sqlite3.Connection) -> dict[str, Any]:

@@ -72,6 +72,14 @@ CREATE TABLE IF NOT EXISTS push_state (
     last_pushed_at      TEXT,
     last_error          TEXT
 );
+-- The derived measurements, kept so reading them is not re-deriving them. Every push
+-- refreshes this, and the command line reads it rather than replaying the estimator over
+-- the whole history to print one table.
+CREATE TABLE IF NOT EXISTS reports (
+    kind         TEXT PRIMARY KEY,
+    generated_at TEXT NOT NULL,
+    payload      TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS entitlement_lookup
     ON entitlement_snapshots(provider, window, observed_at);
 CREATE INDEX IF NOT EXISTS entitlement_account_lookup
@@ -519,3 +527,23 @@ def list_accounts(db: sqlite3.Connection, provider: str | None = None) -> list[s
            FROM entitlement_snapshots e LEFT JOIN accounts a ON a.account_id = e.account_id
            ORDER BY COALESCE(a.email, e.account_id)"""
     ))
+
+def save_report(db: sqlite3.Connection, kind: str, payload: dict[str, Any], generated_at: str) -> None:
+    with db:
+        db.execute(
+            """INSERT INTO reports (kind, generated_at, payload) VALUES (?, ?, ?)
+               ON CONFLICT(kind) DO UPDATE SET
+                 generated_at = excluded.generated_at, payload = excluded.payload""",
+            (kind, generated_at, json.dumps(payload)),
+        )
+
+
+def load_report(db: sqlite3.Connection, kind: str) -> tuple[str, dict[str, Any]] | None:
+    """The stored report and when it was computed, or None if it never has been."""
+    row = db.execute("SELECT generated_at, payload FROM reports WHERE kind = ?", (kind,)).fetchone()
+    if row is None:
+        return None
+    try:
+        return str(row["generated_at"]), json.loads(row["payload"])
+    except (TypeError, ValueError):
+        return None

@@ -272,12 +272,34 @@ def _unobserved_intervals(
     Also totals the quota that advanced, and how much of it advanced unmeasured, so a
     report can say how much of the window the estimate actually rests on.
     """
+    # Every column this quadratic loop reads is converted once. It used to parse both
+    # endpoints' timestamps on each of its several million iterations, which cost more
+    # than the arithmetic it guards.
+    used = [float(row["used_percent"]) for row in rows]
+    cost = [float(row["cost_usd"]) for row in rows]
+    moments = [_moment(row.get("observed_at")) for row in rows]
+    anchor = next((moment for moment in moments if moment is not None), None)
+    # Minutes from the first dated reading, so an interval is one subtraction. An undated
+    # row keeps the old meaning of an unbounded gap: it is tested on quota alone.
+    elapsed: list[float | None] = [
+        None if moment is None or anchor is None else (moment - anchor).total_seconds() / 60.0
+        for moment in moments
+    ]
+
     flagged = [False] * max(len(rows) - 1, 0)
-    for start, left in enumerate(rows):
-        for end, right in enumerate(rows[start + 1 :], start=start + 1):
-            quota_delta = float(right["used_percent"]) - float(left["used_percent"])
-            value_delta = float(right["cost_usd"]) - float(left["cost_usd"])
-            if _interval_minutes(left, right) < UNOBSERVED_MIN_MINUTES:
+    for start in range(len(rows)):
+        left_used = used[start]
+        left_cost = cost[start]
+        left_elapsed = elapsed[start]
+        for end in range(start + 1, len(rows)):
+            quota_delta = used[end] - left_used
+            value_delta = cost[end] - left_cost
+            right_elapsed = elapsed[end]
+            if (
+                left_elapsed is not None
+                and right_elapsed is not None
+                and right_elapsed - left_elapsed < UNOBSERVED_MIN_MINUTES
+            ):
                 continue
             unobserved = (
                 quota_delta >= UNOBSERVED_QUOTA_POINTS
@@ -292,7 +314,7 @@ def _unobserved_intervals(
                 not unobserved
                 and quota_delta <= 0
                 and value_delta >= UNMETERED_MIN_VALUE_USD
-                and float(left["used_percent"]) >= QUOTA_CEILING_PERCENT
+                and left_used >= QUOTA_CEILING_PERCENT
             ):
                 # The limit is spent and work continues on extra credit. A pair spanning
                 # this divides real dollars by quota that could not move, so it reads as a
@@ -304,8 +326,8 @@ def _unobserved_intervals(
     counts = [0]
     advanced = 0.0
     unmeasured = 0.0
-    for index, (left, right) in enumerate(zip(rows, rows[1:])):
-        quota_delta = float(right["used_percent"]) - float(left["used_percent"])
+    for index in range(len(rows) - 1):
+        quota_delta = used[index + 1] - used[index]
         if quota_delta > 0:
             advanced += quota_delta
         if flagged[index] and quota_delta > 0:
@@ -426,18 +448,30 @@ def _peer_reference_rates(
     for key, rows in groups:
         by_series.setdefault(key[:4], []).append((key, rows))
 
-    references: dict[SeriesKey, float | None] = {}
-    for key, _ in groups:
+    # Each window's own pairs, computed once. Every window is a peer of every other window
+    # in its series, so building K reference rates by asking each target for its peers'
+    # pairs made K*(K-1) calls where K suffice, and each call is quadratic in that window's
+    # readings. On a month of observations that alone was most of the twenty seconds every
+    # command spent before printing anything.
+    contributions: dict[SeriesKey, tuple[list[float], list[float]]] = {}
+    for key, rows in groups:
         slopes: list[float] = []
         weights: list[float] = []
-        for peer_key, peer_rows in by_series[key[:4]]:
+        for _, _, quota_delta, _, slope in _valid_pairs(rows, min_quota_delta=min_quota_delta):
+            slopes.append(slope)
+            weights.append(quota_delta)
+        contributions[key] = (slopes, weights)
+
+    references: dict[SeriesKey, float | None] = {}
+    for key, _ in groups:
+        slopes = []
+        weights = []
+        for peer_key, _peer_rows in by_series[key[:4]]:
             if peer_key == key:
                 continue
-            for _, _, quota_delta, _, slope in _valid_pairs(
-                peer_rows, min_quota_delta=min_quota_delta
-            ):
-                slopes.append(slope)
-                weights.append(quota_delta)
+            peer_slopes, peer_weights = contributions[peer_key]
+            slopes.extend(peer_slopes)
+            weights.extend(peer_weights)
         references[key] = weighted_quantile(slopes, weights, 0.5) if slopes else None
     return references
 

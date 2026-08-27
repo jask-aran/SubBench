@@ -137,3 +137,59 @@ def test_data_backup_writes_a_readable_copy(tmp_path):
 def test_data_path_reports_size_and_counts(tmp_path, capsys):
     assert run(tmp_path, "data", "path") == 0
     assert "quota readings" in capsys.readouterr().out
+
+
+def test_measurements_are_stored_when_derived(tmp_path):
+    from subbench.push import VALUE_REPORT_KIND, value_report
+    from subbench.store import load_report
+
+    path = _database(tmp_path)
+    db = connect(path)
+    assert load_report(db, VALUE_REPORT_KIND) is None
+    value_report(db)
+    stored = load_report(db, VALUE_REPORT_KIND)
+    assert stored is not None and stored[1]["windows"]
+
+
+def test_reading_measurements_does_not_re_derive_them(tmp_path, capsys, monkeypatch):
+    """The whole point: a command prints what is stored instead of replaying the estimator."""
+    from subbench import cli
+    from subbench.push import VALUE_REPORT_KIND, value_report
+    from subbench.store import save_report
+
+    path = _database(tmp_path)
+    db = connect(path)
+    value_report(db)
+    save_report(db, VALUE_REPORT_KIND, {
+        "windows": [{"product": "Stored Product", "window": "weekly", "tier": "confirmed",
+                     "reset_key": "2026-08-05T00:00:00+00:00", "estimate_usd": 42.0,
+                     "lower_usd": 40.0, "upper_usd": 44.0, "interval_count": 9,
+                     "covered_quota_percent": 50.0, "account_id": None}],
+        "products": [], "products_likely": [], "products_open": [], "product_series": [],
+    }, "2026-08-05T00:00:00+00:00")
+    db.close()
+
+    def explode(_db):
+        raise AssertionError("re-derived the estimates instead of reading the stored ones")
+
+    monkeypatch.setattr(cli, "value_report", explode)
+    assert main(["--database", str(path), "values"]) == 0
+    assert "Stored Product" in capsys.readouterr().out
+
+
+def test_refresh_re_derives(tmp_path, capsys, monkeypatch):
+    from subbench import cli
+    from subbench.push import VALUE_REPORT_KIND
+    from subbench.store import save_report
+
+    path = _database(tmp_path)
+    db = connect(path)
+    save_report(db, VALUE_REPORT_KIND, {"windows": [], "products": [], "products_likely": [],
+                                        "products_open": [], "product_series": []},
+                "2026-08-05T00:00:00+00:00")
+    db.close()
+    assert main(["--database", str(path), "values"]) == 0
+    assert "No measurements match" in capsys.readouterr().out
+
+    assert main(["--database", str(path), "values", "--refresh"]) == 0
+    assert "ChatGPT Plus" in capsys.readouterr().out

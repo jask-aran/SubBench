@@ -16,10 +16,10 @@ from .charts import render_product_series, render_value_history
 from .doctor import exit_code as doctor_exit_code
 from .doctor import run_doctor
 from .crosssolve import account_plans, combined_estimates, divergences
-from .push import push_all, value_report
+from .push import VALUE_REPORT_KIND, push_all, value_report
 from .weights import observations_from_windows, solve
 from .regression import MIN_QUOTA_DELTA_PERCENT, _cluster_resets, robust_estimates
-from .store import connect, estimate_windows, list_accounts, list_imports, model_mix, regression_points, save_import
+from .store import connect, estimate_windows, list_accounts, list_imports, load_report, model_mix, regression_points, save_import
 from .timeseries import detect_regime_changes, rolling_values, window_history
 from .watcher import WatchTarget, ccusage_command, watch
 
@@ -64,6 +64,8 @@ def _add_filters(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--product", default=None, help="Match part of a product name, e.g. 'Claude' or 'ChatGPT Plus'")
     parser.add_argument("--account", default=None, help="Match the start of an account id")
     parser.add_argument("--window", choices=("all", "five_hour", "weekly"), default="all")
+    parser.add_argument("--refresh", action="store_true",
+                        help="Re-derive from the raw readings instead of reading the stored measurements")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = subcommands.add_parser("status", help="What is being measured, and is collection healthy")
     status.add_argument("--json", action="store_true", dest="as_json")
+    status.add_argument("--refresh", action="store_true",
+                        help="Re-derive from the raw readings instead of reading the stored measurements")
 
     values = subcommands.add_parser("values", help="The individual window measurements")
     _add_filters(values)
@@ -174,11 +178,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     db = connect(args.database)
 
     if args.command == "status":
-        return _print_status(db, args.database, as_json=args.as_json)
+        return _print_status(db, args.database, as_json=args.as_json, refresh=args.refresh)
     if args.command == "values":
         return _print_values(db, args)
     if args.command == "chart":
-        report = value_report(db)
+        report, _generated = _measurements(db, refresh=args.refresh)
         drawn = render_product_series(
             report["product_series"],
             window=None if args.window == "all" else args.window,
@@ -396,6 +400,10 @@ def _detail(db, args) -> int:
 
 WINDOW_NAMES = {"weekly": "weekly", "five_hour": "5-hour"}
 
+
+def _measured_at(generated: str | None) -> str:
+    return "" if generated is None else f", computed {_ago(generated)}"
+
 # Above this many observations, replaying the estimator per observation is slow enough to
 # be worth warning about before it starts rather than after.
 REPLAY_WARNING_POINTS = 400
@@ -437,8 +445,22 @@ def _matches(row: Mapping[str, Any], args) -> bool:
     return True
 
 
-def _print_status(db, database: Path, *, as_json: bool) -> int:
-    report = value_report(db)
+def _measurements(db, *, refresh: bool) -> tuple[dict[str, Any], str | None]:
+    """The stored measurements, or freshly derived ones when asked or when none are stored.
+
+    Deriving takes seconds over a long history. A push refreshes the store every half hour,
+    so reading it is what makes a command answer at once; --refresh is there for the moment
+    right after a collection when the last stored copy is a few minutes behind.
+    """
+    if not refresh:
+        stored = load_report(db, VALUE_REPORT_KIND)
+        if stored is not None:
+            return stored[1], stored[0]
+    return value_report(db), None
+
+
+def _print_status(db, database: Path, *, as_json: bool, refresh: bool) -> int:
+    report, generated = _measurements(db, refresh=refresh)
     readings = db.execute("SELECT COUNT(*) FROM entitlement_snapshots").fetchone()[0]
     newest = db.execute("SELECT MAX(observed_at) FROM entitlement_snapshots").fetchone()[0]
     push = db.execute("SELECT * FROM push_state LIMIT 1").fetchone()
@@ -455,6 +477,8 @@ def _print_status(db, database: Path, *, as_json: bool) -> int:
         return 0
 
     print(f"{readings:,} quota readings · newest {_ago(newest)} · {database}")
+    if generated:
+        print(f"measurements computed {_ago(generated)} · `--refresh` re-derives them now")
     if push:
         pending = db.execute(
             "SELECT COUNT(*) FROM entitlement_snapshots WHERE ? IS NULL OR observed_at > ?",
@@ -497,7 +521,8 @@ def _print_status(db, database: Path, *, as_json: bool) -> int:
 
 
 def _print_values(db, args) -> int:
-    rows = [row for row in value_report(db)["windows"] if _matches(row, args)]
+    report, generated = _measurements(db, refresh=args.refresh)
+    rows = [row for row in report["windows"] if _matches(row, args)]
     if not args.converted:
         rows = [row for row in rows if "~via~" not in str(row["reset_key"])]
     if args.tier != "all":
@@ -527,7 +552,7 @@ def _print_values(db, args) -> int:
             f"{str(row['reset_key'])[:10]:11} {row['tier']:12} {_money(row['estimate_usd']):>9} "
             f"{bounds:>19} {int(row.get('interval_count') or 0):>8} {float(row.get('covered_quota_percent') or 0):>7.0f}%"
         )
-    print(f"\n{len(rows)} measurement(s). Reasons: `subbench values --json`.")
+    print(f"\n{len(rows)} measurement(s){_measured_at(generated)}. Reasons: `subbench values --json`.")
     return 0
 
 
