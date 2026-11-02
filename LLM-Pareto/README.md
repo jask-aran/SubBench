@@ -2,6 +2,14 @@
 
 Tools for comparing model capability, task cost, token use, response time, and coding-agent configurations.
 
+## Original deployment
+
+The original [LLM-Pareto repository](https://github.com/jask-aran/LLM-Pareto)
+publishes its site at https://jask-aran.github.io/LLM-Pareto/ using GitHub Pages,
+with the root of its `main` branch as the source. Its daily leaderboard update
+workflow remains in that repository. The copy under `LLM-Pareto/.github/workflows/`
+in SubBench does not run from that nested location.
+
 ## Web explorer
 
 [`index.html`](./index.html) is the unified static explorer. Model mode combines
