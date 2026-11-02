@@ -9,7 +9,9 @@ import { DashRow, DashEmpty, DashMore } from "../conduit/ui/dashboard";
 // @ts-ignore
 import { money, range, plural, shortDate, integer } from "../lib/format.js";
 // @ts-ignore
-import { WINDOWS, summaryCards, visibleEstimates, trendPoints, mixByWindow, modelTotals, windowLabel } from "../lib/value.js";
+import { planPrice, valueMultiple } from "../lib/plans.js";
+// @ts-ignore
+import { WINDOWS, headline, summaryCards, visibleEstimates, trendPoints, mixByWindow, modelTotals, windowLabel } from "../lib/value.js";
 
 const MIX_COLOURS = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--series-4)", "var(--series-5)", "var(--series-6)", "var(--series-7)", "var(--series-8)"];
 
@@ -161,7 +163,10 @@ const legendKind = (dash?: string) => (dash === "dash" ? "dash" : dash === "dot"
 function ProductCard(props: { card: any; colour?: string; dash?: string }) {
   return <Inset>
     <div class="sb-inset-head"><div><h3 style={{ display: "flex", "align-items": "center", gap: "var(--space-sm)" }}>
-      <Legend items={[{ label: "", colour: props.colour, kind: legendKind(props.dash) }]} />{props.card.name}</h3></div></div>
+      <Legend items={[{ label: "", colour: props.colour, kind: legendKind(props.dash) }]} />{props.card.name}</h3>
+      <Show when={planPrice(props.card.name)}>{(cost) => <p>${cost().monthly} / month list price</p>}</Show></div>
+      <Show when={headline(props.card) && valueMultiple(props.card.name, headline(props.card).value)}>{(m) =>
+        <span class="sb-tag" title="Measured API value of a week's use over the week's share of the price">{m().toFixed(1)}× its price</span>}</Show></div>
     <div class="sb-limits">
       <For each={props.card.limits}>{(limit: any) =>
         <div>

@@ -138,3 +138,19 @@ test("the general attainment grid matches the cost-time one", () => {
   assert.equal(g.cells[4][4].entity.id, "c");
   assert.equal(g.cells[0][0].entity.id, "a");
 });
+
+import { planPrice, valueMultiple, tasksPerDollar } from "../web/src/lib/plans.js";
+
+test("plans have a monthly list price and a weekly share of it", () => {
+  assert.equal(planPrice("Claude Max 5X").monthly, 100);
+  assert.ok(Math.abs(planPrice("ChatGPT Plus").weekly - 20 * 12 / 52) < 1e-9);
+  assert.equal(planPrice("Some Future Plan"), null);
+});
+
+test("value per dollar compares plans of different sizes on one scale", () => {
+  // $1,502 of API value a week on a $100 plan is about 65 times the week's share of its price.
+  assert.equal(Math.round(valueMultiple("Claude Max 5X", 1502)), 65);
+  assert.equal(valueMultiple("Unknown", 100), null);
+  // 100 tasks a week on a $20 plan: 100 / (20 * 12 / 52) tasks per dollar.
+  assert.ok(Math.abs(tasksPerDollar("Claude Pro", 200, 2) - 100 / (20 * 12 / 52)) < 1e-9);
+});

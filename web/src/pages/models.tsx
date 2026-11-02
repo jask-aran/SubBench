@@ -6,6 +6,8 @@ import { ArrowLeftRightIcon, XIcon, SlidersHorizontalIcon } from "lucide-solid";
 import { hoverHTML } from "../app/charts";
 import { EChart } from "../app/echart";
 import { option2d, option3d, optionPlans, type Row, type PlanSeries } from "../app/modelchart";
+// @ts-ignore
+import { planPrice, valueMultiple } from "../lib/plans.js";
 import { RESOURCE_FORMAT } from "../app/points";
 import { loadFrontier, loadReports, personal } from "../app/data";
 import { Segmented, Input, Swatch, Slider } from "../conduit/ui/controls";
@@ -34,11 +36,12 @@ function Models() {
   const weekly = () => me()?.products[0]?.headline.value ?? null;
   // Every plan SubBench has measured, pooled across the accounts that report it. A plan covers its provider's models:
   // Claude plans Anthropic's, ChatGPT plans OpenAI's.
-  type Plan = { name: string; provider: string; value: number; kind: string; accounts: number };
+  type Plan = { name: string; provider: string; value: number; kind: string; accounts: number; monthly: number | null; multiple: number | null };
   const plans = createMemo<Plan[]>(() => (me()?.products ?? [])
     .filter((item: any) => item.card.provider)
     .map((item: any) => ({ name: item.card.name, provider: item.card.provider, value: item.headline.value, kind: item.headline.kind,
-      accounts: item.headline.row?.account_count ?? 1 }))
+      accounts: item.headline.row?.account_count ?? 1,
+      monthly: planPrice(item.card.name)?.monthly ?? null, multiple: valueMultiple(item.card.name, item.headline.value) }))
     .sort((a: Plan, b: Plan) => a.provider.localeCompare(b.provider) || a.value - b.value));
   const providerOf = (entity: any) => {
     const text = `${entity.provider ?? ""} ${entity.family ?? ""} ${entity.agent ?? ""}`.toLowerCase();
@@ -49,6 +52,8 @@ function Models() {
   const [onPlans, setOnPlans] = createSignal(false);
   // Chart: any axes. Plans: how much of the chosen benchmark's work each measured plan gets done per week.
   const [view, setView] = createSignal<"chart" | "plans">(params.get("view") === "plans" ? "plans" : "chart");
+  // Plans per week (what a limit gets done) or per dollar (what the money gets done, comparable across plan sizes).
+  const [perDollar, setPerDollar] = createSignal(params.get("basis") === "dollar");
   const provider = (key: string) => (key === "claude" ? "Anthropic" : key === "codex" ? "OpenAI" : key);
 
   const [mode, setMode] = createSignal<Mode>(params.get("mode") === "agent" ? "agent" : "model");
@@ -115,7 +120,7 @@ function Models() {
     if (zAxis() && !valid.has(zAxis())) setZ(NONE);
   });
   createEffect(() => {
-    const q = new URLSearchParams({ ...(mode() === "agent" ? { mode: "agent" } : {}), ...(view() === "plans" ? { view: "plans" } : {}), lens: lens(), x: xAxis(), y: yAxis(), ...(zAxis() ? { z: zAxis() } : {}), ...(zAxis() && !orbit() ? { orbit: "0" } : {}) });
+    const q = new URLSearchParams({ ...(mode() === "agent" ? { mode: "agent" } : {}), ...(view() === "plans" ? { view: "plans", ...(perDollar() ? { basis: "dollar" } : {}) } : {}), lens: lens(), x: xAxis(), y: yAxis(), ...(zAxis() ? { z: zAxis() } : {}), ...(zAxis() && !orbit() ? { orbit: "0" } : {}) });
     history.replaceState(null, "", `${location.pathname}?${q}`);
   });
 
@@ -216,18 +221,21 @@ function Models() {
       const points = base().filter((p: any) => providerOf(p.entity) === plan.provider && p.observation.resources?.cost > 0
           && !hidden().has(familyGroup(p.entity.family)) && (!needle() || `${p.entity.label} ${p.entity.id}`.toLowerCase().includes(needle())))
         .map((p: any) => {
-          const tasks = plan.value / p.observation.resources.cost;
+          const week = plan.value / p.observation.resources.cost;
+          const dollar = plan.monthly ? week / (plan.monthly * 12 / 52) : null;
+          const tasks = perDollar() ? dollar ?? 0 : week;
           return { key: key(p), label: label(p), short: p.entity.label, tasks, score: p.observation.score,
-            hover: hoverHTML(label(p), [["Plan", plan.name], ["Tasks / week", integer(tasks)], [meta()?.label ?? "Score", fmtScore(p.observation.score, meta()?.format)],
-              ["Cost / task", price(p.observation.resources.cost)]]), best: false };
+            hover: hoverHTML(label(p), [["Plan", plan.name + (plan.monthly ? ` · $${plan.monthly}/mo` : "")], ["Tasks / week", integer(week)],
+              ...(dollar ? [["Tasks / $", dollar < 10 ? dollar.toFixed(1) : integer(dollar)] as [string, string]] : []),
+              [meta()?.label ?? "Score", fmtScore(p.observation.score, meta()?.format)], ["Cost / task", price(p.observation.resources.cost)]]), best: false };
         });
       const keep = new Set(paretoN(points, [(q: any) => q.tasks, (q: any) => q.score], [true, true]).map((q: any) => q.key));
       for (const q of points) q.best = keep.has(q.key);
-      return { name: plan.name, colour: familyColor(provider(plan.provider)), dash: n > 0, points };
+      return { name: plan.name, colour: familyColor(provider(plan.provider)), dash: n > 0, points: points.filter((q: any) => q.tasks > 0) };
     }).filter((s) => s.points.length);
   });
   const chartOption = (size: { width: number; height: number }) => {
-    if (view() === "plans") return optionPlans({ plans: planSeries(), score: axisMeta("score"), labels: labels(), size });
+    if (view() === "plans") return optionPlans({ plans: planSeries(), score: axisMeta("score"), labels: labels(), size, perDollar: perDollar() });
     const r = rows();
     if (flat()) {
       const [x, y, z] = axes();
@@ -288,6 +296,10 @@ function Models() {
         <Segmented label="View" size="sm" value={view()} onChange={setView}
           options={[{ value: "chart", label: "Chart" }, { value: "plans", label: "Plans" }]} />
       </Show>
+      <Show when={view() === "plans"}>
+        <Segmented label="Basis" size="sm" value={perDollar() ? "dollar" : "week"} onChange={(v) => setPerDollar(v === "dollar")}
+          options={[{ value: "week", label: "Per week" }, { value: "dollar", label: "Per $" }]} />
+      </Show>
       <Show when={view() === "chart"}>
       <span class="sb-pick-group">
         <Picker label="X" value={xAxis()} groups={axisGroups()} onChoose={choose(setX)} placeholder="Find an axis" />
@@ -329,14 +341,14 @@ function Models() {
     <div class="sb-canvas" data-rail={rail() ? "on" : "off"}>
       <section class="sb-canvas-main" aria-label="Chart">
         <div class="sb-canvas-head">
-          <h2>{view() === "plans" ? `${meta()?.label ?? ""} vs tasks per week, by plan`
+          <h2>{view() === "plans" ? `${meta()?.label ?? ""} vs tasks per ${perDollar() ? "dollar" : "week"}, by plan`
             : `${title(yAxis())} vs ${title(xAxis())}${is3d() ? (orbit() ? ` vs ${title(zAxis())}` : ` · colour: ${title(zAxis())}`) : ""}`}</h2>
           <div class="sb-chart-legend">
             <Show when={view() === "plans"} fallback={<>
             <span><i data-best="" />best trade-off</span>
             <Show when={me()?.mine.size}><span><i data-ring="" />in measured usage</span></Show>
             <span>{items().length} shown · {is3d() && orbit() ? "drag to orbit" : "scroll to zoom"}</span></>}>
-              <span>tasks / week = plan value ÷ cost per task · each line a plan's best trade-offs</span>
+              <span>{perDollar() ? "tasks / $ = tasks per week ÷ the week's share of the plan's price" : "tasks / week = plan value ÷ cost per task"} · each line a plan's best trade-offs</span>
             </Show>
           </div>
         </div>
@@ -352,12 +364,12 @@ function Models() {
       <Show when={rail()}>
         <aside class="sb-rail">
           <Show when={plans().length}>
-            <Inset title="Measured plans" tight>
+            <Inset title="Measured plans" tight aside={<span class="sb-tag" data-tone="quiet">value ÷ price</span>}>
               <For each={plans()}>{(plan) =>
                 <div class="sb-plan-row">
                   <Swatch colour={familyColor(provider(plan.provider))} />
-                  <span>{plan.name}</span><b>${Math.round(plan.value).toLocaleString()}/wk</b>
-                  <small>{provider(plan.provider)} models · {plan.accounts} {plan.accounts === 1 ? "account" : "accounts"} · {plan.kind === "settled" ? "settled" : "in progress"}</small>
+                  <span>{plan.name}{plan.monthly ? <span class="muted"> · ${plan.monthly}/mo</span> : null}</span><b>{plan.multiple ? `${plan.multiple.toFixed(1)}×` : `$${Math.round(plan.value).toLocaleString()}/wk`}</b>
+                  <small>${Math.round(plan.value).toLocaleString()} of API value a week · {provider(plan.provider)} models · {plan.accounts} {plan.accounts === 1 ? "account" : "accounts"}</small>
                 </div>}</For>
             </Inset>
           </Show>
@@ -365,7 +377,7 @@ function Models() {
             <For each={planSeries()}>{(series) =>
               <Inset title={series.name} tight aside={<span class="sb-tag" data-tone="quiet">{series.points.filter((q) => q.best).length}</span>}>
                 <div class="sb-rows"><For each={series.points.filter((q) => q.best).sort((a, b) => b.score - a.score)}>{(q) =>
-                  <DashRow primary={q.label} trailing={`${fmtScore(q.score, meta()?.format, true)} · ${integer(q.tasks)}/wk`}
+                  <DashRow primary={q.label} trailing={`${fmtScore(q.score, meta()?.format, true)} · ${perDollar() ? (q.tasks < 10 ? q.tasks.toFixed(1) : integer(q.tasks)) + "/$" : integer(q.tasks) + "/wk"}`}
                     lead={<Swatch colour={series.colour} />} />}</For></div>
               </Inset>}</For>
           </Show>

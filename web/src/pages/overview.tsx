@@ -10,6 +10,8 @@ import { Select } from "../conduit/menus";
 // @ts-ignore
 import { money, integer, price, score as fmtScore, plural, shortDate } from "../lib/format.js";
 // @ts-ignore
+import { planPrice, valueMultiple } from "../lib/plans.js";
+// @ts-ignore
 import { trendPoints, modelTotals } from "../lib/value.js";
 // @ts-ignore
 import { familyColor, tasksPerEntitlement, matchModel } from "../lib/frontier.js";
@@ -96,7 +98,7 @@ function Overview() {
         <Show when={!reports.loading} fallback={<Skeleton height="4.5rem" />}>
           <For each={me()?.products || []} fallback={<Figure label="Subscriptions" empty={reports()?.error ? "Unavailable" : "None yet"} />}>{(item) =>
             <Figure label={item.card.name} colour={colours().get(item.card.name)} value={money(item.headline.value)} unit="/ week"
-              meta={<>{item.headline.kind === "settled" ? <>≈ <b>{money(item.headline.value * 52 / 12)}</b> / month · {plural(item.headline.row.window_count, "window")}</>
+              meta={<>{item.headline.kind === "settled" ? <>≈ <b>{money(item.headline.value * 52 / 12)}</b> / month{valueMultiple(item.card.name, item.headline.value) ? <> · <b>{valueMultiple(item.card.name, item.headline.value).toFixed(1)}×</b> its ${planPrice(item.card.name).monthly} price</> : null}</>
                 : item.headline.kind === "live" ? <>in progress · {Math.round(item.headline.row.covered_quota_percent)}% measured</> : <>range only, not yet settled</>}</>} />}</For>
         </Show>
         <Figure label="Models benchmarked" value={index() ? String(index()!.bundle.counts.models) : "—"}

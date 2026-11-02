@@ -233,7 +233,7 @@ export { mix };
    A plan only covers its provider's models, so each curve holds only those. */
 export type PlanSeries = { name: string; colour: string; dash: boolean; points: Array<{ key: string; label: string; short: string; tasks: number; score: number; hover: string; best: boolean }> };
 
-export function optionPlans(o: { plans: PlanSeries[]; score: Axis; labels: boolean; size: Size }) {
+export function optionPlans(o: { plans: PlanSeries[]; score: Axis; labels: boolean; size: Size; perDollar?: boolean }) {
   const p = palette();
   const series: any[] = [];
   for (const plan of o.plans) {
@@ -265,7 +265,8 @@ export function optionPlans(o: { plans: PlanSeries[]; score: Axis; labels: boole
     backgroundColor: "transparent", textStyle: { fontFamily: p.sans }, animationDuration: 250,
     grid: { left: 64, right: 130, top: 20, bottom: 52 },
     tooltip: tooltip(p),
-    xAxis: axis({ title: "Tasks / week", log: true, unit: "integer", higherBetter: true }, "Tasks per weekly limit · log", true),
+    xAxis: axis({ title: o.perDollar ? "Tasks / $" : "Tasks / week", log: true, unit: o.perDollar ? undefined : "integer", higherBetter: true },
+      o.perDollar ? "Tasks per dollar of subscription · log" : "Tasks per weekly limit · log", true),
     yAxis: axis(o.score, o.score.title, false),
     dataZoom: [{ type: "inside", xAxisIndex: 0, filterMode: "none" }, { type: "inside", yAxisIndex: 0, filterMode: "none" }],
     series,
