@@ -5,7 +5,7 @@ import { Picker, ToggleMenu, type PickGroup } from "../app/picker";
 import { ArrowLeftRightIcon, XIcon, SlidersHorizontalIcon } from "lucide-solid";
 import { hoverHTML } from "../app/charts";
 import { EChart } from "../app/echart";
-import { option2d, option3d, type Row } from "../app/modelchart";
+import { option2d, option3d, optionMatrix, type Row } from "../app/modelchart";
 import { RESOURCE_FORMAT } from "../app/points";
 import { loadFrontier, loadReports, personal } from "../app/data";
 import { Segmented, Input, Swatch, Slider } from "../conduit/ui/controls";
@@ -47,6 +47,8 @@ function Models() {
   const plansFor = (entity: any) => plans().filter((plan) => plan.provider === providerOf(entity));
   const planNamed = (axis: string) => plans().find((plan) => `sub:${plan.name}` === axis) ?? null;
   const [onPlans, setOnPlans] = createSignal(false);
+  // Chart: any axes. Plans: how much of the chosen benchmark's work each measured plan gets done per week.
+  const [view, setView] = createSignal<"chart" | "plans">(params.get("view") === "plans" ? "plans" : "chart");
   const provider = (key: string) => (key === "claude" ? "Anthropic" : key === "codex" ? "OpenAI" : key);
 
   const [mode, setMode] = createSignal<Mode>(params.get("mode") === "agent" ? "agent" : "model");
@@ -113,7 +115,7 @@ function Models() {
     if (zAxis() && !valid.has(zAxis())) setZ(NONE);
   });
   createEffect(() => {
-    const q = new URLSearchParams({ ...(mode() === "agent" ? { mode: "agent" } : {}), lens: lens(), x: xAxis(), y: yAxis(), ...(zAxis() ? { z: zAxis() } : {}), ...(zAxis() && !orbit() ? { orbit: "0" } : {}) });
+    const q = new URLSearchParams({ ...(mode() === "agent" ? { mode: "agent" } : {}), ...(view() === "plans" ? { view: "plans" } : {}), lens: lens(), x: xAxis(), y: yAxis(), ...(zAxis() ? { z: zAxis() } : {}), ...(zAxis() && !orbit() ? { orbit: "0" } : {}) });
     history.replaceState(null, "", `${location.pathname}?${q}`);
   });
 
@@ -205,7 +207,22 @@ function Models() {
       named: named.has(key(row.p)) || !!me()?.mine.has(row.p.entity.id),
     }));
   });
+  // The plans matrix: the benchmark's models with a cost per task that some measured plan covers, best score first.
+  const matrix = createMemo(() => {
+    const list = base().filter((p: any) => !hidden().has(familyGroup(p.entity.family)) && p.observation.resources?.cost > 0
+      && plansFor(p.entity).length && (!needle() || `${p.entity.label} ${p.entity.id}`.toLowerCase().includes(needle())))
+      .sort((a: any, b: any) => b.observation.score - a.observation.score).slice(0, 30);
+    const cells: Array<[number, number, number]> = [];
+    list.forEach((p: any, y: number) => plans().forEach((plan, x) => {
+      if (plan.provider === providerOf(p.entity)) cells.push([x, y, plan.value / p.observation.resources.cost]);
+    }));
+    return {
+      rows: list.map((p: any) => ({ key: key(p), label: label(p), score: fmtScore(p.observation.score, meta()?.format, true), colour: familyColor(p.entity.family) })),
+      plans: plans().map((plan) => ({ name: plan.name, value: plan.value })), cells,
+    };
+  });
   const chartOption = (size: { width: number; height: number }) => {
+    if (view() === "plans") return optionMatrix({ ...matrix(), size });
     const r = rows();
     if (flat()) {
       const [x, y, z] = axes();
@@ -262,6 +279,11 @@ function Models() {
   return <Site page="models" title="Models" wide fill>
     <div class="sb-toolbar">
       <Picker lead value={lens()} groups={lensGroups()} onChoose={choose(setLens)} placeholder="Find a benchmark or index" title="Benchmark" width="xl" />
+      <Show when={plans().length}>
+        <Segmented label="View" size="sm" value={view()} onChange={setView}
+          options={[{ value: "chart", label: "Chart" }, { value: "plans", label: "Plans" }]} />
+      </Show>
+      <Show when={view() === "chart"}>
       <span class="sb-pick-group">
         <Picker label="X" value={xAxis()} groups={axisGroups()} onChoose={choose(setX)} placeholder="Find an axis" />
         <button type="button" class="sb-icon-button" aria-label="Swap X and Y" title="Swap X and Y" onClick={swap}><ArrowLeftRightIcon /></button>
@@ -271,7 +293,8 @@ function Models() {
         <Picker label="Z" value={zAxis()} groups={axisGroups()} onChoose={choose(setZ)} placeholder="Find an axis" empty="Add a third axis" />
         <Show when={zAxis()}><button type="button" class="sb-icon-button" aria-label="Remove Z" title="Remove Z" onClick={() => setZ(NONE)}><XIcon /></button></Show>
       </span>
-      <Show when={is3d()}>
+      </Show>
+      <Show when={is3d() && view() === "chart"}>
         <Segmented label="Third axis" size="sm" value={orbit() ? "orbit" : "flat"} onChange={(v) => setOrbit(v === "orbit")}
           options={[{ value: "orbit", label: "3D" }, { value: "flat", label: "Colour" }]} />
       </Show>
@@ -301,16 +324,20 @@ function Models() {
     <div class="sb-canvas" data-rail={rail() ? "on" : "off"}>
       <section class="sb-canvas-main" aria-label="Chart">
         <div class="sb-canvas-head">
-          <h2>{`${title(yAxis())} vs ${title(xAxis())}`}{is3d() ? (orbit() ? ` vs ${title(zAxis())}` : ` · colour: ${title(zAxis())}`) : ""}</h2>
+          <h2>{view() === "plans" ? `${meta()?.label ?? ""} tasks per week, by plan`
+            : `${title(yAxis())} vs ${title(xAxis())}${is3d() ? (orbit() ? ` vs ${title(zAxis())}` : ` · colour: ${title(zAxis())}`) : ""}`}</h2>
           <div class="sb-chart-legend">
+            <Show when={view() === "plans"} fallback={<>
             <span><i data-best="" />best trade-off</span>
             <Show when={me()?.mine.size}><span><i data-ring="" />in measured usage</span></Show>
-            <span>{items().length} shown · {is3d() && orbit() ? "drag to orbit" : "scroll to zoom"}</span>
+            <span>{items().length} shown · {is3d() && orbit() ? "drag to orbit" : "scroll to zoom"}</span></>}>
+              <span>{matrix().rows.length} models · plan value ÷ cost per task</span>
+            </Show>
           </div>
         </div>
         <div class="sb-canvas-chart">
           <Show when={index()} fallback={<Skeleton />}>
-            <Show when={items().length >= 2} fallback={<div class="sb-chart-empty" style={{ height: "100%" }}>No models have all of these axes</div>}>
+            <Show when={view() === "plans" ? matrix().cells.length > 0 : items().length >= 2} fallback={<div class="sb-chart-empty" style={{ height: "100%" }}>No models have all of these axes</div>}>
               <EChart option={chartOption} onClick={onClick} label="Models chart" />
             </Show>
           </Show>
@@ -335,7 +362,7 @@ function Models() {
                 options={[{ value: "iso", label: "3D" }, { value: "front", label: "Front" }, { value: "side", label: "Side" }, { value: "top", label: "Top" }]} />
             </Inset>
           </Show>
-          <Show when={surfaceAxes()}>{(sa) =>
+          <Show when={view() === "chart" && surfaceAxes()}>{(sa) =>
             <Inset title="Budget" tight>
               <label class="sb-range"><span class="sb-range-head">{title(sa().a.a)} ≤ <b>{fmtAxis(sa().a.a, caps()!.a)}</b></span>
                 <input type="range" min="0" max="1000" value={posA()} onInput={(e) => setPosA(Number(e.currentTarget.value))} /></label>
@@ -349,7 +376,7 @@ function Models() {
                     </dl></div>}</Show>
               </div>
             </Inset>}</Show>
-          <Show when={solver()}>{(s) => {
+          <Show when={view() === "chart" && solver()}>{(s) => {
             const covering = () => plansFor(s().row.p.entity);
             return <Inset title="Cheapest at target" tight>
               <Slider label="Target" value={target()} onChange={setTarget}
@@ -369,6 +396,7 @@ function Models() {
                   primary={label(row.p)} trailing={fmtList(row)} />}</For></div>
             </Inset>
           </Show>
+          <Show when={view() === "chart"}>
           <Inset title="Best trade-offs" tight aside={<span class="sb-tag" data-tone="quiet">{bestList().length}</span>}>
             <div class="sb-rows">
               <For each={bestList()} fallback={<DashEmpty>None</DashEmpty>}>{(row: any, i) =>
@@ -379,6 +407,7 @@ function Models() {
                   trailing={fmtList(row)} />}</For>
             </div>
           </Inset>
+          </Show>
         </aside>
       </Show>
     </div>
