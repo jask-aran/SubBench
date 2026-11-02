@@ -18,9 +18,10 @@
     { "pattern": "subbench.jask-aran.com", "custom_domain": true }
   ],
 
-  // The site is a Vite build (web/). Wrangler runs it before `wrangler deploy` and `wrangler dev`, so the uploaded
+  // The site is a Vite build (web/). Wrangler installs its dependencies and runs it before `wrangler deploy` and
+  // `wrangler dev`, so a fresh checkout deploys in one command and the uploaded
   // assets are always the current source and never a stale build or a cached copy.
-  "build": { "command": "npm run build" },
+  "build": { "command": "npm install --no-audit --no-fund && npm run build" },
 
   "assets": {
     "directory": "dist/site",
