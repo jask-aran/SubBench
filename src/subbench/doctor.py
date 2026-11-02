@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import account
-from .incremental import discover_logs
+from .logs import discover as discover_logs
 
 
 @dataclass(frozen=True)
@@ -24,24 +24,15 @@ class Check:
 
 def run_doctor(db: sqlite3.Connection, database_path: Path, providers: Iterable[str]) -> list[Check]:
     checks: list[Check] = []
-    checks.append(_executable_check("python", shutil.which("python3") or shutil.which("python")))
-    checks.append(_executable_check("ccusage runner", _first_executable("npx", "bunx", "pnpm")))
-
     selected = tuple(providers)
     if "codex" in selected:
-        checks.append(_executable_check("codex", shutil.which("codex"), version_args=("--version",)))
+        checks.append(_login_check("codex"))
         checks.append(_codex_auth_check())
     if "claude" in selected:
-        checks.append(_executable_check("claude", shutil.which("claude"), version_args=("--version",)))
-        helper = os.environ.get("SUBBENCH_CLAUDE_USAGE_COMMAND")
-        # Without the helper, Claude token costs accumulate but no quota is ever
+        # Without a readable login, Claude token costs accumulate but no quota is ever
         # observed, so no Claude estimate can exist. That is a hard failure, not a
         # warning to be lost in one journal line per collection cycle.
-        checks.append(Check(
-            "Claude entitlement helper",
-            "ok" if helper else "error",
-            helper or "SUBBENCH_CLAUDE_USAGE_COMMAND is not set; Claude usage is priced but never valued",
-        ))
+        checks.append(_login_check("claude"))
 
     checks.append(_database_check(db, database_path))
     for provider in selected:
@@ -147,6 +138,29 @@ def _unobserved_quota_check(db: sqlite3.Connection, provider: str) -> Check | No
         "spend; that stretch and every pair spanning it is excluded, so the window rests "
         "on less evidence than its quota span suggests",
     )
+
+
+def _login_check(provider: str) -> Check:
+    """Whether the quota meter can be read: the stored login exists, and has not expired."""
+    from .endpoints import EndpointError, _jwt_expiry, claude_credentials, codex_tokens
+    import time
+
+    name = f"{provider} login"
+    try:
+        if provider == "claude":
+            if os.environ.get("SUBBENCH_CLAUDE_USAGE_COMMAND"):
+                return Check(name, "ok", f"read by SUBBENCH_CLAUDE_USAGE_COMMAND: {os.environ['SUBBENCH_CLAUDE_USAGE_COMMAND']}")
+            oauth = claude_credentials()
+            expires = oauth.get("expiresAt")
+            expiry = expires / 1000 if isinstance(expires, (int, float)) else None
+        else:
+            expiry = _jwt_expiry(codex_tokens()["access_token"])
+    except EndpointError as error:
+        return Check(name, "error", str(error))
+    if expiry is not None and expiry < time.time():
+        agent = "Claude Code" if provider == "claude" else "Codex"
+        return Check(name, "warn", f"expired; readings resume once {agent} next refreshes it")
+    return Check(name, "ok", "present" + (f", valid for {(expiry - time.time()) / 3600:.0f} h" if expiry else ""))
 
 
 def _codex_auth_check() -> Check:

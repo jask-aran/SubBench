@@ -6,12 +6,13 @@ import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from . import account
 from .ccusage import CcusageSchemaError, normalise_payload
 from .entitlement import collect_entitlements
 from .incremental import AuthFileDetector, LogChangeDetector
+from .logs import LogReader, raw as logs_raw
 from .push import build_reports, push_all
 from .store import dropped_periods, plan_moves, save_entitlements, save_import, upsert_account
 
@@ -20,6 +21,26 @@ from .store import dropped_periods, plan_moves, save_entitlements, save_import, 
 class WatchTarget:
     provider: str
     report: str = "daily"
+
+
+RUNNERS = ("native", "npx", "bunx", "pnpm")
+
+# One reader per provider for the life of the process, so each pass parses only what the
+# agents appended since the last one.
+_READERS: dict[str, LogReader] = {}
+
+
+def reader(provider: str) -> LogReader:
+    if provider not in _READERS:
+        _READERS[provider] = LogReader(provider)
+    return _READERS[provider]
+
+
+def native_report(provider: str, report: str) -> tuple[bytes, Any]:
+    if report != "daily":
+        raise ValueError(f"the built-in reader produces daily reports; use --runner npx for a {report} report")
+    payload = reader(provider).daily()
+    return logs_raw(payload), payload
 
 
 def ccusage_command(*, runner: str, provider: str, report: str) -> list[str]:
@@ -78,44 +99,28 @@ def refresh_if_due(db, *, last_refreshed: float, now: float, emit) -> float:
 def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
     messages: list[str] = []
     failed = False
-    command = ccusage_command(runner=runner, provider=target.provider, report=target.report)
-
     account_id = account.active_account_id() if target.provider == "codex" else None
 
-    result = subprocess.run(command, check=False, capture_output=True)
-    if result.returncode != 0:
-        error = result.stderr.decode("utf-8", errors="replace").strip()
-        messages.append(error or f"ccusage exited with status {result.returncode}")
-        failed = True
-    else:
+    if runner == "native":
         try:
-            payload = json.loads(result.stdout)
-            rows = normalise_payload(payload, provider=target.provider, report=target.report)
-            # ccusage sometimes returns fewer days than its own previous run. Retry a
-            # bounded number of times rather than storing a report known to be short.
-            for _ in range(TRUNCATION_RETRIES):
-                dropped = dropped_periods(db, provider=target.provider, account_id=account_id, rows=rows)
-                if not dropped:
-                    break
-                messages.append(f"retrying, ccusage dropped {len(dropped)} period(s)")
-                retry = subprocess.run(command, check=False, capture_output=True)
-                if retry.returncode != 0:
-                    break
-                result = retry
-                payload = json.loads(retry.stdout)
-                rows = normalise_payload(payload, provider=target.provider, report=target.report)
+            raw, payload = native_report(target.provider, target.report)
+            rows = normalise_payload(payload, provider=target.provider, report=target.report) if payload["daily"] else []
+            if rows:
+                import_id, row_count, created = save_import(
+                    db, raw=raw, payload=payload, rows=rows, provider=target.provider, report=target.report,
+                    command=f"subbench {target.provider} logs", account_id=account_id,
+                )
+                messages.append(f"usage {'recorded' if created else 'unchanged'} import {import_id} ({row_count} rows)")
             else:
-                messages.append("ccusage still short after retries; storing anyway")
-            import_id, row_count, created = save_import(
-                db, raw=result.stdout, payload=payload, rows=rows,
-                provider=target.provider, report=target.report,
-                command=" ".join(command), account_id=account_id,
-            )
-            state = "recorded" if created else "unchanged"
-            messages.append(f"usage {state} import {import_id} ({row_count} rows)")
-        except (json.JSONDecodeError, UnicodeDecodeError, CcusageSchemaError, ValueError) as error:
+                messages.append("usage: no local sessions yet")
+            unknown = sorted(reader(target.provider).prices.unknown) if reader(target.provider).prices else []
+            if unknown:
+                messages.append(f"no price for {', '.join(unknown)}")
+        except (OSError, CcusageSchemaError, ValueError) as error:
             messages.append(f"usage error: {error}")
             failed = True
+    else:
+        failed = _collect_ccusage(db, target=target, runner=runner, account_id=account_id, messages=messages)
 
     try:
         entitlements = collect_entitlements(target.provider)
@@ -139,6 +144,44 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
     return not failed, f"{target.provider}: " + "; ".join(messages)
 
 
+def _collect_ccusage(db, *, target: WatchTarget, runner: str, account_id: str | None, messages: list[str]) -> bool:
+    """The previous collector: run ccusage and store what it prints. Kept for comparison."""
+    command = ccusage_command(runner=runner, provider=target.provider, report=target.report)
+    result = subprocess.run(command, check=False, capture_output=True)
+    if result.returncode != 0:
+        error = result.stderr.decode("utf-8", errors="replace").strip()
+        messages.append(error or f"ccusage exited with status {result.returncode}")
+        return True
+    try:
+        payload = json.loads(result.stdout)
+        rows = normalise_payload(payload, provider=target.provider, report=target.report)
+        # ccusage sometimes returns fewer days than its own previous run. Retry a
+        # bounded number of times rather than storing a report known to be short.
+        for _ in range(TRUNCATION_RETRIES):
+            dropped = dropped_periods(db, provider=target.provider, account_id=account_id, rows=rows)
+            if not dropped:
+                break
+            messages.append(f"retrying, ccusage dropped {len(dropped)} period(s)")
+            retry = subprocess.run(command, check=False, capture_output=True)
+            if retry.returncode != 0:
+                break
+            result = retry
+            payload = json.loads(retry.stdout)
+            rows = normalise_payload(payload, provider=target.provider, report=target.report)
+        else:
+            messages.append("ccusage still short after retries; storing anyway")
+        import_id, row_count, created = save_import(
+            db, raw=result.stdout, payload=payload, rows=rows,
+            provider=target.provider, report=target.report,
+            command=" ".join(command), account_id=account_id,
+        )
+        messages.append(f"usage {'recorded' if created else 'unchanged'} import {import_id} ({row_count} rows)")
+    except (json.JSONDecodeError, UnicodeDecodeError, CcusageSchemaError, ValueError) as error:
+        messages.append(f"usage error: {error}")
+        return True
+    return False
+
+
 def watch(
     db,
     *,
@@ -150,7 +193,7 @@ def watch(
     reconcile_seconds: float = 21600.0,
     emit: Callable[[str], None] = print,
 ) -> int:
-    """Watch local logs cheaply and run ccusage only after changes or reconciliation."""
+    """Watch local logs cheaply and collect only after changes or reconciliation."""
     if interval_seconds <= 0 or debounce_seconds < 0 or reconcile_seconds <= 0:
         raise ValueError("watch intervals must be positive")
 

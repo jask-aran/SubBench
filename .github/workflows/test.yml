@@ -38,3 +38,16 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+
+  # The release builds this same single-file executable; building it on every change means a
+  # packaging break shows here and not on a release tag.
+  binary:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sh packaging/binary/build.sh
+      - run: dist/bin/subbench-linux-x64 privacy
+      - run: dist/bin/subbench-linux-x64 service install --dry-run

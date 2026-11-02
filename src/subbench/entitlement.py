@@ -58,54 +58,36 @@ def collect_entitlements(provider: str) -> list[EntitlementWindow]:
 
 
 def collect_codex() -> list[EntitlementWindow]:
-    account_id = account.active_account_id()
-    rows = collect_codex_for(account_id)
-    return rows
+    return collect_codex_for(account.active_account_id())
 
 
 def collect_codex_for(account_id: str | None) -> list[EntitlementWindow]:
-    process = subprocess.Popen(
-        ["codex", "app-server"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    assert process.stdin is not None and process.stdout is not None
+    from .endpoints import EndpointError, codex_app_server, codex_usage
+
     try:
-        requests = (
-            {"method": "initialize", "id": 1, "params": {"clientInfo": {"name": "subbench", "title": "SubBench", "version": "0.1.0"}, "capabilities": {}}},
-            {"method": "initialized", "params": {}},
-            {"method": "account/rateLimits/read", "id": 2},
-        )
-        for request in requests:
-            process.stdin.write(json.dumps(request) + "\n")
-            process.stdin.flush()
-        for line in process.stdout:
-            message = json.loads(line)
-            if message.get("id") == 2:
-                return _normalise_codex(message.get("result", {}), account_id=account_id)
-        raise RuntimeError("codex app-server ended before returning rate limits")
-    finally:
-        process.terminate()
+        payload = codex_usage()
+    except EndpointError as direct:
         try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
+            payload = codex_app_server()
+        except (EndpointError, OSError, ValueError) as fallback:
+            raise RuntimeError(f"{direct} (and {fallback})") from None
+    return _normalise_codex(payload, account_id=account_id)
 
 
 def collect_claude() -> list[EntitlementWindow]:
+    # An explicit command still wins, for anyone who wired their own reader.
     command = os.environ.get("SUBBENCH_CLAUDE_USAGE_COMMAND")
-    if not command:
-        raise RuntimeError(
-            "Claude entitlement collection requires SUBBENCH_CLAUDE_USAGE_COMMAND; "
-            "set it to a local command that prints the OAuth usage response as JSON"
-        )
-    result = subprocess.run(shlex.split(command), check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"Claude usage command exited {result.returncode}")
-    return _normalise_claude(json.loads(result.stdout))
+    if command:
+        result = subprocess.run(shlex.split(command), check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"Claude usage command exited {result.returncode}")
+        return _normalise_claude(json.loads(result.stdout))
+    from .endpoints import EndpointError, claude_usage
+
+    try:
+        return _normalise_claude(claude_usage())
+    except EndpointError as error:
+        raise RuntimeError(str(error)) from None
 
 
 def _normalise_codex(payload: dict[str, Any], *, account_id: str | None = None) -> list[EntitlementWindow]:

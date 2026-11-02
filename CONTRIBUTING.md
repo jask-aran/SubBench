@@ -98,7 +98,13 @@ serve the old page. The deploy reports success.
 | Path | Contents |
 |---|---|
 | `src/subbench/watcher.py` | The file watcher and the collection loop. |
-| `src/subbench/ccusage.py` | The ccusage subprocess and the payload normalisation. |
+| `src/subbench/logs.py` | Reads the agents' logs: the daily usage report, in ccusage's shape. |
+| `src/subbench/prices.py` | The LiteLLM price table (snapshot in `data/prices.json`) and request pricing. |
+| `src/subbench/endpoints.py` | The Claude and Codex quota meters, read with each agent's stored login. |
+| `src/subbench/net.py` | The only network client: allowed hosts, credential binding, the egress record. |
+| `src/subbench/privacy.py` | Account-id hashing, `subbench privacy` and the push preview. |
+| `src/subbench/service.py` | `subbench service`: the systemd unit and the launchd agent. |
+| `src/subbench/ccusage.py` | Normalisation of a daily usage report (ours, or ccusage's). |
 | `src/subbench/entitlement.py` | The Codex and Claude quota collectors. |
 | `src/subbench/store.py` | The SQLite schema, the migrations and the queries. |
 | `src/subbench/regression.py` | The pairwise slopes and the robust estimate. |
@@ -166,11 +172,13 @@ This is not:
 
 ## Data and privacy
 
-The local database holds the raw ccusage payloads. Those payloads contain the paths of
-your projects and the names of your sessions.
+The local database holds daily usage reports: token counts and costs per model and day.
+It holds no log text, project paths or session names.
 
-The push sends the quota readings, the token counts, the costs and the computed reports.
-It does not send the raw payloads.
+The push sends the quota readings and the computed reports, with every account id hashed
+(`subbench/privacy.py`). Every request goes through `subbench/net.py`; do not open a
+connection anywhere else, and `tests/test_privacy.py` fails if you do. Run
+`subbench privacy preview` to see a push in full before you change what it carries.
 
 Never commit a real credential, an access token or an unredacted payload. If you add a
 fixture from a real response, remove the account identifiers and the paths first.

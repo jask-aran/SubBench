@@ -1,21 +1,17 @@
+# Written by `subbench service install`, which is the way to install this; kept here for
+# reference and for machines that manage units by hand. Replace ExecStart with the path
+# of the subbench executable.
 [Unit]
-Description=SubBench incremental coding-agent usage collector
+Description=SubBench subscription usage collector
 After=network-online.target
 
 [Service]
 Type=simple
-Environment=PATH=/home/linuxbrew/.linuxbrew/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-# Claude has no local RPC equivalent to `codex app-server`, so entitlement comes from the
-# OAuth usage endpoint. Without this, Claude usage is priced but never valued.
-# Quoted: systemd rejects an unquoted assignment containing a space.
-Environment="SUBBENCH_CLAUDE_USAGE_COMMAND=python3 %h/SubBench/packaging/claude-usage.py"
-# Push credentials live outside the repository, in a 0600 file, so the token is never
-# committed. The leading "-" makes the file optional: without it the watcher collects as
-# before and simply does not push.
+Environment=PATH=%h/.local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-%h/.config/subbench/push.env
 ExecStart=%h/.local/bin/subbench watch --provider all
 Restart=on-failure
-RestartSec=10
+RestartSec=30
 
 [Install]
 WantedBy=default.target

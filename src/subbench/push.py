@@ -15,7 +15,6 @@ import json
 import os
 import sqlite3
 import urllib.error
-import urllib.request
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -24,7 +23,7 @@ SCHEMA_VERSION = 1
 # urllib's default User-Agent is rejected by Cloudflare's bot rules with a 403 before the
 # request ever reaches the Worker, which surfaces as an opaque "error code: 1010".
 # Identifying the client properly is the fix, and is better manners anyway.
-USER_AGENT = "subbench/0.2.0 (+https://github.com/jask-aran/SubBench)"
+USER_AGENT = "subbench/0.3.0 (+https://github.com/jask-aran/SubBench)"
 MAX_USAGE_ROWS_PER_BATCH = 5000
 MAX_ENTITLEMENT_ROWS_PER_BATCH = 5000
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -154,7 +153,11 @@ def build_payload(
     }
     if reports:
         payload["reports"] = reports
-    return payload
+    # The one place a payload is assembled, so the one place ids are hashed: nothing that
+    # leaves the machine carries a provider's own account id.
+    from .privacy import pseudonymise
+
+    return pseudonymise(payload)
 
 
 def value_report(db: sqlite3.Connection) -> dict[str, Any]:
@@ -317,18 +320,11 @@ def _advance(db: sqlite3.Connection, endpoint: str, entitlements, usage, error: 
 
 
 def _post(url: str, token: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": USER_AGENT,
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        body = response.read().decode("utf-8")
+    from .net import request
+
+    body = request(url, purpose="push", method="POST", credential="push", timeout=timeout,
+                   body=json.dumps(payload).encode("utf-8"),
+                   headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}", "User-Agent": USER_AGENT}).decode("utf-8")
     return json.loads(body) if body.strip() else {}
 
 

@@ -63,3 +63,23 @@ def load(path: Path | None = None) -> dict[str, str]:
             os.environ[key] = value
             applied[key] = value
     return applied
+
+
+def write(path: Path, key: str, value: str | None) -> None:
+    """Set or remove one KEY=VALUE line, keeping every other line (comments included) as it was.
+
+    The file holds a push token, so it is created readable by its owner only.
+    """
+    if not key or "=" in key or any(ch.isspace() for ch in key):
+        raise ValueError(f"not a valid key: {key!r}")
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        lines = []
+    kept = [line for line in lines if line.strip().partition("=")[0].strip() != key]
+    if value is not None:
+        kept.append(f"{key}={value}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(mode=0o600, exist_ok=True)
+    path.write_text("\n".join(kept) + "\n")
+    os.chmod(path, 0o600)

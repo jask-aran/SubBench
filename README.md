@@ -4,6 +4,12 @@ SubBench measures the API-equivalent value of a coding-agent subscription. It jo
 token usage that Codex CLI and Claude Code record on this machine with the quota movement
 that the provider reports for the same period.
 
+The collector is one executable. It needs no Python, Node, ccusage or Codex installation:
+
+```bash
+curl -fsSL https://github.com/jask-aran/SubBench/releases/latest/download/install.sh | sh
+```
+
 SubBench does not estimate the internal cost of OpenAI or Anthropic. It answers one
 question:
 
@@ -18,19 +24,25 @@ The documentation uses ASD-STE100 Simplified Technical English.
 
 Four collectors write to one SQLite database at
 `~/.local/share/subbench/subbench.sqlite3`. The `subbench watch` command runs all four.
+All four are built in.
 
 | Collector | Source | Result |
 |---|---|---|
 | File watcher | Agent JSONL logs | A trigger. It reads file metadata only. |
-| ccusage | Agent JSONL logs | Token counts and API-equivalent cost, per day and model. |
-| Codex app-server | `codex app-server` JSON-RPC | Quota percent, window length and reset time. |
-| Claude usage helper | Claude OAuth usage endpoint | The same three values for Claude. |
+| Log reader | Agent JSONL logs | Token counts and API-equivalent cost, per day and model. |
+| Codex meter | ChatGPT usage endpoint, with the Codex login | Quota percent, window length, reset time and plan. |
+| Claude meter | Claude OAuth usage endpoint, with the Claude Code login | The same values for Claude. |
+
+The log reader replaces ccusage. It produces the same daily report as `ccusage <provider>
+daily --json`, with the same costs (the tests check this on fixtures that ccusage priced),
+so a database recorded with ccusage continues without a step. `--runner npx` still runs
+ccusage instead, for comparison.
 
 ### The watcher
 
 The watcher scans file metadata every 2 seconds. It does not open or parse the logs. After
 the last write, the watcher waits 60 seconds for the burst of writes to stop. Then it
-starts ccusage and the entitlement collectors. A full reconciliation runs every 6 hours,
+reads the new log lines and the quota meters. A full reconciliation runs every 6 hours,
 even if no file changed. The reconciliation recovers missed file events. It also recovers
 usage that occurred while SubBench was off.
 
@@ -44,8 +56,8 @@ subbench watch --reconcile 3600   # maximum time between full reconciliations
 
 The database keeps three layers apart:
 
-1. **Usage evidence.** The raw ccusage payload, and the token classes and USD cost that
-   ccusage calculates from it.
+1. **Usage evidence.** The daily usage report, and the token classes and USD cost
+   calculated from it. No log text is kept.
 2. **Entitlement evidence.** One quota reading for each window at each poll: the used
    percent, the reset time and the window length.
 3. **Inference.** Every estimate. SubBench calculates each estimate again from layers 1
@@ -54,7 +66,7 @@ The database keeps three layers apart:
 SubBench keeps the raw payloads. Therefore an improvement to the estimator applies to all
 history, and not only to new data.
 
-SubBench discards a ccusage payload that is identical to the previous payload. The
+SubBench discards a usage report that is identical to the previous payload. The
 `imports.last_seen_at` column records when SubBench last confirmed a payload. This
 separates "unchanged" from "not collected".
 
@@ -65,29 +77,67 @@ tolerance cannot merge two real windows.
 
 ### Entitlement collection for each provider
 
-Codex has a supported local interface. SubBench starts `codex app-server`, does the
-JSON-RPC handshake, and calls `account/rateLimits/read`. The response also gives the plan
-name. SubBench uses that name to decide whether two accounts are comparable.
+**Codex.** SubBench reads the access token in `$CODEX_HOME/auth.json` and asks
+`https://chatgpt.com/backend-api/wham/usage`, the endpoint the Codex CLI reads. The
+response gives the used percent, length and reset time of each window, and the plan name.
+SubBench uses that name to decide whether two accounts are comparable. If the request
+fails (usually an expired token) and Codex is installed, SubBench asks
+`codex app-server` instead, because Codex refreshes its own login.
 
-Claude Code has no equivalent local interface. Set `SUBBENCH_CLAUDE_USAGE_COMMAND` to a
-command that prints the Claude usage response as JSON. `packaging/claude-usage.py` is such
-a command. It reads the access token that Claude Code already keeps in
-`~/.claude/.credentials.json`. It sends that token only to the API host that issued it.
+**Claude.** SubBench reads the access token that Claude Code keeps in
+`~/.claude/.credentials.json` (on macOS, in the Keychain) and asks
+`https://api.anthropic.com/api/oauth/usage`. It asks the profile endpoint for the current
+plan, because the login file can lag an upgrade by days. A change of plan on the same
+account is recorded on the next reading, and that reading starts a new series.
+
+SubBench never refreshes or stores a login. A refresh rotates the login, and that would
+sign the agent out. An expired token stops the readings until the agent next refreshes it,
+and `subbench doctor` reports it. `SUBBENCH_CLAUDE_USAGE_COMMAND`, if set, still replaces
+the built-in Claude reader.
+
+### Pricing
+
+Prices come from LiteLLM's public price table, as they did in ccusage. A snapshot ships
+inside the executable, so pricing works offline. With network, the live table is fetched
+at most once a day. `SUBBENCH_OFFLINE=1` uses the snapshot only. Each token class has its
+own rate. A one-hour cache write has the one-hour rate. A request whose input context is
+past a long-context threshold has the long-context rate for all of its classes. A model
+with no price costs zero, and the collector names it in its log.
+
+---
+
+## Privacy
+
+SubBench is built so that you can check what it does, not only read a promise.
 
 ```bash
-export SUBBENCH_CLAUDE_USAGE_COMMAND="python3 $PWD/packaging/claude-usage.py"
-subbench watch --provider claude --once
+subbench privacy            # what is read, kept and sent, and the only hosts it can reach
+subbench privacy log        # every request this collector has made
+subbench privacy preview    # the exact payload of the next push, not sent
 ```
 
-The same command asks Anthropic for the current plan. ccusage does not report one, and
-the login file can lag an upgrade by days. A change of plan on the same account is
-recorded on the next reading, and that reading starts a new series.
-
-A `401` response means that the stored token has expired. Open Claude Code to refresh it.
-
-If you do not set this variable, SubBench collects Claude cost but no Claude quota. It can
-then produce no Claude estimate at all. `subbench doctor` reports this condition as an
-error.
+- **Reads only usage.** The log reader skips every line that cannot carry usage without
+  decoding it. From the remaining lines it keeps the timestamp, the model, the message id
+  (to count a message once) and the token counts. Prompts, replies, code and paths are
+  never stored, printed or sent.
+- **A closed list of hosts.** Every request goes through `subbench/net.py`. It refuses any
+  host that is not `api.anthropic.com`, `chatgpt.com`, `raw.githubusercontent.com` (the
+  public price table), `subbench.jask-aran.com` (the public benchmark bundle, for
+  `subbench frontier` only) or the push endpoint you configured. It refuses plain HTTP. A
+  test fails if any other module imports a network client.
+- **Each login goes only to its own provider.** `net.py` refuses to send the Claude token
+  anywhere but Anthropic, or the Codex token anywhere but ChatGPT.
+- **Every request is recorded** in `egress.jsonl` beside the database: time, host, path,
+  purpose, bytes sent and received, status. Bodies and headers are not recorded.
+- **Nothing is sent unless you configure a push.** With a push, the server receives quota
+  readings, derived values and the model mix. Account ids are replaced by a one-way hash
+  before the payload is built (the same account hashes the same on every machine, so two
+  collectors still pool). Emails and names are never sent. Raw daily usage rows are sent
+  only with `SUBBENCH_PUSH_RAW_USAGE=1`.
+- **The binary is the source.** Each release is built from a tag by
+  `.github/workflows/release.yml`, with a SHA-256 file and a signed build-provenance
+  attestation. `gh attestation verify subbench-linux-x64 --repo jask-aran/SubBench` proves
+  the file you run came from this source.
 
 ---
 
@@ -95,7 +145,7 @@ error.
 
 ### Step 1 — the value of the usage
 
-SubBench uses the model identification, the token classes and the price table of ccusage.
+SubBench prices each request with the token classes in the log and the price table above.
 For Codex:
 
 ```text
@@ -114,9 +164,9 @@ V = T_input x P_input
 ```
 
 SubBench sums this value over the days **inside the reset window**. It does not subtract
-one lifetime total from another. ccusage reports its full history at each run, and that
-history is not stable between runs: two identical commands have returned reports that
-differ by several days. A difference of two lifetime totals turns that instability into
+one lifetime total from another. ccusage reported its full history at each run, and that
+history was not stable between runs: two identical commands returned reports that
+differed by several days. A difference of two lifetime totals turns that instability into
 large false deltas. A window-bounded sum does not depend on any day outside the window.
 
 ### Step 2 — the slope of each pair
@@ -135,7 +185,7 @@ SubBench rejects a pair in four conditions:
 | The quota moved less than 2 points. | A provider reports quota as a whole percent. A 1-point pair carries approximately 50% error. |
 | The value did not move. | This shows an incomplete usage import, and not free quota. |
 | The cost total is more than 30 minutes old. | The quota advances while a stopped collector holds the cost still. |
-| The pair spans an interval of unobserved usage. | Refer to "Usage that ccusage cannot see". |
+| The pair spans an interval of unobserved usage. | Refer to "Usage that local logs cannot see". |
 
 ### Step 3 — the estimate for the window
 
@@ -228,9 +278,9 @@ that most needs an explanation.
 | `likely` | Has at least 25 points of measured quota, 70% coverage and 50 valid pairs. |
 | `provisional` | An estimate exists. |
 
-### Usage that ccusage cannot see
+### Usage that local logs cannot see
 
-ccusage reads the logs on this machine only. Quota that a web interface, a cloud runner or
+The log reader reads the logs on this machine only. Quota that a web interface, a cloud runner or
 a second machine uses leaves no local tokens.
 
 Such an interval is not cheap usage. It is unmeasured usage: the numerator is absent, and
@@ -261,7 +311,7 @@ observations, this does not improve on daily buckets:
 
 A session has a median span of 30 minutes and a 90th percentile of 6 hours. To put its
 full cost at its last activity is therefore very late. To spread the cost equally recovers
-the accuracy, but it does not do better than daily bucketing. The ccusage row for the
+the accuracy, but it does not do better than daily bucketing. The usage row for the
 current day is a live running total, so it already grows at each import. Day boundaries
 are important only at the edges of a reset window.
 
@@ -308,7 +358,7 @@ Each batch contains three parts:
 
 1. **The new measurements** — quota readings since the last acknowledgement. Normal pushes
    contain no raw usage rows. The opt-in path sends complete imports, because the rows of
-   one import share a timestamp. SubBench never sends the raw ccusage payloads.
+   one import share a timestamp. SubBench never sends the raw usage reports, and every account id is hashed.
 2. **The computed reports** — `current`, `history`, `models`, `weights` and `series`.
 3. **The cursor** that the server returns to acknowledge the batch.
 
@@ -421,31 +471,37 @@ deploy.
 ## Installation
 
 ```bash
-# Python 3.11 or later
-pip install -e .
-
-npx ccusage@latest codex daily --json >/dev/null
-subbench watch --provider codex --once
-
-subbench watch
+curl -fsSL https://github.com/jask-aran/SubBench/releases/latest/download/install.sh | sh
 ```
 
-### Automatic start on Linux or WSL
+The script downloads one file for your OS and architecture (Linux or macOS, x64 or arm64),
+checks it against the release's `SHA256SUMS`, puts it in `~/.local/bin/subbench` and runs
+`subbench service install`. That writes a systemd user unit on Linux or a launchd agent on
+macOS which runs `subbench watch` at login. `SUBBENCH_NO_SERVICE=1` skips the last step.
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp packaging/systemd/subbench.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now subbench
-journalctl --user -u subbench -f
+subbench doctor              # are both logins and the logs readable
+subbench service status
+subbench service logs
+subbench config set SUBBENCH_PUSH_URL https://subbench.jask-aran.com/ingest
+subbench config set SUBBENCH_PUSH_TOKEN <token>
+subbench privacy preview     # what that push would send
+subbench service install     # restart, to apply the configuration
 ```
 
-The unit expects `subbench` at `~/.local/bin/subbench`. Change `ExecStart` if necessary.
-The environment of the unit must contain the directories of `codex` and `npx`. WSL must
+On Linux a user unit stops at logout. `loginctl enable-linger` keeps it running. WSL must
 have systemd enabled.
 
-> Restart the service after you change the code. An editable installation does not update
-> a process that already runs. The page then shows old numbers with no warning.
+### From source
+
+```bash
+pip install -e .             # Python 3.11 or later
+sh packaging/binary/build.sh # or build the single executable: dist/bin/subbench-<os>-<arch>
+```
+
+A unit installed before 0.3.0 ran `subbench watch` with `SUBBENCH_CLAUDE_USAGE_COMMAND`
+set to `packaging/claude-usage.py`. That still works. `subbench service install` replaces
+it with a unit that needs neither.
 
 ---
 
@@ -465,8 +521,18 @@ subbench chart --window weekly --product ChatGPT
 
 subbench watch                           # continuous collection
 subbench watch --provider codex --once   # one diagnostic snapshot
-subbench collect codex --report daily    # manual or backfill collection
-subbench doctor                          # check the dependencies and the freshness
+subbench collect codex                   # one usage snapshot now
+subbench collect claude --print          # print the daily report instead of storing it
+subbench doctor                          # check the logins, the logs and the freshness
+
+subbench service install                 # run the collector at login (systemd or launchd)
+subbench service status | logs | uninstall
+subbench config set KEY VALUE            # the configuration file (push endpoint and token)
+subbench config show                     # secrets masked
+subbench privacy                         # what is read, kept and sent
+subbench privacy log                     # every request made
+subbench privacy preview                 # the next push, in full, not sent
+subbench version
 
 subbench sync push                       # send the evidence to the site
 subbench sync status                     # endpoint, agent, cursor, last error
@@ -536,7 +602,7 @@ samples.
 
 ## Limits of the measurement
 
-The valuation is only as accurate as the retained telemetry and the ccusage price table.
+The valuation is only as accurate as the retained telemetry and the LiteLLM price table.
 The inference stays empirical. A meter can round, a limit can roll, a provider can apply a
 model-specific weight, and a multiplier can change. The results are workload-specific
 estimates of an API-equivalent allowance. They are not contractual quotas.

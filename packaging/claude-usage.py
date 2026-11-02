@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Print the Claude subscription usage response as JSON, for SUBBENCH_CLAUDE_USAGE_COMMAND.
 
+No longer needed: the collector now reads the Claude meter itself (subbench/endpoints.py).
+Kept so a unit installed before 0.3.0, which still names this file, keeps working until it
+is replaced with `subbench service install`.
+
 Claude Code exposes no `claude usage` subcommand and no local RPC equivalent to
 `codex app-server`, so entitlement has to come from the OAuth usage endpoint using the
 credentials Claude Code already stores locally. The access token is read at run time and

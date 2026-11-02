@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import re
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -28,8 +27,9 @@ def load_bundle(source: str | None = None, timeout: float = 20.0) -> dict[str, A
     for candidate in candidates:
         try:
             if re.match(r"https?://", candidate):
-                with urllib.request.urlopen(candidate, timeout=timeout) as response:
-                    return json.load(response)
+                from .net import request
+
+                return json.loads(request(candidate, purpose="benchmark bundle", timeout=timeout))
             return json.loads(Path(candidate).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             errors.append(f"{candidate}: {exc}")

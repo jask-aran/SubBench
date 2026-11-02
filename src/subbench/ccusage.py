@@ -28,7 +28,7 @@ TOKEN_ALIASES = {
 
 MODEL_KEYS = ("model", "modelName", "model_name")
 COST_KEYS = ("costUSD", "costUsd", "cost_usd", "totalCost", "total_cost")
-PERIOD_START_KEYS = ("periodStart", "startTime", "start", "date", "week", "month")
+PERIOD_START_KEYS = ("periodStart", "startTime", "start", "date", "period", "week", "month")
 PERIOD_END_KEYS = ("periodEnd", "endTime", "end")
 BREAKDOWN_KEYS = ("modelBreakdowns", "model_breakdowns", "models")
 CONTAINER_KEYS = ("daily", "weekly", "monthly", "sessions", "blocks", "data", "items", "results")

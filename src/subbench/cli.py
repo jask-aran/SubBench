@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import account, config
+from . import __version__, account, config, logs, privacy, service
 from .ccusage import CcusageSchemaError, normalise_payload
 from .charts import render_product_series, render_value_history
 from .doctor import exit_code as doctor_exit_code
@@ -21,7 +21,7 @@ from .weights import observations_from_windows, solve
 from .regression import MIN_QUOTA_DELTA_PERCENT, _cluster_resets, robust_estimates
 from .store import connect, estimate_windows, list_accounts, list_imports, load_report, model_mix, regression_points, save_import
 from .timeseries import detect_regime_changes, rolling_values, window_history
-from .watcher import WatchTarget, ccusage_command, watch
+from .watcher import RUNNERS, WatchTarget, ccusage_command, native_report, watch
 
 DEFAULT_DATABASE = Path(os.environ.get("SUBBENCH_DATABASE", Path.home() / ".local" / "share" / "subbench" / "subbench.sqlite3"))
 
@@ -97,15 +97,45 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
     watch_parser.add_argument("--interval", type=float, default=2.0, help="Filesystem scan interval in seconds (default: 2)")
     watch_parser.add_argument("--debounce", type=float, default=60.0, help="Wait seconds after the latest log write before collecting (default: 60)")
-    watch_parser.add_argument("--reconcile", type=float, default=21600.0, help="Maximum seconds between full ccusage reconciliations (default: 21600)")
-    watch_parser.add_argument("--runner", choices=("npx", "bunx", "pnpm"), default="npx")
+    watch_parser.add_argument("--reconcile", type=float, default=21600.0, help="Maximum seconds between full reconciliations (default: 21600)")
+    watch_parser.add_argument("--runner", choices=RUNNERS, default="native",
+                              help="native reads the agents' logs itself (default); npx, bunx or pnpm run ccusage instead")
     watch_parser.add_argument("--once", action="store_true")
 
-    collect = subcommands.add_parser("collect", help="Take one ccusage snapshot now")
+    collect = subcommands.add_parser("collect", help="Take one usage snapshot now")
     collect.add_argument("provider", choices=("claude", "codex"))
     collect.add_argument("--report", default="daily")
-    collect.add_argument("--runner", choices=("npx", "bunx", "pnpm"), default="npx")
+    collect.add_argument("--runner", choices=RUNNERS, default="native")
+    collect.add_argument("--print", action="store_true", dest="print_only", help="Print the report instead of storing it")
     collect.add_argument("ccusage_args", nargs=argparse.REMAINDER)
+
+    service = subcommands.add_parser("service", help="Run the collector in the background, started at login")
+    service_commands = service.add_subparsers(dest="service_command", required=True)
+    service_install = service_commands.add_parser("install", help="Install and start the background collector")
+    service_install.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
+    service_install.add_argument("--dry-run", action="store_true", help="Print the unit instead of installing it")
+    service_commands.add_parser("uninstall", help="Stop and remove the background collector")
+    service_commands.add_parser("status", help="Whether the background collector is installed and running")
+    service_commands.add_parser("logs", help="Recent output from the background collector")
+
+    configure = subcommands.add_parser("config", help="The configuration file")
+    config_commands = configure.add_subparsers(dest="config_command", required=True)
+    config_commands.add_parser("path", help="Print where the configuration file lives")
+    config_commands.add_parser("show", help="Print the configuration, with secrets masked")
+    config_set = config_commands.add_parser("set", help="Set one value, e.g. SUBBENCH_PUSH_URL")
+    config_set.add_argument("key")
+    config_set.add_argument("value")
+    config_unset = config_commands.add_parser("unset", help="Remove one value")
+    config_unset.add_argument("key")
+
+    subcommands.add_parser("version", help="Print the version")
+
+    privacy_parser = subcommands.add_parser("privacy", help="What is read, kept and sent, and every request made")
+    privacy_commands = privacy_parser.add_subparsers(dest="privacy_command")
+    privacy_log = privacy_commands.add_parser("log", help="Every network request this collector has made")
+    privacy_log.add_argument("--raw", action="store_true", help="One JSON line per request")
+    privacy_log.add_argument("--limit", type=int, default=200)
+    privacy_commands.add_parser("preview", help="Print the exact payload the next push would send, without sending it")
 
     doctor = subcommands.add_parser("doctor", help="Check local dependencies, logs, database and observation freshness")
     doctor.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
@@ -124,8 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
     data_commands = data.add_subparsers(dest="data_command", required=True)
     data_commands.add_parser("init", help="Create the database")
     data_commands.add_parser("path", help="Print the database path and size")
-    data_commands.add_parser("imports", help="List recorded ccusage imports")
-    data_import = data_commands.add_parser("import", help="Import ccusage JSON from a file or stdin")
+    data_commands.add_parser("imports", help="List recorded usage imports")
+    data_import = data_commands.add_parser("import", help="Import a usage report (ccusage JSON) from a file or stdin")
     data_import.add_argument("path", type=str)
     data_import.add_argument("--provider", choices=("claude", "codex"), required=True)
     data_import.add_argument("--report", default="daily")
@@ -182,7 +212,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     # environment, so the file has to be in it by then.
     config.load()
     args = build_parser().parse_args(expand_aliases(sys.argv[1:] if argv is None else argv))
+    # Commands that never touch the database, so they do not create one.
+    if args.command == "version":
+        print(f"subbench {__version__}")
+        return 0
+    if args.command == "service":
+        return service.run(args)
+    if args.command == "config":
+        return _config(args)
+    if args.command == "privacy" and args.privacy_command != "preview":
+        return privacy.run(None, args)
     db = connect(args.database)
+    if args.command == "privacy":
+        return privacy.run(db, args)
 
     if args.command == "status":
         return _print_status(db, args.database, as_json=args.as_json, refresh=args.refresh)
@@ -215,6 +257,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "watch":
         providers = ("claude", "codex") if args.provider == "all" else (args.provider,)
         return watch(db, targets=[WatchTarget(provider=p) for p in providers], runner=args.runner, interval_seconds=args.interval, debounce_seconds=args.debounce, reconcile_seconds=args.reconcile, once=args.once)
+    if args.command == "collect" and args.runner == "native":
+        raw, payload = native_report(args.provider, args.report)
+        # argparse hands options after the provider to the ccusage passthrough.
+        if args.print_only or "--print" in args.ccusage_args:
+            print(json.dumps(payload, indent=2))
+            return 0
+        if not payload["daily"]:
+            print(f"No {args.provider} sessions found under {', '.join(str(r) for r in logs.roots(args.provider))}.")
+            return 0
+        return _ingest(db, raw=raw, provider=args.provider, report=args.report, source_command=f"subbench {args.provider} logs")
     if args.command == "collect":
         passthrough = args.ccusage_args[1:] if args.ccusage_args and args.ccusage_args[0] == "--" else args.ccusage_args
         command = [*ccusage_command(runner=args.runner, provider=args.provider, report=args.report), *passthrough]
@@ -231,6 +283,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "detail":
         return _detail(db, args)
     raise AssertionError(f"unhandled command: {args.command}")
+
+
+SECRET_KEYS = ("TOKEN", "SECRET", "KEY")
+
+
+def _config(args) -> int:
+    path = config.config_path()
+    if args.config_command == "path":
+        print(path)
+        return 0
+    if args.config_command == "show":
+        values = config.parse(path.read_text()) if path.exists() else {}
+        if not values:
+            print(f"{path} is empty or missing. `subbench config set SUBBENCH_PUSH_URL <url>` starts it.")
+            return 0
+        for key, value in values.items():
+            shown = value[:4] + "…" if any(part in key for part in SECRET_KEYS) and value else value
+            print(f"{key}={shown}")
+        return 0
+    if args.config_command in ("set", "unset"):
+        config.write(path, args.key, args.value if args.config_command == "set" else None)
+        print(f"{'set' if args.config_command == 'set' else 'removed'} {args.key} in {path}")
+        if service.installed():
+            print("Restart the collector to apply it: `subbench service install` restarts it in place.")
+        return 0
+    raise AssertionError(args.config_command)
 
 
 def _sync(db, args) -> int:
@@ -625,7 +703,7 @@ def _ingest(db, *, raw: bytes, provider: str, report: str, source_command: str |
         payload = json.loads(raw)
         rows = normalise_payload(payload, provider=provider, report=report)
     except (json.JSONDecodeError, UnicodeDecodeError, CcusageSchemaError, ValueError) as error:
-        print(f"invalid ccusage data: {error}", file=sys.stderr)
+        print(f"invalid usage report: {error}", file=sys.stderr)
         return 2
     account_id = account.active_account_id() if provider == "codex" else None
     import_id, row_count, created = save_import(

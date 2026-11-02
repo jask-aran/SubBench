@@ -80,25 +80,6 @@ class AuthFileDetector:
 
 
 def discover_logs(provider: str) -> Iterable[Path]:
-    if provider == "codex":
-        homes = os.environ.get("CODEX_HOME", str(Path.home() / ".codex")).split(",")
-        roots: list[Path] = []
-        for raw in homes:
-            home = Path(raw).expanduser()
-            roots.extend([home / "sessions", home / "archived_sessions"])
-        patterns = ("*.jsonl",)
-    elif provider == "claude":
-        roots = [Path.home() / ".claude" / "projects", Path.home() / ".config" / "claude" / "projects"]
-        patterns = ("*.jsonl",)
-    else:
-        raise ValueError(f"unsupported provider: {provider}")
+    from .logs import discover
 
-    seen: set[Path] = set()
-    for root in roots:
-        if not root.exists():
-            continue
-        for pattern in patterns:
-            for path in root.rglob(pattern):
-                if path.is_file() and path not in seen:
-                    seen.add(path)
-                    yield path
+    return discover(provider)
