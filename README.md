@@ -134,6 +134,10 @@ subbench privacy preview    # the exact payload of the next push, not sent
   before the payload is built (the same account hashes the same on every machine, so two
   collectors still pool). Emails and names are never sent. Raw daily usage rows are sent
   only with `SUBBENCH_PUSH_RAW_USAGE=1`.
+- **The server hashes too.** The Worker hashes any account id that arrives unhashed, with
+  the same scheme, so even a collector from before 0.3.0 cannot store a raw id. For ids a
+  server already holds, `subbench privacy migration` prints SQL that rewrites them in
+  place (idempotent); run it with `npx wrangler d1 execute subbench --remote --file`.
 - **The binary is the source.** Each release is built from a tag by
   `.github/workflows/release.yml`, with a SHA-256 file and a signed build-provenance
   attestation. `gh attestation verify subbench-linux-x64 --repo jask-aran/SubBench` proves
@@ -514,7 +518,7 @@ subbench frontier --metric list          # the benchmark lenses in the bundle
 subbench values                          # every window measurement
 subbench values --tier confirmed         # only the settled ones
 subbench values --product Claude         # one product
-subbench values --account 9cb152f0       # one account
+subbench values --account 1a2b3c4d       # one account
 subbench values --window weekly --json   # machine-readable
 subbench chart                           # the same pooled series the site plots
 subbench chart --window weekly --product ChatGPT

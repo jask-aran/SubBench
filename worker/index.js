@@ -29,6 +29,37 @@ const json = (payload, status = 200) =>
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 
+/*
+ * Account ids are hashed on arrival, with the scheme the collector uses
+ * (subbench/privacy.py), so the database never holds a provider's own account id even
+ * when a collector from before 0.3.0 sends one. A value already hashed is left alone.
+ */
+export async function pseudonym(accountId) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`subbench:v1:${accountId}`));
+  return "acct-" + [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+}
+
+export async function pseudonymise(value, cache = new Map()) {
+  if (Array.isArray(value)) {
+    const out = [];
+    for (const item of value) out.push(await pseudonymise(item, cache));
+    return out;
+  }
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key === "account_id" && typeof item === "string" && item && !item.startsWith("acct-")) {
+        if (!cache.has(item)) cache.set(item, await pseudonym(item));
+        out[key] = cache.get(item);
+      } else {
+        out[key] = await pseudonymise(item, cache);
+      }
+    }
+    return out;
+  }
+  return value;
+}
+
 class Invalid extends Error {
   constructor(status, detail) {
     super(detail);
@@ -205,6 +236,7 @@ async function ingest(request, env) {
     return json({ error: "body must be JSON" }, 400);
   }
 
+  payload = await pseudonymise(payload);
   let batch;
   try {
     batch = parse(payload);

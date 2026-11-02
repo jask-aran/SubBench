@@ -136,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     privacy_log.add_argument("--raw", action="store_true", help="One JSON line per request")
     privacy_log.add_argument("--limit", type=int, default=200)
     privacy_commands.add_parser("preview", help="Print the exact payload the next push would send, without sending it")
+    privacy_commands.add_parser("migration", help="SQL that hashes the account ids a pre-0.3.0 collector sent to your server")
 
     doctor = subcommands.add_parser("doctor", help="Check local dependencies, logs, database and observation freshness")
     doctor.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
@@ -220,7 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return service.run(args)
     if args.command == "config":
         return _config(args)
-    if args.command == "privacy" and args.privacy_command != "preview":
+    if args.command == "privacy" and args.privacy_command not in ("preview", "migration"):
         return privacy.run(None, args)
     db = connect(args.database)
     if args.command == "privacy":

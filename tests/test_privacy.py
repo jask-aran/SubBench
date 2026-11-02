@@ -117,3 +117,11 @@ def test_logs_skip_lines_that_cannot_carry_usage(tmp_path, monkeypatch):
     monkeypatch.setattr(logs.json, "loads", lambda line: parsed.append(line) or {})
     logs.LogReader("claude").entries()
     assert parsed == []
+
+
+def test_server_migration_sql_rewrites_every_table(db):
+    sql = privacy.migration_sql(privacy.local_account_ids(db))
+    hashed = privacy.pseudonym(ACCOUNT)
+    for table in ("entitlement_snapshots", "usage_rows", "reports", "ingest_log"):
+        assert f"UPDATE" in sql and table in sql
+    assert sql.count(hashed) == 6 and privacy.migration_sql([hashed]).count("UPDATE") == 0

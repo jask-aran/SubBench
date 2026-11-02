@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import worker from "../worker/index.js";
+import worker, { pseudonym } from "../worker/index.js";
 
 const REPORTS = {
   current: { current: [], regime_changes: [] },
@@ -167,4 +167,25 @@ test("the plan reported beside a meter is stored, and its absence is not guessed
   assert.equal(inserts.length, 3);
   // The plan is the last bound parameter of the upsert.
   assert.deepEqual(inserts.map((statement) => statement.params.at(-1)), ["plus", null, null]);
+});
+
+test("account ids are hashed on arrival, the same way the collector hashes them", async () => {
+  // subbench.privacy.pseudonym("7f3c2a10-0d4e-4b7a-9c1e-5a6b7c8d9e0f")
+  assert.equal(await pseudonym("7f3c2a10-0d4e-4b7a-9c1e-5a6b7c8d9e0f"), "acct-0b8bdf4cd97df362");
+  const db = new FakeD1();
+  const raw = "00000000-1111-4222-8333-444444444444";
+  const reports = { ...REPORTS, history: { windows: [{ account_id: raw, product: "ChatGPT Plus" }] } };
+  const response = await worker.fetch(request("/ingest", {
+    method: "POST",
+    headers: { authorization: "Bearer token", "content-type": "application/json" },
+    body: JSON.stringify({
+      schema_version: 1, agent_id: "agent-1", usage: [], reports,
+      entitlements: [{ observed_at: "2026-08-01T00:00:00Z", provider: "codex", account_id: raw, window: "weekly",
+        used_percent: 10, resets_at: "2026-08-08T00:00:00Z", duration_minutes: 10080, source: "test" }],
+    }),
+  }), env(db));
+  assert.equal(response.status, 200);
+  const stored = JSON.stringify(db.bound.map((statement) => statement.params));
+  assert.equal(stored.includes(raw), false);
+  assert.equal(stored.includes(await pseudonym(raw)), true);
 });

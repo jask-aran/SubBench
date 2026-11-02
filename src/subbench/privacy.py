@@ -70,6 +70,36 @@ def pseudonymise(value: Any) -> Any:
     return value
 
 
+def migration_sql(account_ids: list[str]) -> str:
+    """SQL that rewrites a SubBench server's stored account ids to their hashes, in place.
+
+    For a server that received pushes from a collector before 0.3.0. Idempotent: a second
+    run finds nothing to change. Run it with
+    `npx wrangler d1 execute subbench --remote --file <file>`.
+    """
+    def quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    lines = ["-- Rewrite raw provider account ids to SubBench pseudonyms (subbench/privacy.py)."]
+    for raw in sorted({a for a in account_ids if a and not a.startswith("acct-")}):
+        hashed = pseudonym(raw)
+        lines += [
+            f"UPDATE OR IGNORE entitlement_snapshots SET account_id = {quote(hashed)}, account_key = {quote(hashed)} WHERE account_id = {quote(raw)};",
+            f"UPDATE OR IGNORE usage_rows SET account_id = {quote(hashed)}, account_key = {quote(hashed)} WHERE account_id = {quote(raw)};",
+            f"UPDATE reports SET payload = replace(payload, {quote(raw)}, {quote(hashed)}) WHERE instr(payload, {quote(raw)}) > 0;",
+            f"UPDATE ingest_log SET detail = replace(detail, {quote(raw)}, {quote(hashed)}) WHERE instr(detail, {quote(raw)}) > 0;",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def local_account_ids(db: sqlite3.Connection) -> list[str]:
+    ids: set[str] = set()
+    for sql in ("SELECT DISTINCT account_id FROM entitlement_snapshots", "SELECT DISTINCT account_id FROM imports",
+                "SELECT DISTINCT account_id FROM accounts"):
+        ids.update(row[0] for row in db.execute(sql) if row[0])
+    return sorted(ids)
+
+
 def preview(db: sqlite3.Connection, url: str) -> dict[str, Any]:
     """The payload the next push to `url` would send. Changes nothing, sends nothing."""
     from .push import (MAX_ENTITLEMENT_ROWS_PER_BATCH, MAX_USAGE_ROWS_PER_BATCH, RAW_USAGE_ENV, build_payload,
@@ -128,6 +158,10 @@ def run(db: sqlite3.Connection | None, args) -> int:
                 print(json.dumps(entry, sort_keys=True))
         else:
             print(log_summary(entries))
+        return 0
+    if command == "migration":
+        assert db is not None
+        print(migration_sql(local_account_ids(db)), end="")
         return 0
     if command == "preview":
         url = os.environ.get("SUBBENCH_PUSH_URL")
