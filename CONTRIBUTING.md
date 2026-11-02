@@ -98,8 +98,11 @@ serve the old page. The deploy reports success.
 | Path | Contents |
 |---|---|
 | `src/subbench/watcher.py` | The file watcher and the collection loop. |
-| `src/subbench/logs.py` | Reads the agents' logs: the daily usage report, in ccusage's shape. |
-| `src/subbench/prices.py` | The LiteLLM price table (snapshot in `data/prices.json`) and request pricing. |
+| `src/subbench/logs.py` | Reads Claude Code's logs (a port of ccusage 20's reader): the daily report, in ccusage's shape. |
+| `src/subbench/codex_logs.py` | Reads Codex rollouts (a port of ccusage 20's reader): forks, compactions, zstd, tiers. |
+| `src/subbench/prices.py` | ccusage's resolved price table (`data/prices.json`) and its Claude and Codex cost rules. |
+| `tests/parity/` | Generated logs and ccusage's own reports for them; `test_parity.py` requires equality. See `packaging/prices/README.md`. |
+| `src/subbench/compare.py` | `subbench data check-estimates`: window estimates in a backup against the live ones. |
 | `src/subbench/endpoints.py` | The Claude and Codex quota meters, read with each agent's stored login. |
 | `src/subbench/net.py` | The only network client: allowed hosts, credential binding, the egress record. |
 | `src/subbench/privacy.py` | Account-id hashing, `subbench privacy` and the push preview. |

@@ -16,7 +16,7 @@ case "$arch" in x86_64|amd64) arch=x64 ;; aarch64|arm64) arch=arm64 ;; esac
 name="subbench-$os-$arch"
 build/venv/bin/python -m PyInstaller --onefile --clean --noconfirm --name "$name" \
   --distpath dist/bin --workpath build/pyinstaller --specpath build/pyinstaller \
-  --collect-data subbench --hidden-import plotext \
+  --collect-data subbench --hidden-import plotext --hidden-import zstandard \
   packaging/binary/entry.py
 "dist/bin/$name" version
 ( cd dist/bin && shasum -a 256 "$name" > "$name.sha256" 2>/dev/null || sha256sum "$name" > "$name.sha256" )

@@ -33,10 +33,21 @@ All four are built in.
 | Codex meter | ChatGPT usage endpoint, with the Codex login | Quota percent, window length, reset time and plan. |
 | Claude meter | Claude OAuth usage endpoint, with the Claude Code login | The same values for Claude. |
 
-The log reader replaces ccusage. It produces the same daily report as `ccusage <provider>
-daily --json`, with the same costs (the tests check this on fixtures that ccusage priced),
-so a database recorded with ccusage continues without a step. `--runner npx` still runs
-ccusage instead, for comparison.
+The log reader replaces ccusage. It is a port of ccusage 20's Claude and Codex readers,
+rule for rule, so a database recorded with ccusage continues without a step. It counts
+the same things ccusage counts:
+
+- Codex: `.jsonl` and zstd-compressed `.jsonl.zst` rollouts, active over archived copies;
+  forks and subagents without the parent history they replay; automatic compactions,
+  counted once; headless `codex exec` usage; the service tier each request ran at;
+  `codex-auto-review` priced as the model it routed to on that date.
+- Claude Code: a reply logged several times (streaming, resumed sessions, subagent
+  replays) once, keeping the fullest copy; subagent progress lines; advisor iterations;
+  fast mode; a cost the log recorded itself.
+
+`tests/test_parity.py` holds the reader to ccusage's own output for generated logs that
+exercise each of these rules (packaging/prices/README.md). `--runner npx` still runs
+ccusage instead.
 
 ### The watcher
 
@@ -115,12 +126,14 @@ the built-in Claude reader.
 
 ### Pricing
 
-Prices come from LiteLLM's public price table, as they did in ccusage. A snapshot ships
-inside the executable, so pricing works offline. With network, the live table is fetched
-at most once a day. `SUBBENCH_OFFLINE=1` uses the snapshot only. Each token class has its
-own rate. A one-hour cache write has the one-hour rate. A request whose input context is
-past a long-context threshold has the long-context rate for all of its classes. A model
-with no price costs zero, and the collector names it in its log.
+Prices are ccusage's: the table inside the executable is generated from ccusage's own price
+resolution (LiteLLM and models.dev, with its corrections), so pricing works offline and
+matches the history ccusage priced. Each token class has its own rate; a one-hour cache
+write costs twice the input rate; a request past a model's long-context threshold pays the
+long-context rates; Fast, Flex and Ultrafast requests pay the model's multiplier. A model
+the table lacks is looked up in LiteLLM's live table, fetched at most once a day
+(`SUBBENCH_OFFLINE=1` never fetches). A model with no price at all costs zero, and the
+collector names it in its log.
 
 ---
 

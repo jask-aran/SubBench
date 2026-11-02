@@ -162,6 +162,10 @@ def build_parser() -> argparse.ArgumentParser:
     data_import.add_argument("--report", default="daily")
     data_backup = data_commands.add_parser("backup", help="Copy the database somewhere safe")
     data_backup.add_argument("destination", type=Path)
+    data_check = data_commands.add_parser(
+        "check-estimates", help="Compare window estimates with those stored in a backup taken before an upgrade")
+    data_check.add_argument("backup", type=Path, help="The database copy taken before upgrading")
+    data_check.add_argument("--tolerance", type=float, default=0.01, help="Relative change reported as a change (default: 0.01)")
     data_reset = data_commands.add_parser("reset", help="Delete every observation and start measuring again")
     data_reset.add_argument("--yes", action="store_true", help="Required: this cannot be undone")
     data_prune = data_commands.add_parser("prune", help="Drop raw usage rows older than a cutoff")
@@ -384,6 +388,10 @@ def _data(db, args) -> int:
             db.backup(target)
         print(f"{destination} ({destination.stat().st_size / 1e6:.1f} MB)")
         return 0
+    if args.data_command == "check-estimates":
+        from . import compare
+
+        return compare.run(args.backup.expanduser(), args.database, tolerance=args.tolerance)
     if args.data_command == "reset":
         if not args.yes:
             print("This deletes every observation on this machine and cannot be undone.\n"

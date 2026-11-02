@@ -118,7 +118,7 @@ def test_codex_counts_changes_in_the_running_total(home):
     # Cached tokens are split out of input; reasoning stays inside output.
     assert models["gpt-6-sol"] == {"modelName": "gpt-6-sol", "inputTokens": 10000, "cacheReadTokens": 20000,
                                    "outputTokens": 900, "reasoningOutputTokens": 300, "cacheCreationTokens": 0,
-                                   "cost": pytest.approx(0.033)}
+                                   "cost": pytest.approx(0.033), "totalTokens": 30900, "isFallback": False}
     assert models["gpt-6-luna"]["inputTokens"] == 10000 and models["gpt-6-luna"]["cacheReadTokens"] == 10000
 
 
@@ -143,7 +143,7 @@ def test_reading_is_incremental(home):
     after = reader.daily()["totals"]["totalCost"]
     # 10k uncached input and 1k output on gpt-6-luna.
     assert after - before == pytest.approx(10000 * 1e-7 + 1000 * 5e-7)
-    state = next(iter(reader._files.values()))
+    state = next(iter(reader._codex._files.values()))
     assert state.offset < rollout.stat().st_size  # the partial line is left for the next pass
 
 

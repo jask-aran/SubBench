@@ -113,9 +113,12 @@ def test_logs_skip_lines_that_cannot_carry_usage(tmp_path, monkeypatch):
     # A prompt line that is not even valid JSON: had it been parsed, it would be skipped
     # anyway; it is never decoded because it lacks the usage marker.
     (project / "s.jsonl").write_text('{"type":"user","message":{"content":"my secret prompt"\n')
+    from subbench.prices import Prices, _bundled
+
+    reader = logs.LogReader("claude", Prices(_bundled()))
     parsed = []
     monkeypatch.setattr(logs.json, "loads", lambda line: parsed.append(line) or {})
-    logs.LogReader("claude").entries()
+    reader.entries()
     assert parsed == []
 
 
