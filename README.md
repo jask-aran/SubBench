@@ -356,8 +356,7 @@ minutes while the tab is visible.
 |---|---|
 | `/` Overview | The weekly value of each product, then one large chart with three views: weekly value, score against cost, and tasks per weekly limit. |
 | `/subscriptions/` | One block per provider (its plans side by side, then its model mix), the value over time, the consistency checks and the completed windows. |
-| `/frontier/` | The explorer: one chart the size of the window with five views (cost, time, tokens, cost × time, 3D), for models and coding agents. The side panel holds the solver or the budget, and the Pareto set. |
-| `/surface/` | Redirects to the explorer's 3D view. |
+| `/models/` | Every public benchmark in one chart the size of the window. Pick a benchmark, then any two axes (its score, its cost, time or tokens, or another benchmark's score); a third axis makes the chart 3D, or colours the 2D chart. The side panel holds the best trade-offs (non-dominated on the chosen axes), the cheapest model at a target score, and in 3D the camera and a budget. `/frontier/` and `/surface/` redirect here. |
 
 The rules for what the pages show are unchanged. A figure appears only for a completed,
 confirmed window. A window that passed every check except the width of its interval shows
@@ -387,8 +386,8 @@ look dominated in a two-axis chart, because it wins on the axis that the chart h
 
 The chrome uses Conduit's tokens only. The chart series use one validated categorical
 palette, because Conduit's category palette fails the colour-vision checks as scatter
-series. Plotly loads for each page on demand: the basic bundle for the 2D pages and the
-gl3d bundle for the surface.
+series. The Models chart is ECharts, with echarts-gl for 3D, so 2D and 3D are one engine on one canvas and switching
+redraws in place. The overview and subscription trend charts use Plotly's basic bundle. Both load on demand.
 
 ### Local preview
 

@@ -120,7 +120,7 @@ function Overview() {
           </Select>
         </Show>
         <span class="grow" />
-        <Button variant="ghost" size="sm" onClick={link(tab() === "value" ? "/subscriptions/" : "/frontier/")}>{tab() === "value" ? "Subscriptions" : "Explorer"}</Button>
+        <Button variant="ghost" size="sm" onClick={link(tab() === "value" ? "/subscriptions/" : "/models/")}>{tab() === "value" ? "Subscriptions" : "Models"}</Button>
       </div>
       <section class="sb-canvas-main" aria-label="Chart">
         <div class="sb-canvas-head">

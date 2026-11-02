@@ -66,6 +66,7 @@ export default defineConfig({
       input: {
         overview: path.join(root, "index.html"),
         subscriptions: path.join(root, "subscriptions/index.html"),
+        models: path.join(root, "models/index.html"),
         frontier: path.join(root, "frontier/index.html"),
         surface: path.join(root, "surface/index.html"),
         notfound: path.join(root, "404.html"),

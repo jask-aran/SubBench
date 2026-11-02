@@ -92,3 +92,49 @@ test("the shipped bundle loads, and its headline lenses can be charted and drawn
   assert.ok(surfaces.includes("aa-intelligence"));
   assert.ok(surfaces.filter((id) => id.startsWith("aa-eval-")).length >= 5);
 });
+
+import { paretoN, axisValue, higherIsBetter, axisIsLog, attainmentGridBy, scoreLookup } from "../web/src/lib/frontier.js";
+
+test("the best trade-offs follow each axis's direction, in any number of axes", () => {
+  const list = [pt("a", 10, 1, 9), pt("b", 30, 2, 1), pt("c", 20, 3, 5), pt("d", 40, 4, 8)];
+  const get = (axis) => (p) => axisValue(axis, p);
+  // score up, cost down: a, b, d
+  assert.deepEqual(paretoN(list, [get("res:cost"), get("score")], [false, true]).map((p) => p.entity.id).sort(), ["a", "b", "d"]);
+  // cost down, time down: a and b (c and d are beaten by b on both)
+  assert.deepEqual(paretoN(list, [get("res:cost"), get("res:time")], [false, false]).map((p) => p.entity.id).sort(), ["a", "b"]);
+  // three axes agree with pareto3d
+  assert.deepEqual(paretoN(list, [get("res:cost"), get("res:time"), get("score")], [false, false, true]).map((p) => p.entity.id).sort(),
+    pareto3d(list).map((p) => p.entity.id).sort());
+});
+
+test("axis directions and scales", () => {
+  assert.equal(higherIsBetter("score"), true);
+  assert.equal(higherIsBetter("lens:deepswe-pass1"), true);
+  assert.equal(higherIsBetter("res:cost"), false);
+  assert.equal(higherIsBetter("res:output_speed"), true);
+  assert.equal(axisIsLog("res:cost"), true);
+  assert.equal(axisIsLog("score"), false);
+});
+
+test("another benchmark's score joins by model and tier", () => {
+  const index = indexBundle({
+    metrics: [{ id: "a", entity_type: "model" }, { id: "b", entity_type: "model" }],
+    entities: { model: [{ id: "m" }], agent: [] },
+    observations: [
+      { entity_type: "model", entity_id: "m", metric_id: "a", score: 1, variant: "high" },
+      { entity_type: "model", entity_id: "m", metric_id: "b", score: 7, variant: "high" },
+      { entity_type: "model", entity_id: "m", metric_id: "b", score: 5 },
+    ],
+  });
+  const lookups = new Map([["b", scoreLookup(index, "b")]]);
+  const point = { entity: { id: "m" }, observation: { score: 1, variant: "high" } };
+  assert.equal(axisValue("lens:b", point, lookups), 7);
+  assert.equal(axisValue("lens:b", { entity: { id: "m" }, observation: { score: 1, variant: "low" } }, lookups), 5);
+});
+
+test("the general attainment grid matches the cost-time one", () => {
+  const list = [pt("a", 10, 0.01, 10), pt("b", 50, 1, 100), pt("c", 70, 10, 1000)];
+  const g = attainmentGridBy(list, (p) => p.observation.resources.cost, (p) => p.observation.resources.time, (p) => p.observation.score, { steps: 4 });
+  assert.equal(g.cells[4][4].entity.id, "c");
+  assert.equal(g.cells[0][0].entity.id, "a");
+});

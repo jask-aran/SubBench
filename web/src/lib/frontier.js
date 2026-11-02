@@ -270,3 +270,95 @@ export function baseKey(entity, observation) {
   if (variant && !["default", "max"].includes(variant)) return entity.id.replace(new RegExp(`-${variant}$`), "");
   return entity.id.replace(/-(?:non-reasoning|xhigh|high|medium|low)$/, "");
 }
+
+// ---------------------------------------------------------------- free axes
+
+// An axis is the chosen benchmark's score ("score"), one of its resources ("res:cost"), or another benchmark's score
+// for the same model ("lens:<metric id>"). Any two make a chart; a third makes it 3D.
+export const AXIS_RESOURCES = ["cost", "time", "output_tokens", "total_tokens", "input_tokens", "reasoning_tokens", "steps", "output_speed", "ttft"];
+
+export function axisKind(axis) {
+  if (!axis) return null;
+  if (axis === "score") return "score";
+  if (axis.startsWith("res:")) return "resource";
+  if (axis.startsWith("lens:")) return "lens";
+  return null;
+}
+
+// Scores and speed: more is better. Every other resource: less is better.
+export function higherIsBetter(axis) {
+  return axisKind(axis) !== "resource" || axis === "res:output_speed";
+}
+
+export function axisIsLog(axis) {
+  return axisKind(axis) === "resource" && !!RESOURCES[axis.slice(4)]?.log;
+}
+
+// Scores of one metric by model and tier, for joining another benchmark onto the chosen one.
+export function scoreLookup(index, metricId) {
+  const byKey = new Map();
+  const byEntity = new Map();
+  for (const o of index.byMetric.get(metricId) || []) {
+    byKey.set(o.entity_id + "|" + (o.variant || ""), o.score);
+    if (!byEntity.has(o.entity_id) || !o.variant) byEntity.set(o.entity_id, o.score);
+  }
+  return { byKey, byEntity };
+}
+
+export function axisValue(axis, point, lookups = new Map()) {
+  const kind = axisKind(axis);
+  const o = point.observation;
+  if (kind === "score") return Number.isFinite(o.score) ? o.score : null;
+  if (kind === "resource") {
+    const value = o.resources?.[axis.slice(4)];
+    return Number.isFinite(value) ? value : null;
+  }
+  if (kind === "lens") {
+    const table = lookups.get(axis.slice(5));
+    if (!table) return null;
+    const value = table.byKey.get(point.entity.id + "|" + (o.variant || "")) ?? table.byEntity.get(point.entity.id);
+    return Number.isFinite(value) ? value : null;
+  }
+  return null;
+}
+
+// Non-dominated on any number of axes: no other item is at least as good on every axis and better on one.
+export function paretoN(items, getters, higher) {
+  const rows = items.map((item) => ({ item, v: getters.map((get) => get(item)) }));
+  return rows.filter((a) => !rows.some((b) => {
+    if (a === b) return false;
+    let better = false;
+    for (let k = 0; k < getters.length; k++) {
+      const diff = higher[k] ? b.v[k] - a.v[k] : a.v[k] - b.v[k];
+      if (diff < 0) return false;
+      if (diff > 0) better = true;
+    }
+    return better;
+  })).map((row) => row.item);
+}
+
+// The attainment surface over two "less is better" axes: the best score any item reaches within both ceilings.
+export function attainmentGridBy(items, getA, getB, getScore, { steps = 40, rangeA, rangeB } = {}) {
+  const usable = items.filter((p) => getA(p) > 0 && getB(p) > 0 && Number.isFinite(getScore(p)));
+  if (!usable.length) return null;
+  const [a0, a1] = rangeA || [Math.min(...usable.map(getA)), Math.max(...usable.map(getA))];
+  const [b0, b1] = rangeB || [Math.min(...usable.map(getB)), Math.max(...usable.map(getB))];
+  const aAt = (i) => 10 ** (Math.log10(a0) + (Math.log10(a1) - Math.log10(a0)) * (i / steps));
+  const bAt = (j) => 10 ** (Math.log10(b0) + (Math.log10(b1) - Math.log10(b0)) * (j / steps));
+  const cells = [];
+  for (let i = 0; i <= steps; i++) {
+    const row = [];
+    for (let j = 0; j <= steps; j++) row.push(bestWithinBy(usable, getA, getB, getScore, aAt(i), bAt(j)));
+    cells.push(row);
+  }
+  return { steps, aAt, bAt, cells };
+}
+
+export function bestWithinBy(items, getA, getB, getScore, capA, capB) {
+  let best = null;
+  for (const p of items) {
+    if (!(getA(p) <= capA * (1 + 1e-9) && getB(p) <= capB * (1 + 1e-9))) continue;
+    if (!best || getScore(p) > getScore(best) || (getScore(p) === getScore(best) && getA(p) < getA(best))) best = p;
+  }
+  return best;
+}

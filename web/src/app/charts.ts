@@ -1,4 +1,4 @@
-import { alpha, token } from "./tokens";
+import { alpha, token, SEQUENTIAL } from "./tokens";
 import { theme } from "./plot";
 // @ts-ignore
 import { price, duration, integer, score as fmtScore } from "../lib/format.js";
@@ -10,13 +10,17 @@ export const UNIT_FORMAT: Record<string, (v: number) => string> = {
 };
 
 export type ScatterPoint = {
+  /** A third metric's value, drawn as colour when the chart has a colour axis. */
+  c?: number;
   id: string; x: number; y: number; colour: string; label: string; short?: string; hover: string;
   frontier?: boolean; mine?: boolean; pinned?: boolean; dim?: boolean; group?: string; size?: number;
 };
 
 /** A frontier scatter: dim points, the step line of the Pareto set, the set's points outlined, the person's own models
  *  ringed, and direct labels only where they earn it. */
-export function frontierScatter(points: ScatterPoint[], opts: { xLog: boolean; xTitle: string; yTitle: string; yFormat: string; xFormat?: string; groups?: boolean; labels?: boolean; height?: number; step?: boolean; yLog?: boolean; yTickFormat?: string; gutter?: boolean; fill?: boolean }) {
+export function frontierScatter(points: ScatterPoint[], opts: { xLog: boolean; xTitle: string; yTitle: string; yFormat: string; xFormat?: string; groups?: boolean; labels?: boolean; height?: number; step?: boolean; yLog?: boolean; yTickFormat?: string; gutter?: boolean; fill?: boolean;
+  /** A third axis as colour: a one-hue ramp, brighter for better. */
+  colour?: { title: string; percent?: boolean; higherBetter: boolean; log?: boolean } }) {
   const t = theme();
   const traces: any[] = [];
   const surface = token("--background");
@@ -44,7 +48,20 @@ export function frontierScatter(points: ScatterPoint[], opts: { xLog: boolean; x
   traces.push({
     type: "scatter", mode: "markers", x: ordered.map((p) => p.x), y: ordered.map((p) => p.y),
     customdata: ordered.map((p) => p.id), hovertext: ordered.map((p) => p.hover), hovertemplate: "%{hovertext}<extra></extra>",
-    marker: {
+    marker: opts.colour ? {
+      // The third metric as colour. A log metric is coloured on its log, so a 100x spread does not wash out.
+      color: ordered.map((p) => (opts.colour!.log ? Math.log10(Math.max(1e-12, p.c ?? NaN)) : p.c)),
+      colorscale: SEQUENTIAL.map((name, k) => [k / (SEQUENTIAL.length - 1), token(name)]), reversescale: !opts.colour.higherBetter,
+      opacity: ordered.map((p) => (p.dim ? 0.18 : 1)),
+      colorbar: {
+        thickness: 10, len: 0.6, outlinewidth: 0, x: 1.0, xpad: 4,
+        title: { text: opts.colour.title, side: "right", font: { family: t.sans, size: 12, color: t.muted } },
+        tickfont: { family: t.data, size: 11, color: t.muted }, tickformat: opts.colour.percent ? ".0%" : undefined,
+        ...(opts.colour.log ? colourLogTicks(ordered.map((p) => p.c ?? NaN)) : {}),
+      },
+      size: ordered.map((p) => p.size ?? (p.frontier ? 11 : 8)),
+      line: { color: ordered.map((p) => (p.frontier && !p.dim ? t.ink : surface)), width: ordered.map((p) => (p.frontier && !p.dim ? 1.8 : 1)) },
+    } : {
       color: ordered.map((p) => (p.dim ? alpha(token(p.colour), 0.18) : token(p.colour))),
       size: ordered.map((p) => p.size ?? (p.frontier ? 10 : 8)),
       line: { color: ordered.map((p) => (p.frontier && !p.dim ? t.ink : surface)), width: ordered.map((p) => (p.frontier && !p.dim ? 1.6 : 1.2)) },
@@ -60,13 +77,13 @@ export function frontierScatter(points: ScatterPoint[], opts: { xLog: boolean; x
   // Explicit ranges, so a gutter label's leader line can start exactly at its point.
   const xs = points.map((p) => (opts.xLog ? Math.log10(p.x) : p.x)), ys = points.map((p) => p.y);
   const [x0, x1] = pad(Math.min(...xs), Math.max(...xs), 0.04), [y0, y1] = pad(Math.min(...ys), Math.max(...ys), 0.07);
-  const gutter = opts.gutter && opts.labels !== false ? gutterLabels(points, { xLog: opts.xLog, x0, x1, y0, y1, height: opts.height ?? 480, t }) : null;
+  const gutter = opts.gutter && opts.labels !== false ? gutterLabels(points, { xLog: opts.xLog, x0, x1, y0, y1, height: opts.height ?? 480, t, plain: !!opts.colour }) : null;
   const annotations = gutter ? gutter.annotations : opts.labels === false ? [] : labelAnnotations(points.filter((p) => !p.dim && (p.frontier || p.mine || p.pinned)), t, opts.xLog);
   const layout = {
     ...t.layout,
     // fill: the chart takes its container's size (a canvas sized to the window); height then only spaces labels.
     height: opts.fill ? undefined : opts.height, autosize: true,
-    margin: { l: 60, r: gutter ? 190 : 18, t: 10, b: 50 },
+    margin: { l: 60, r: (gutter ? 190 : 18) + (opts.colour ? 70 : 0), t: 10, b: 50 },
     // A small panel labels decades only; 1-2-5 subdivisions crowd its axis.
     xaxis: { ...t.axis, ...(opts.xLog && (opts.height ?? 500) <= 320 ? { dtick: 1 } : {}), type: opts.xLog ? "log" : "linear", range: [x0, x1],
       title: { ...t.axis.title, text: opts.xTitle + (opts.xLog ? " · log scale" : "") }, tickformat: opts.xFormat },
@@ -78,6 +95,15 @@ export function frontierScatter(points: ScatterPoint[], opts: { xLog: boolean; x
   return { traces, layout };
 }
 
+function colourLogTicks(values: number[]) {
+  const ok = values.filter((v) => v > 0);
+  if (!ok.length) return {};
+  const lo = Math.floor(Math.log10(Math.min(...ok))), hi = Math.ceil(Math.log10(Math.max(...ok)));
+  const vals = [] as number[];
+  for (let e = lo; e <= hi; e++) vals.push(e);
+  return { tickvals: vals, ticktext: vals.map((e) => (10 ** e >= 1 ? String(10 ** e) : (10 ** e).toPrecision(1))) };
+}
+
 const pad = (lo: number, hi: number, f: number): [number, number] => { const d = (hi - lo) * f || Math.abs(hi || 1) * 0.1; return [lo - d, hi + d]; };
 
 /*
@@ -85,7 +111,7 @@ const pad = (lo: number, hi: number, f: number): [number, number] => { const d =
  * reading aid): the plot itself stays free of text. One name per model -- its best tier -- for the models that reach
  * the frontier or that the person uses, spread apart so no two collide.
  */
-function gutterLabels(points: ScatterPoint[], o: { xLog: boolean; x0: number; x1: number; y0: number; y1: number; height: number; t: ReturnType<typeof theme> }) {
+function gutterLabels(points: ScatterPoint[], o: { xLog: boolean; x0: number; x1: number; y0: number; y1: number; height: number; t: ReturnType<typeof theme>; plain?: boolean }) {
   const best = new Map<string, ScatterPoint>();
   const keep = new Set<string>();
   for (const p of points) {
@@ -109,7 +135,7 @@ function gutterLabels(points: ScatterPoint[], o: { xLog: boolean; x0: number; x1
   const annotations = chosen.map((p, i) => ({
     xref: "paper", yref: "y", x: 1.015, y: placed[i], xanchor: "left", yanchor: "middle", showarrow: false,
     text: (p.short || p.label).replace(/\s*\((max|xhigh|high|medium|low|with fallback)\)$/i, "") + (p.mine ? "  ·  yours" : ""),
-    font: { family: o.t.sans, size: 13, color: token(p.colour) },
+    font: { family: o.t.sans, size: 13, color: o.plain ? o.t.ink : token(p.colour) },
   }));
   const shapes = chosen.map((p, i) => ({
     type: "path", xref: "paper", yref: "y", layer: "below",
