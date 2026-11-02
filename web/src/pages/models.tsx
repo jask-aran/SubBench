@@ -32,24 +32,22 @@ function Models() {
   const [reports] = createResource(loadReports);
   const me = createMemo(() => (index() ? personal(index()!, reports() ?? null) : null));
   const weekly = () => me()?.products[0]?.headline.value ?? null;
-  // SubBench's measured plans, by the provider whose models they cover: Claude plans cover Anthropic's models, ChatGPT
-  // plans OpenAI's. Where a provider has several plans, the most valuable one is the one a model is measured against.
-  const plans = createMemo(() => {
-    const out = new Map<string, { name: string; value: number; kind: string }>();
-    for (const item of me()?.products ?? []) {
-      const provider = item.card.provider;
-      if (!provider) continue;
-      const prior = out.get(provider);
-      if (!prior || item.headline.value > prior.value) out.set(provider, { name: item.card.name, value: item.headline.value, kind: item.headline.kind });
-    }
-    return out;
-  });
+  // Every plan SubBench has measured, pooled across the accounts that report it. A plan covers its provider's models:
+  // Claude plans Anthropic's, ChatGPT plans OpenAI's.
+  type Plan = { name: string; provider: string; value: number; kind: string; accounts: number };
+  const plans = createMemo<Plan[]>(() => (me()?.products ?? [])
+    .filter((item: any) => item.card.provider)
+    .map((item: any) => ({ name: item.card.name, provider: item.card.provider, value: item.headline.value, kind: item.headline.kind,
+      accounts: item.headline.row?.account_count ?? 1 }))
+    .sort((a: Plan, b: Plan) => a.provider.localeCompare(b.provider) || a.value - b.value));
   const providerOf = (entity: any) => {
     const text = `${entity.provider ?? ""} ${entity.family ?? ""} ${entity.agent ?? ""}`.toLowerCase();
     return text.includes("anthropic") || text.includes("claude") ? "claude" : text.includes("openai") || text.includes("codex") ? "codex" : null;
   };
-  const planFor = (entity: any) => plans().get(providerOf(entity) ?? "") ?? null;
+  const plansFor = (entity: any) => plans().filter((plan) => plan.provider === providerOf(entity));
+  const planNamed = (axis: string) => plans().find((plan) => `sub:${plan.name}` === axis) ?? null;
   const [onPlans, setOnPlans] = createSignal(false);
+  const provider = (key: string) => (key === "claude" ? "Anthropic" : key === "codex" ? "OpenAI" : key);
 
   const [mode, setMode] = createSignal<Mode>(params.get("mode") === "agent" ? "agent" : "model");
   const [lens, setLens] = createSignal(params.get("lens") || "aa-intelligence");
@@ -90,9 +88,10 @@ function Models() {
         { value: "score", label: "Score" },
         ...AXIS_RESOURCES.filter((k: string) => own().includes(k)).map((k: string) => ({ value: `res:${k}`, label: RESOURCES[k].label })),
       ] },
-      ...(plans().size && own().includes("cost") ? [{ title: "Your plans", items: [
-        { value: "sub:tasks", label: "Tasks / week on your plan", detail: [...plans().values()].map((p) => p.name).join(" · ") },
-      ] }] : []),
+      ...(plans().length && own().includes("cost") ? [{ title: "Measured plans · tasks per weekly limit", items: plans().map((plan) => ({
+        value: `sub:${plan.name}`, label: `Tasks / week · ${plan.name}`,
+        detail: `${provider(plan.provider)} models · $${Math.round(plan.value).toLocaleString()} per week`,
+      })) }] : []),
       ...[...others.entries()].map(([group, list]) => ({ title: `${group} score`, items: list.map((m: any) => ({ value: `lens:${m.id}`, label: m.label, meta: String(m.count) })) })),
     ];
   });
@@ -107,7 +106,7 @@ function Models() {
     const valid = new Set(axisOptions().map((o) => o.value));
     if (!index() || !valid.size) return;
     // The plan axis exists once the subscription reports arrive; a link that asks for it waits for them.
-    if (reports.loading) valid.add("sub:tasks");
+    if (reports.loading) for (const a of axes()) if (a.startsWith("sub:")) valid.add(a);
     const firstOther = axisOptions().find((o) => o.value !== "score")?.value ?? "score";
     if (!valid.has(xAxis())) setX(valid.has("res:cost") ? "res:cost" : firstOther);
     if (!valid.has(yAxis())) setY("score");
@@ -125,8 +124,8 @@ function Models() {
     for (const a of axes()) if (axisKind(a) === "lens" && index()) out.set(a.slice(5), scoreLookup(index()!, a.slice(5)));
     return out;
   });
-  const isPlanAxis = (a: string) => a === "sub:tasks";
-  const title = (a: string) => isPlanAxis(a) ? "Tasks / week on your plan" : a === "score" ? meta()?.label ?? "Score" : axisKind(a) === "resource" ? RESOURCES[a.slice(4)]?.label ?? a : meta(a.slice(5))?.label ?? a;
+  const isPlanAxis = (a: string) => a.startsWith("sub:");
+  const title = (a: string) => isPlanAxis(a) ? `Tasks / week · ${a.slice(4)}` : a === "score" ? meta()?.label ?? "Score" : axisKind(a) === "resource" ? RESOURCES[a.slice(4)]?.label ?? a : meta(a.slice(5))?.label ?? a;
   const unit = (a: string) => isPlanAxis(a) ? "integer" : axisKind(a) === "resource" ? RESOURCES[a.slice(4)]?.unit : undefined;
   const isPercent = (a: string) => (a === "score" ? meta() : axisKind(a) === "lens" ? meta(a.slice(5)) : null)?.format === "percent";
   const fmtAxis = (a: string, v: number) => isPlanAxis(a) ? integer(v) : axisKind(a) === "resource" ? (RESOURCE_FORMAT[unit(a)] ?? String)(v)
@@ -135,8 +134,9 @@ function Models() {
   // A plan axis: the weekly value of the plan covering the model's provider, over the benchmark's cost per task.
   const valueOn = (a: string, p: any) => {
     if (!isPlanAxis(a)) return axisValue(a, p, lookups());
-    const plan = planFor(p.entity), cost = p.observation.resources?.cost;
-    return plan && cost > 0 ? plan.value / cost : null;
+    // A plan counts only the models it covers; a model from another provider has no value on its axis.
+    const plan = planNamed(a), cost = p.observation.resources?.cost;
+    return plan && plan.provider === providerOf(p.entity) && cost > 0 ? plan.value / cost : null;
   };
 
   // ---- the points, with a value on every chosen axis
@@ -144,7 +144,7 @@ function Models() {
   const label = (p: any) => p.entity.label + (p.observation.variant && !p.entity.label.includes(p.observation.variant) ? ` (${p.observation.variant})` : "");
   const needle = () => search().trim().toLowerCase();
   const items = createMemo(() => base()
-    .filter((p: any) => !hidden().has(familyGroup(p.entity.family)) && (!onPlans() || !!planFor(p.entity))
+    .filter((p: any) => !hidden().has(familyGroup(p.entity.family)) && (!onPlans() || plansFor(p.entity).length > 0)
       && (!needle() || `${p.entity.label} ${p.entity.id} ${p.entity.family} ${p.entity.agent ?? ""}`.toLowerCase().includes(needle())))
     .map((p: any) => ({ p, v: axes().map((a) => valueOn(a, p)) as number[] }))
     .filter((row: any) => row.v.every((value: number | null, k: number) => value !== null && (!logAxis(axes()[k]) || value > 0))));
@@ -153,11 +153,13 @@ function Models() {
     const o = row.p.observation;
     const rows: Array<[string, string]> = axes().map((a, k) => [title(a), fmtAxis(a, row.v[k])]);
     if (!axes().includes("res:cost") && Number.isFinite(o.resources?.cost)) rows.push(["Cost / task", price(o.resources.cost)]);
-    const plan = planFor(row.p.entity);
-    const per = plan ? tasksPerEntitlement(plan.value, o.resources?.cost) : null;
-    if (per && !axes().includes("sub:tasks")) rows.push([`Tasks / week · ${plan!.name}`, integer(per)]);
+    for (const plan of plansFor(row.p.entity)) {
+      const per = tasksPerEntitlement(plan.value, o.resources?.cost);
+      if (per && !axes().includes(`sub:${plan.name}`)) rows.push([`Tasks / week · ${plan.name}`, integer(per)]);
+    }
     return hoverHTML(label(row.p), rows, [row.p.entity.family, best().has(key(row.p)) ? "best trade-off" : null,
-      me()?.mine.has(row.p.entity.id) ? "you use it" : null, plan ? `on ${plan.name}` : plans().size ? "not on your plans" : null].filter(Boolean).join(" · "));
+      me()?.mine.has(row.p.entity.id) ? "in measured usage" : null,
+      plans().length && !plansFor(row.p.entity).length ? "no measured plan" : null].filter(Boolean).join(" · "));
   };
 
   // ---- surface: two "less is better" resources and one score
@@ -276,8 +278,8 @@ function Models() {
       <span class="grow" />
       <Segmented label="Entities" size="sm" value={mode()} onChange={(v) => { setMode(v); setHidden(new Set<string>()); setPinned(new Set<string>()); }}
         options={[{ value: "model", label: "Models" }, { value: "agent", label: "Agents" }]} />
-      <Show when={plans().size}>
-        <button type="button" class="sb-chip" aria-pressed={onPlans()} onClick={() => setOnPlans(!onPlans())} title="Only models your measured plans cover">On my plans</button>
+      <Show when={plans().length}>
+        <button type="button" class="sb-chip" aria-pressed={onPlans()} onClick={() => setOnPlans(!onPlans())} title="Only models a measured plan covers">Plan-covered</button>
       </Show>
       <div class="sb-find"><Input type="search" placeholder="Find" aria-label="Find a model" value={search()} onInput={(e) => setSearch(e.currentTarget.value)} /></div>
       <ToggleMenu label="Families" count={hidden().size ? `${families().length - hidden().size}/${families().length}` : undefined}
@@ -302,7 +304,7 @@ function Models() {
           <h2>{`${title(yAxis())} vs ${title(xAxis())}`}{is3d() ? (orbit() ? ` vs ${title(zAxis())}` : ` · colour: ${title(zAxis())}`) : ""}</h2>
           <div class="sb-chart-legend">
             <span><i data-best="" />best trade-off</span>
-            <Show when={me()?.mine.size}><span><i data-ring="" />you use it</span></Show>
+            <Show when={me()?.mine.size}><span><i data-ring="" />in measured usage</span></Show>
             <span>{items().length} shown · {is3d() && orbit() ? "drag to orbit" : "scroll to zoom"}</span>
           </div>
         </div>
@@ -317,13 +319,13 @@ function Models() {
 
       <Show when={rail()}>
         <aside class="sb-rail">
-          <Show when={plans().size}>
-            <Inset title="Your plans" tight>
-              <For each={[...plans().entries()]}>{([provider, plan]) =>
+          <Show when={plans().length}>
+            <Inset title="Measured plans" tight>
+              <For each={plans()}>{(plan) =>
                 <div class="sb-plan-row">
-                  <Swatch colour={familyColor(provider === "claude" ? "Anthropic" : "OpenAI")} />
+                  <Swatch colour={familyColor(provider(plan.provider))} />
                   <span>{plan.name}</span><b>${Math.round(plan.value).toLocaleString()}/wk</b>
-                  <small>covers {provider === "claude" ? "Anthropic" : "OpenAI"} models · {plan.kind === "settled" ? "measured" : "in progress"}</small>
+                  <small>{provider(plan.provider)} models · {plan.accounts} {plan.accounts === 1 ? "account" : "accounts"} · {plan.kind === "settled" ? "settled" : "in progress"}</small>
                 </div>}</For>
             </Inset>
           </Show>
@@ -348,15 +350,15 @@ function Models() {
               </div>
             </Inset>}</Show>
           <Show when={solver()}>{(s) => {
-            const plan = () => planFor(s().row.p.entity);
-            const per = () => plan() ? tasksPerEntitlement(plan()!.value, s().row.p.observation.resources?.cost) : null;
+            const covering = () => plansFor(s().row.p.entity);
             return <Inset title="Cheapest at target" tight>
               <Slider label="Target" value={target()} onChange={setTarget}
                 options={[50, 60, 70, 75, 80, 85, 90, 95, 100].map((v) => ({ value: String(v), label: `${v}%` }))} />
               <div class="sb-callout" style={{ "margin-top": "var(--space-md)" }}><b>{label(s().row.p)}</b>
                 <dl class="sb-kv" style={{ "margin-top": "var(--space-sm)" }}>
                   <For each={axes()}>{(a, k) => <><dt>{title(a)}</dt><dd>{fmtAxis(a, s().row.v[k()])}</dd></>}</For>
-                  <Show when={per()}><dt>Tasks / week · {plan()!.name}</dt><dd>{integer(per())}</dd></Show>
+                  <For each={covering()}>{(plan) => <Show when={tasksPerEntitlement(plan.value, s().row.p.observation.resources?.cost)}>{(per) =>
+                    <><dt>Tasks / week · {plan.name}</dt><dd>{integer(per())}</dd></>}</Show>}</For>
                 </dl></div>
             </Inset>;
           }}</Show>

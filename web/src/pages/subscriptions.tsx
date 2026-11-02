@@ -9,7 +9,7 @@ import { DashRow, DashEmpty, DashMore } from "../conduit/ui/dashboard";
 // @ts-ignore
 import { money, range, plural, shortDate, integer } from "../lib/format.js";
 // @ts-ignore
-import { WINDOWS, summaryCards, visibleEstimates, trendPoints, mixByWindow, modelTotals, sourceAccount, windowLabel } from "../lib/value.js";
+import { WINDOWS, summaryCards, visibleEstimates, trendPoints, mixByWindow, modelTotals, windowLabel } from "../lib/value.js";
 
 const MIX_COLOURS = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--series-4)", "var(--series-5)", "var(--series-6)", "var(--series-7)", "var(--series-8)"];
 
@@ -64,6 +64,18 @@ function Subscriptions() {
 
   const providers = createMemo(() => [...new Set((reports()?.models?.models || []).map((row: any) => row.provider))] as string[]);
   const ratios = () => reports()?.current?.window_ratios || [];
+  // One figure per provider: the median across the accounts that report it, so no single account is shown.
+  const pooledRatios = createMemo(() => {
+    const by = new Map<string, number[]>();
+    for (const row of ratios()) {
+      const value = Number(row.per_long_window ?? 1 / row.ratio);
+      if (Number.isFinite(value)) (by.get(row.provider) ?? by.set(row.provider, []).get(row.provider)!).push(value);
+    }
+    return [...by.entries()].map(([provider, values]) => {
+      const sorted = values.sort((x, y) => x - y), mid = Math.floor(sorted.length / 2);
+      return { provider, accounts: sorted.length, value: sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2 };
+    });
+  });
   const divergences = () => reports()?.current?.divergences || [];
 
   return <Site page="subscriptions" title="Subscriptions">
@@ -107,10 +119,10 @@ function Subscriptions() {
         </Inset>
         <Inset title="5-hour limits per week">
           <Show when={ratios().length} fallback={<DashEmpty>None yet</DashEmpty>}>
-            <div class="sb-rows"><For each={ratios()}>{(row: any) =>
+            <div class="sb-rows"><For each={pooledRatios()}>{(row) =>
               <DashRow primary={row.provider === "codex" ? "ChatGPT" : row.provider === "claude" ? "Claude" : row.provider}
-                context={row.account_id ? String(row.account_id).slice(0, 13) : "single source"}
-                trailing={`${Number(row.per_long_window ?? 1 / row.ratio).toFixed(2)}`} />}</For></div>
+                context={`median of ${row.accounts} ${row.accounts === 1 ? "account" : "accounts"}`}
+                trailing={row.value.toFixed(2)} />}</For></div>
           </Show>
         </Inset>
       </div>
@@ -123,7 +135,7 @@ function Subscriptions() {
         <div class="sb-table-wrap">
           <table class="sb-table">
             <Show when={estimates().length} fallback={<caption>No confirmed windows yet</caption>}>
-              <thead><tr><th>Completed</th><th>Product</th><th>Limit</th><th class="num">API equivalent</th><th class="num">Coverage</th><th>Source account</th></tr></thead>
+              <thead><tr><th>Completed</th><th>Product</th><th>Limit</th><th class="num">API equivalent</th><th class="num">Coverage</th></tr></thead>
               <tbody><For each={estimates().slice(0, shown())}>{(row: any) =>
                 <tr>
                   <td class="data">{shortDate(row.completed_at)}</td>
@@ -131,7 +143,6 @@ function Subscriptions() {
                   <td>{windowLabel(row.window)}</td>
                   <td class="num">{money(row.estimate_usd)}</td>
                   <td class="num">{Number.isFinite(row.coverage_percent) ? `${Math.round(row.coverage_percent)}%` : "—"}</td>
-                  <td class="data" title={row.account_id ?? undefined}>{sourceAccount(row)}</td>
                 </tr>}</For></tbody>
             </Show>
           </table>

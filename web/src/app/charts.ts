@@ -134,7 +134,7 @@ function gutterLabels(points: ScatterPoint[], o: { xLog: boolean; x0: number; x1
   const px = (p: ScatterPoint) => ((o.xLog ? Math.log10(p.x) : p.x) - o.x0) / (o.x1 - o.x0);
   const annotations = chosen.map((p, i) => ({
     xref: "paper", yref: "y", x: 1.015, y: placed[i], xanchor: "left", yanchor: "middle", showarrow: false,
-    text: (p.short || p.label).replace(/\s*\((max|xhigh|high|medium|low|with fallback)\)$/i, "") + (p.mine ? "  ·  yours" : ""),
+    text: (p.short || p.label).replace(/\s*\((max|xhigh|high|medium|low|with fallback)\)$/i, ""),
     font: { family: o.t.sans, size: 13, color: o.plain ? o.t.ink : token(p.colour) },
   }));
   const shapes = chosen.map((p, i) => ({

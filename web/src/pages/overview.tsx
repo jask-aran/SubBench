@@ -66,7 +66,7 @@ function Overview() {
         key: p.entity.id + (p.observation.variant || ""), label: p.entity.label + (p.observation.variant && !p.entity.label.includes(p.observation.variant) ? ` (${p.observation.variant})` : ""),
         colour: familyColor(p.entity.family), value: per!, display: `${integer(per)} tasks`,
         sub: `${fmtScore(p.observation.score, joined.metric.format)} · ${price(p.observation.resources.cost)}/task`,
-        tag: me()?.mine.has(p.entity.id) ? "yours" : undefined,
+        tag: me()?.mine.has(p.entity.id) ? "in use" : undefined,
       }));
   });
 
@@ -101,7 +101,7 @@ function Overview() {
         </Show>
         <Figure label="Models benchmarked" value={index() ? String(index()!.bundle.counts.models) : "—"}
           meta={index() ? <>{index()!.bundle.counts.agents} agent configs · {index()!.bundle.counts.metrics} lenses</> : "loading…"} />
-        <Figure label="Your most-used model" value={topModel() ? `${Math.round(topModel()!.share * 100)}%` : undefined} unit="of tokens"
+        <Figure label="Most-used model" value={topModel() ? `${Math.round(topModel()!.share * 100)}%` : undefined} unit="of tokens"
           empty="None yet" meta={topModel() ? <><b>{topModel()!.name}</b>{topModel()!.matched ? "" : " · not benchmarked"}</> : undefined} />
       </div>
     </Inset>
@@ -146,7 +146,7 @@ function Overview() {
         <div class="sb-canvas-foot">
           <Show when={tab() === "value"}><Legend items={[...colours().entries()].map(([label, colour]) => ({ label, colour, kind: (dashes().get(label) === "dash" ? "dash" : dashes().get(label) === "dot" ? "dotted" : "line") as "dash" | "dotted" | "line" }))} /></Show>
           <Show when={tab() === "frontier"}>
-            <Legend items={[{ label: "Pareto", colour: "var(--foreground)" }, { label: "Yours", colour: "var(--foreground)", kind: "ring" },
+            <Legend items={[{ label: "Pareto", colour: "var(--foreground)" }, { label: "In measured usage", colour: "var(--foreground)", kind: "ring" },
               ...["Anthropic", "OpenAI", "Google", "Alibaba", "Moonshot AI", "DeepSeek", "xAI"].map((f) => ({ label: f, colour: familyColor(f), kind: "dot" as const })),
               { label: "Other", colour: "var(--series-other)", kind: "dot" }]} />
           </Show>

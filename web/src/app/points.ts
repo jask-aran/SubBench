@@ -40,7 +40,7 @@ export function joinedScatter(index: Index, metricId: string, resource: string, 
     return {
       id: key, x: getX(p), y: o.score, colour: familyColor(e.family), label: e.label + (o.variant && !e.label.includes(o.variant) ? ` (${o.variant})` : ""),
       short: e.label, hover: hoverHTML(e.label + (o.variant ? ` · ${o.variant}` : ""), rows,
-        [e.family, mine ? `yours · ${Math.round(mine.share * 100)}% of your tokens` : null, onFrontier.has(key) ? "on the Pareto frontier" : null].filter(Boolean).join(" · ")),
+        [e.family, mine ? `${Math.round(mine.share * 100)}% of measured tokens` : null, onFrontier.has(key) ? "on the Pareto frontier" : null].filter(Boolean).join(" · ")),
       frontier: onFrontier.has(key), mine: !!mine, pinned: opts.pinned?.has(e.id), group: baseKey(e, o),
       dim: opts.frontierOnly ? !onFrontier.has(key) && !mine : false,
     };
