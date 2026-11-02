@@ -1,6 +1,8 @@
 import { createEffect, createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Site, mount } from "../app/shell";
-import { Inset, Legend, FamilyChips, Skeleton, Section } from "../app/bits";
+import { Inset, Skeleton } from "../app/bits";
+import { Picker, ToggleMenu, type PickGroup } from "../app/picker";
+import { ArrowLeftRightIcon, XIcon, SlidersHorizontalIcon } from "lucide-solid";
 import { hoverHTML } from "../app/charts";
 import { EChart } from "../app/echart";
 import { option2d, option3d, type Row } from "../app/modelchart";
@@ -8,7 +10,6 @@ import { RESOURCE_FORMAT } from "../app/points";
 import { loadFrontier, loadReports, personal } from "../app/data";
 import { Segmented, Input, Swatch, Slider } from "../conduit/ui/controls";
 import { DashRow, DashEmpty } from "../conduit/ui/dashboard";
-import { Select } from "../conduit/menus";
 // @ts-ignore
 import { price, duration, integer, score as fmtScore } from "../lib/format.js";
 // @ts-ignore
@@ -24,7 +25,6 @@ import { points as metricPoints, availableResources, familyColor, familyGroup, R
 type Mode = "model" | "agent";
 const params = new URLSearchParams(location.search);
 const toLog = (pos: number, [lo, hi]: [number, number]) => 10 ** (Math.log10(lo) + (Math.log10(hi) - Math.log10(lo)) * pos / 1000);
-const tall = () => Math.max(480, innerHeight - 220);
 const NONE = "";
 
 function Models() {
@@ -32,6 +32,24 @@ function Models() {
   const [reports] = createResource(loadReports);
   const me = createMemo(() => (index() ? personal(index()!, reports() ?? null) : null));
   const weekly = () => me()?.products[0]?.headline.value ?? null;
+  // SubBench's measured plans, by the provider whose models they cover: Claude plans cover Anthropic's models, ChatGPT
+  // plans OpenAI's. Where a provider has several plans, the most valuable one is the one a model is measured against.
+  const plans = createMemo(() => {
+    const out = new Map<string, { name: string; value: number; kind: string }>();
+    for (const item of me()?.products ?? []) {
+      const provider = item.card.provider;
+      if (!provider) continue;
+      const prior = out.get(provider);
+      if (!prior || item.headline.value > prior.value) out.set(provider, { name: item.card.name, value: item.headline.value, kind: item.headline.kind });
+    }
+    return out;
+  });
+  const providerOf = (entity: any) => {
+    const text = `${entity.provider ?? ""} ${entity.family ?? ""} ${entity.agent ?? ""}`.toLowerCase();
+    return text.includes("anthropic") || text.includes("claude") ? "claude" : text.includes("openai") || text.includes("codex") ? "codex" : null;
+  };
+  const planFor = (entity: any) => plans().get(providerOf(entity) ?? "") ?? null;
+  const [onPlans, setOnPlans] = createSignal(false);
 
   const [mode, setMode] = createSignal<Mode>(params.get("mode") === "agent" ? "agent" : "model");
   const [lens, setLens] = createSignal(params.get("lens") || "aa-intelligence");
@@ -63,18 +81,33 @@ function Models() {
 
   // ---- axes
   const base = createMemo(() => (index() ? metricPoints(index()!, lens()) : []));
-  const axisOptions = createMemo(() => {
-    const own = availableResources(base()) as string[];
+  const own = createMemo(() => availableResources(base()) as string[]);
+  const axisGroups = createMemo<PickGroup[]>(() => {
+    const others = new Map<string, any[]>();
+    for (const m of metrics()) if (m.id !== lens()) (others.get(m.group) ?? others.set(m.group, []).get(m.group)!).push(m);
     return [
-      { value: "score", label: `${meta()?.label ?? "Score"} score` },
-      ...AXIS_RESOURCES.filter((k: string) => own.includes(k)).map((k: string) => ({ value: `res:${k}`, label: RESOURCES[k].label })),
-      ...metrics().filter((m: any) => m.id !== lens()).map((m: any) => ({ value: `lens:${m.id}`, label: m.label })),
+      { title: meta()?.label ?? "This benchmark", items: [
+        { value: "score", label: "Score" },
+        ...AXIS_RESOURCES.filter((k: string) => own().includes(k)).map((k: string) => ({ value: `res:${k}`, label: RESOURCES[k].label })),
+      ] },
+      ...(plans().size && own().includes("cost") ? [{ title: "Your plans", items: [
+        { value: "sub:tasks", label: "Tasks / week on your plan", detail: [...plans().values()].map((p) => p.name).join(" · ") },
+      ] }] : []),
+      ...[...others.entries()].map(([group, list]) => ({ title: `${group} score`, items: list.map((m: any) => ({ value: `lens:${m.id}`, label: m.label, meta: String(m.count) })) })),
     ];
+  });
+  const axisOptions = createMemo(() => axisGroups().flatMap((g) => g.items));
+  const lensGroups = createMemo<PickGroup[]>(() => {
+    const groups = new Map<string, any[]>();
+    for (const m of metrics()) (groups.get(m.group) ?? groups.set(m.group, []).get(m.group)!).push(m);
+    return [...groups.entries()].map(([title, list]) => ({ title, items: list.map((m: any) => ({ value: m.id, label: m.label, meta: String(m.count) })) }));
   });
   // A lens without the chosen resource falls back to sensible axes rather than an empty chart.
   createEffect(() => {
     const valid = new Set(axisOptions().map((o) => o.value));
     if (!index() || !valid.size) return;
+    // The plan axis exists once the subscription reports arrive; a link that asks for it waits for them.
+    if (reports.loading) valid.add("sub:tasks");
     const firstOther = axisOptions().find((o) => o.value !== "score")?.value ?? "score";
     if (!valid.has(xAxis())) setX(valid.has("res:cost") ? "res:cost" : firstOther);
     if (!valid.has(yAxis())) setY("score");
@@ -92,36 +125,45 @@ function Models() {
     for (const a of axes()) if (axisKind(a) === "lens" && index()) out.set(a.slice(5), scoreLookup(index()!, a.slice(5)));
     return out;
   });
-  const title = (a: string) => a === "score" ? meta()?.label ?? "Score" : axisKind(a) === "resource" ? RESOURCES[a.slice(4)]?.label ?? a : meta(a.slice(5))?.label ?? a;
-  const unit = (a: string) => axisKind(a) === "resource" ? RESOURCES[a.slice(4)]?.unit : undefined;
+  const isPlanAxis = (a: string) => a === "sub:tasks";
+  const title = (a: string) => isPlanAxis(a) ? "Tasks / week on your plan" : a === "score" ? meta()?.label ?? "Score" : axisKind(a) === "resource" ? RESOURCES[a.slice(4)]?.label ?? a : meta(a.slice(5))?.label ?? a;
+  const unit = (a: string) => isPlanAxis(a) ? "integer" : axisKind(a) === "resource" ? RESOURCES[a.slice(4)]?.unit : undefined;
   const isPercent = (a: string) => (a === "score" ? meta() : axisKind(a) === "lens" ? meta(a.slice(5)) : null)?.format === "percent";
-  const fmtAxis = (a: string, v: number) => axisKind(a) === "resource" ? (RESOURCE_FORMAT[unit(a)] ?? String)(v)
+  const fmtAxis = (a: string, v: number) => isPlanAxis(a) ? integer(v) : axisKind(a) === "resource" ? (RESOURCE_FORMAT[unit(a)] ?? String)(v)
     : fmtScore(v, (a === "score" ? meta() : meta(a.slice(5)))?.format);
-  const logAxis = (a: string) => log() && axisIsLog(a);
+  const logAxis = (a: string) => log() && (axisIsLog(a) || isPlanAxis(a));
+  // A plan axis: the weekly value of the plan covering the model's provider, over the benchmark's cost per task.
+  const valueOn = (a: string, p: any) => {
+    if (!isPlanAxis(a)) return axisValue(a, p, lookups());
+    const plan = planFor(p.entity), cost = p.observation.resources?.cost;
+    return plan && cost > 0 ? plan.value / cost : null;
+  };
 
   // ---- the points, with a value on every chosen axis
   const key = (p: any) => p.entity.id + "|" + (p.observation.variant || "");
   const label = (p: any) => p.entity.label + (p.observation.variant && !p.entity.label.includes(p.observation.variant) ? ` (${p.observation.variant})` : "");
   const needle = () => search().trim().toLowerCase();
   const items = createMemo(() => base()
-    .filter((p: any) => !hidden().has(familyGroup(p.entity.family))
+    .filter((p: any) => !hidden().has(familyGroup(p.entity.family)) && (!onPlans() || !!planFor(p.entity))
       && (!needle() || `${p.entity.label} ${p.entity.id} ${p.entity.family} ${p.entity.agent ?? ""}`.toLowerCase().includes(needle())))
-    .map((p: any) => ({ p, v: axes().map((a) => axisValue(a, p, lookups())) as number[] }))
-    .filter((row: any) => row.v.every((value: number | null, k: number) => value !== null && (!axisIsLog(axes()[k]) || value > 0))));
+    .map((p: any) => ({ p, v: axes().map((a) => valueOn(a, p)) as number[] }))
+    .filter((row: any) => row.v.every((value: number | null, k: number) => value !== null && (!logAxis(axes()[k]) || value > 0))));
   const best = createMemo(() => new Set(paretoN(items(), axes().map((_, k) => (row: any) => row.v[k]), axes().map(higherIsBetter)).map((row: any) => key(row.p))));
   const hover = (row: any) => {
     const o = row.p.observation;
     const rows: Array<[string, string]> = axes().map((a, k) => [title(a), fmtAxis(a, row.v[k])]);
     if (!axes().includes("res:cost") && Number.isFinite(o.resources?.cost)) rows.push(["Cost / task", price(o.resources.cost)]);
-    const per = tasksPerEntitlement(weekly(), o.resources?.cost);
-    if (per) rows.push(["Tasks / week", integer(per)]);
-    return hoverHTML(label(row.p), rows, [row.p.entity.family, best().has(key(row.p)) ? "best trade-off" : null, me()?.mine.has(row.p.entity.id) ? "yours" : null].filter(Boolean).join(" · "));
+    const plan = planFor(row.p.entity);
+    const per = plan ? tasksPerEntitlement(plan.value, o.resources?.cost) : null;
+    if (per && !axes().includes("sub:tasks")) rows.push([`Tasks / week · ${plan!.name}`, integer(per)]);
+    return hoverHTML(label(row.p), rows, [row.p.entity.family, best().has(key(row.p)) ? "best trade-off" : null,
+      me()?.mine.has(row.p.entity.id) ? "you use it" : null, plan ? `on ${plan.name}` : plans().size ? "not on your plans" : null].filter(Boolean).join(" · "));
   };
 
   // ---- surface: two "less is better" resources and one score
   const surfaceAxes = createMemo(() => {
     if (!is3d()) return null;
-    const lower = axes().map((a, k) => ({ a, k })).filter(({ a }) => !higherIsBetter(a) && axisIsLog(a));
+    const lower = axes().map((a, k) => ({ a, k })).filter(({ a }) => !higherIsBetter(a) && axisIsLog(a) && !isPlanAxis(a));
     const upper = axes().map((a, k) => ({ a, k })).filter(({ a }) => higherIsBetter(a));
     return lower.length === 2 && upper.length === 1 ? { a: lower[0], b: lower[1], s: upper[0] } : null;
   });
@@ -176,6 +218,7 @@ function Models() {
     const order = s ? [s.a.k, s.b.k, s.s.k] : [0, 1, 2];
     const c = caps(), pr = probe();
     return option3d({
+      size,
       rows: r.map((row) => ({ ...row, v: order.map((k) => row.v[k]) })), axes: order.map((k) => axisMeta(axes()[k])) as any,
       labels: labels(), selected: selected(), view: camera(), surface: grid(),
       probe: s && c ? { a: c.a, b: c.b, z: pr ? pr.v[s.s.k] : null, a0: span(s.a.k)[0], b0: span(s.b.k)[0] } : null,
@@ -201,7 +244,6 @@ function Models() {
       .map(([name, count]) => ({ name, count, colour: name === "Other" ? "var(--series-other)" : familyColor(name) }));
   });
   const toggle = (name: string) => { const next = new Set<string>(hidden()); next.has(name) ? next.delete(name) : next.add(name); setHidden(next); };
-  const solo = (name: string) => setHidden(new Set<string>(families().map((f) => f.name).filter((n) => n !== name)));
   const pin = (id: string) => { const next = new Set<string>(pinned()); next.has(id) ? next.delete(id) : next.add(id); setPinned(next); };
   const onClick = (event: any) => {
     const id = event?.data?.id ?? event?.data?.name ?? event?.name;
@@ -210,41 +252,59 @@ function Models() {
     pin(id.split("|")[0]);
   };
   const compare = createMemo(() => items().filter((r: any) => pinned().has(r.p.entity.id)));
-  const axisSelect = (labelText: string, value: () => string, set: (v: string) => void, optional = false) =>
-    <Select aria-label={labelText} search="Find an axis" bare={false} value={value()} onChange={(e) => { set(e.currentTarget.value); setSelected(null); }}>
-      <Show when={optional}><option value={NONE}>{labelText}: none</option></Show>
-      <For each={axisOptions()}>{(o) => <option value={o.value}>{labelText}: {o.label}</option>}</For>
-    </Select>;
+  const choose = (set: (v: string) => void) => (v: string) => { set(v); setSelected(null); };
+  const swap = () => { const x = xAxis(); setX(yAxis()); setY(x); };
+  const fmtList = (row: any) => axes().map((a, k) => axisKind(a) === "resource" || isPlanAxis(a) ? fmtAxis(a, row.v[k])
+    : fmtScore(row.v[k], (a === "score" ? meta() : meta(a.slice(5)))?.format, true)).join(" · ");
 
-  return <Site page="models" title="Models" wide>
-    <div class="sb-viewbar">
-      <Select aria-label="Benchmark" search="Find a benchmark" bare={false} value={lens()} onChange={(e) => { setLens(e.currentTarget.value); setSelected(null); }}>
-        <For each={metrics()}>{(m: any) => <option value={m.id}>{m.label} · {m.count}</option>}</For>
-      </Select>
-      {axisSelect("X", xAxis, setX)}
-      {axisSelect("Y", yAxis, setY)}
-      {axisSelect("Z", zAxis, setZ, true)}
-      <Segmented label="Entities" size="sm" value={mode()} onChange={(v) => { setMode(v); setHidden(new Set<string>()); setPinned(new Set<string>()); }}
-        options={[{ value: "model", label: "Models" }, { value: "agent", label: "Agents" }]} />
-      <span class="grow" />
-      <button type="button" class="sb-chip" aria-pressed={log()} onClick={() => setLog(!log())}>Log</button>
+  return <Site page="models" title="Models" wide fill>
+    <div class="sb-toolbar">
+      <Picker lead value={lens()} groups={lensGroups()} onChoose={choose(setLens)} placeholder="Find a benchmark or index" title="Benchmark" width="xl" />
+      <span class="sb-pick-group">
+        <Picker label="X" value={xAxis()} groups={axisGroups()} onChoose={choose(setX)} placeholder="Find an axis" />
+        <button type="button" class="sb-icon-button" aria-label="Swap X and Y" title="Swap X and Y" onClick={swap}><ArrowLeftRightIcon /></button>
+        <Picker label="Y" value={yAxis()} groups={axisGroups()} onChoose={choose(setY)} placeholder="Find an axis" />
+      </span>
+      <span class="sb-pick-group">
+        <Picker label="Z" value={zAxis()} groups={axisGroups()} onChoose={choose(setZ)} placeholder="Find an axis" empty="Add a third axis" />
+        <Show when={zAxis()}><button type="button" class="sb-icon-button" aria-label="Remove Z" title="Remove Z" onClick={() => setZ(NONE)}><XIcon /></button></Show>
+      </span>
       <Show when={is3d()}>
-        <Segmented label="3D" size="sm" value={orbit() ? "orbit" : "flat"} onChange={(v) => setOrbit(v === "orbit")}
+        <Segmented label="Third axis" size="sm" value={orbit() ? "orbit" : "flat"} onChange={(v) => setOrbit(v === "orbit")}
           options={[{ value: "orbit", label: "3D" }, { value: "flat", label: "Colour" }]} />
       </Show>
-      <Show when={!is3d() && mode() === "model"}><button type="button" class="sb-chip" aria-pressed={tiers()} onClick={() => setTiers(!tiers())}>Tiers</button></Show>
-      <Show when={surfaceAxes() && orbit()}><button type="button" class="sb-chip" aria-pressed={surface()} onClick={() => setSurface(!surface())}>Surface</button></Show>
-      <button type="button" class="sb-chip" aria-pressed={labels()} onClick={() => setLabels(!labels())}>Labels</button>
-      <button type="button" class="sb-chip" aria-pressed={bestOnly()} onClick={() => setBestOnly(!bestOnly())}>Best only</button>
-      <button type="button" class="sb-chip" aria-pressed={rail()} onClick={() => setRail(!rail())}>Panel</button>
-      <div style={{ width: "11rem" }}><Input type="search" placeholder="Find" aria-label="Find a model" value={search()} onInput={(e) => setSearch(e.currentTarget.value)} /></div>
+      <span class="grow" />
+      <Segmented label="Entities" size="sm" value={mode()} onChange={(v) => { setMode(v); setHidden(new Set<string>()); setPinned(new Set<string>()); }}
+        options={[{ value: "model", label: "Models" }, { value: "agent", label: "Agents" }]} />
+      <Show when={plans().size}>
+        <button type="button" class="sb-chip" aria-pressed={onPlans()} onClick={() => setOnPlans(!onPlans())} title="Only models your measured plans cover">On my plans</button>
+      </Show>
+      <div class="sb-find"><Input type="search" placeholder="Find" aria-label="Find a model" value={search()} onInput={(e) => setSearch(e.currentTarget.value)} /></div>
+      <ToggleMenu label="Families" count={hidden().size ? `${families().length - hidden().size}/${families().length}` : undefined}
+        rows={families().map((f) => ({ label: f.name, on: !hidden().has(f.name), toggle: () => toggle(f.name), meta: String(f.count), swatch: f.colour }))}
+        actions={<div style={{ display: "flex", gap: "var(--space-xs)", padding: "var(--space-xs)" }}>
+          <button type="button" class="sb-chip" onClick={() => setHidden(new Set<string>())}>All</button>
+          <button type="button" class="sb-chip" onClick={() => setHidden(new Set<string>(families().map((f) => f.name)))}>None</button>
+        </div>} />
+      <ToggleMenu label="Display" icon={<SlidersHorizontalIcon />} rows={[
+        { label: "Names", on: labels(), toggle: () => setLabels(!labels()) },
+        { label: "Log scale", on: log(), toggle: () => setLog(!log()) },
+        ...(mode() === "model" && !is3d() ? [{ label: "Reasoning tiers joined", on: tiers(), toggle: () => setTiers(!tiers()) }] : []),
+        { label: "Best trade-offs only", on: bestOnly(), toggle: () => setBestOnly(!bestOnly()) },
+        ...(surfaceAxes() && orbit() ? [{ label: "Best-within-budget surface", on: surface(), toggle: () => setSurface(!surface()) }] : []),
+        { label: "Side panel", on: rail(), toggle: () => setRail(!rail()) },
+      ]} />
     </div>
 
     <div class="sb-canvas" data-rail={rail() ? "on" : "off"}>
       <section class="sb-canvas-main" aria-label="Chart">
         <div class="sb-canvas-head">
           <h2>{`${title(yAxis())} vs ${title(xAxis())}`}{is3d() ? (orbit() ? ` vs ${title(zAxis())}` : ` · colour: ${title(zAxis())}`) : ""}</h2>
-          <span>{items().length} shown · {is3d() && orbit() ? "drag to orbit, scroll to zoom" : "scroll to zoom, drag to pan"}</span>
+          <div class="sb-chart-legend">
+            <span><i data-best="" />best trade-off</span>
+            <Show when={me()?.mine.size}><span><i data-ring="" />you use it</span></Show>
+            <span>{items().length} shown · {is3d() && orbit() ? "drag to orbit" : "scroll to zoom"}</span>
+          </div>
         </div>
         <div class="sb-canvas-chart">
           <Show when={index()} fallback={<Skeleton />}>
@@ -253,25 +313,31 @@ function Models() {
             </Show>
           </Show>
         </div>
-        <div class="sb-canvas-foot">
-          <FamilyChips families={families()} hidden={hidden()} onToggle={toggle} onSolo={solo} />
-          <Legend items={[{ label: "Best trade-off", colour: "var(--foreground)" }, { label: "Yours", colour: "var(--foreground)", kind: "ring" }]} />
-        </div>
       </section>
 
       <Show when={rail()}>
         <aside class="sb-rail">
+          <Show when={plans().size}>
+            <Inset title="Your plans" tight>
+              <For each={[...plans().entries()]}>{([provider, plan]) =>
+                <div class="sb-plan-row">
+                  <Swatch colour={familyColor(provider === "claude" ? "Anthropic" : "OpenAI")} />
+                  <span>{plan.name}</span><b>${Math.round(plan.value).toLocaleString()}/wk</b>
+                  <small>covers {provider === "claude" ? "Anthropic" : "OpenAI"} models · {plan.kind === "settled" ? "measured" : "in progress"}</small>
+                </div>}</For>
+            </Inset>
+          </Show>
           <Show when={is3d() && orbit()}>
             <Inset title="Camera" tight>
               <Segmented label="Camera" size="sm" value={camera()} onChange={setCamera}
                 options={[{ value: "iso", label: "3D" }, { value: "front", label: "Front" }, { value: "side", label: "Side" }, { value: "top", label: "Top" }]} />
             </Inset>
           </Show>
-          <Show when={surfaceAxes()}>{(s) =>
+          <Show when={surfaceAxes()}>{(sa) =>
             <Inset title="Budget" tight>
-              <label class="sb-range"><span class="sb-range-head">{title(s().a.a)} ≤ <b>{fmtAxis(s().a.a, caps()!.a)}</b></span>
+              <label class="sb-range"><span class="sb-range-head">{title(sa().a.a)} ≤ <b>{fmtAxis(sa().a.a, caps()!.a)}</b></span>
                 <input type="range" min="0" max="1000" value={posA()} onInput={(e) => setPosA(Number(e.currentTarget.value))} /></label>
-              <label class="sb-range"><span class="sb-range-head">{title(s().b.a)} ≤ <b>{fmtAxis(s().b.a, caps()!.b)}</b></span>
+              <label class="sb-range"><span class="sb-range-head">{title(sa().b.a)} ≤ <b>{fmtAxis(sa().b.a, caps()!.b)}</b></span>
                 <input type="range" min="0" max="1000" value={posB()} onInput={(e) => setPosB(Number(e.currentTarget.value))} /></label>
               <div style={{ "margin-top": "var(--space-md)" }}>
                 <Show when={probe()} fallback={<DashEmpty>None</DashEmpty>}>{(row) =>
@@ -281,20 +347,24 @@ function Models() {
                     </dl></div>}</Show>
               </div>
             </Inset>}</Show>
-          <Show when={solver() !== null || (!is3d() && axes().some((a) => !higherIsBetter(a)))}>
-            <Inset title="Cheapest at target" tight>
+          <Show when={solver()}>{(s) => {
+            const plan = () => planFor(s().row.p.entity);
+            const per = () => plan() ? tasksPerEntitlement(plan()!.value, s().row.p.observation.resources?.cost) : null;
+            return <Inset title="Cheapest at target" tight>
               <Slider label="Target" value={target()} onChange={setTarget}
                 options={[50, 60, 70, 75, 80, 85, 90, 95, 100].map((v) => ({ value: String(v), label: `${v}%` }))} />
-              <div style={{ "margin-top": "var(--space-md)" }}>
-                <Show when={solver()} fallback={<DashEmpty>None</DashEmpty>}>{(s) => {
-                  const per = tasksPerEntitlement(weekly(), s().row.p.observation.resources?.cost);
-                  return <div class="sb-callout"><b>{label(s().row.p)}</b>
-                    <dl class="sb-kv" style={{ "margin-top": "var(--space-sm)" }}>
-                      <For each={axes()}>{(a, k) => <><dt>{title(a)}</dt><dd>{fmtAxis(a, s().row.v[k()])}</dd></>}</For>
-                      <Show when={per}><dt>Tasks / week</dt><dd>{integer(per)}</dd></Show>
-                    </dl></div>;
-                }}</Show>
-              </div>
+              <div class="sb-callout" style={{ "margin-top": "var(--space-md)" }}><b>{label(s().row.p)}</b>
+                <dl class="sb-kv" style={{ "margin-top": "var(--space-sm)" }}>
+                  <For each={axes()}>{(a, k) => <><dt>{title(a)}</dt><dd>{fmtAxis(a, s().row.v[k()])}</dd></>}</For>
+                  <Show when={per()}><dt>Tasks / week · {plan()!.name}</dt><dd>{integer(per())}</dd></Show>
+                </dl></div>
+            </Inset>;
+          }}</Show>
+          <Show when={compare().length}>
+            <Inset title="Pinned" tight aside={<button type="button" class="sb-chip" onClick={() => setPinned(new Set<string>())}>Clear</button>}>
+              <div class="sb-rows"><For each={compare()}>{(row: any) =>
+                <DashRow element="button" onClick={() => pin(row.p.entity.id)} lead={<Swatch colour={familyColor(row.p.entity.family)} />}
+                  primary={label(row.p)} trailing={fmtList(row)} />}</For></div>
             </Inset>
           </Show>
           <Inset title="Best trade-offs" tight aside={<span class="sb-tag" data-tone="quiet">{bestList().length}</span>}>
@@ -304,32 +374,12 @@ function Models() {
                   onClick={() => { if (is3d()) setSelected(selected() === key(row.p) ? null : key(row.p)); pin(row.p.entity.id); }}
                   lead={<Swatch colour={familyColor(row.p.entity.family)} />}
                   primary={<><span class="sb-rank">{String(i() + 1).padStart(2, "0")}</span>{label(row.p)}</>}
-                  trailing={axes().map((a, k) => axisKind(a) === "resource" ? fmtAxis(a, row.v[k]) : fmtScore(row.v[k], (a === "score" ? meta() : meta(a.slice(5)))?.format, true)).join(" · ")} />}</For>
+                  trailing={fmtList(row)} />}</For>
             </div>
           </Inset>
         </aside>
       </Show>
     </div>
-
-    <Show when={compare().length}>
-      <Section title="Pinned" tools={<button type="button" class="sb-chip" onClick={() => setPinned(new Set<string>())}>Clear</button>}>
-        <Inset flush>
-          <div class="sb-table-wrap"><table class="sb-table">
-            <thead><tr><th>Model</th><th>Family</th><For each={axes()}>{(a) => <th class="num">{title(a)}</th>}</For><th class="num">Cost / task</th><th class="num">Tasks / week</th></tr></thead>
-            <tbody><For each={compare()}>{(row: any) => {
-              const per = tasksPerEntitlement(weekly(), row.p.observation.resources?.cost);
-              return <tr>
-                <td><span style={{ display: "inline-flex", gap: "var(--space-sm)", "align-items": "center" }}><Swatch colour={familyColor(row.p.entity.family)} />{label(row.p)}</span></td>
-                <td class="data">{row.p.entity.family}</td>
-                <For each={axes()}>{(a, k) => <td class="num">{fmtAxis(a, row.v[k()])}</td>}</For>
-                <td class="num">{price(row.p.observation.resources?.cost)}</td>
-                <td class="num">{per ? integer(per) : "—"}</td>
-              </tr>;
-            }}</For></tbody>
-          </table></div>
-        </Inset>
-      </Section>
-    </Show>
   </Site>;
 }
 

@@ -231,3 +231,52 @@ a.sb-inset { display: block; color: inherit; text-decoration: none; transition: 
 }
 .sb-canvas-chart.fixed { height: calc(28 * var(--u-space)); }
 .sb-legend i[data-dash] { width: calc(1.75 * var(--u-space)); }
+
+/* ---------------------------------------------------------------- fill: a page that is exactly the window (Models) */
+
+.sb-content.fill { display: flex; height: 100%; max-width: none; flex-direction: column; padding: var(--space-md) var(--space-lg) var(--space-md); }
+.sb-content.fill > .sb-foot { display: none; }
+.sb-content.fill > .sb-canvas { min-height: 0; flex: 1; }
+.sb-content.fill .sb-canvas-main { height: 100%; min-height: 0; }
+.sb-content.fill .sb-canvas-chart { height: auto; min-height: 0; flex: 1; }
+.sb-content.fill .sb-rail { height: 100%; max-height: none; position: static; }
+.sb-scroll:has(> .sb-content.fill) { overflow: hidden; }
+@media (max-width: 1100px) {
+  .sb-scroll:has(> .sb-content.fill) { overflow-y: auto; }
+  .sb-content.fill { height: auto; }
+  .sb-content.fill .sb-canvas-chart { height: 70dvh; flex: none; }
+  .sb-content.fill .sb-rail { height: auto; }
+}
+
+/* ---------------------------------------------------------------- pickers */
+
+.sb-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-md); }
+.sb-toolbar > .grow { flex: 1; }
+.sb-toolbar .sb-find { width: calc(7.5 * var(--u-space)); }
+.sb-toolbar { flex-wrap: wrap; row-gap: var(--space-xs); }
+@media (max-width: 1500px) { .sb-pick { max-width: calc(14 * var(--u-space)); } .sb-pick[data-lead] { max-width: calc(16 * var(--u-space)); } }
+.sb-pick {
+  display: inline-flex; max-width: calc(20 * var(--u-space)); height: var(--control-sm); align-items: center; gap: var(--space-sm); padding: 0 var(--space-md);
+  border: var(--hairline) solid var(--tint); border-radius: var(--radius-control); background: var(--well); color: var(--foreground);
+  font-size: var(--text-row); white-space: nowrap; cursor: pointer;
+}
+@media (hover: hover) { .sb-pick:hover { border-color: color-mix(in oklch, var(--foreground), transparent 75%); } }
+.sb-pick > b { color: var(--muted-foreground); font: var(--label-weight) var(--label-size)/1 var(--label-face); letter-spacing: var(--label-tracking); text-transform: var(--label-case); }
+.sb-pick > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sb-pick > svg { width: var(--icon-sm); height: var(--icon-sm); flex: none; color: var(--muted-foreground); }
+.sb-pick[data-lead] { height: var(--control); padding: 0 var(--space-md) 0 var(--space-lg); font-size: var(--text-body); font-weight: var(--weight-strong); }
+.sb-pick[data-empty] { border-style: dashed; background: transparent; color: var(--muted-foreground); }
+.sb-pick-group { display: inline-flex; align-items: center; gap: var(--space-2xs); }
+.sb-icon-button { display: grid; width: var(--control-sm); height: var(--control-sm); place-items: center; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted-foreground); cursor: pointer; }
+@media (hover: hover) { .sb-icon-button:hover { background: var(--border); color: var(--foreground); } }
+.sb-icon-button svg { width: var(--icon-sm); height: var(--icon-sm); }
+.sb-pick-list { max-height: min(60vh, calc(28 * var(--u-space))); overflow-y: auto; }
+
+.sb-chart-legend { display: flex; flex-wrap: wrap; gap: var(--space-xs) var(--space-md); color: var(--muted-foreground); font-size: var(--text-caption); }
+.sb-chart-legend span { display: inline-flex; align-items: center; gap: var(--space-xs); }
+.sb-chart-legend i { display: inline-block; width: var(--icon-dot); height: var(--icon-dot); border-radius: 50%; }
+.sb-chart-legend i[data-ring] { box-shadow: inset 0 0 0 var(--stroke) var(--foreground); }
+.sb-chart-legend i[data-best] { background: var(--muted-foreground); box-shadow: 0 0 0 var(--stroke-thin) var(--foreground); }
+.sb-plan-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-sm); padding: var(--space-xs) 0; font-size: var(--text-row); }
+.sb-plan-row b { font-family: var(--font-data); font-weight: var(--weight-lift); }
+.sb-plan-row small { grid-column: 2 / -1; color: var(--muted-foreground); font-size: var(--text-caption); }

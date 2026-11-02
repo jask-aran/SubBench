@@ -45,7 +45,8 @@ export function option2d(o: {
 }) {
   const p = palette();
   const [ax, ay] = o.axes;
-  const gutter = o.labels && o.size.width > 700 ? 200 : 24;
+  // Names sit beside their points inside the plot; overlaps are nudged apart, and what still collides is hidden.
+  const gutter = 24;
   const axis = (a: Axis, name: string) => ({
     type: a.log ? "log" : "value", name, nameLocation: "middle", nameGap: name === "x" ? 32 : 46, scale: !a.log,
     nameTextStyle: { color: p.muted, fontFamily: p.sans, fontSize: 12 },
@@ -75,7 +76,7 @@ export function option2d(o: {
       data: [...best.map((r) => [r.v[0], r.v[1]]), [Math.max(...o.rows.map((r) => r.v[0])), best.at(-1)!.v[1]]],
       lineStyle: { color: alpha(p.ink, 0.85), width: 1.8 } });
   }
-  const side = o.labels && gutter > 24;
+  const side = false;
   const point = (r: Row) => {
     const named = o.labels && r.named && !r.dim;
     return {
@@ -86,14 +87,14 @@ export function option2d(o: {
         borderColor: r.best && !r.dim ? p.ink : p.card, borderWidth: r.best && !r.dim ? 1.6 : 1,
       },
       // Named points carry their label in a gutter at the right, joined by a faint leader line.
-      label: { show: named, formatter: r.short + (r.mine ? "  · yours" : ""), color: o.colourAxis ? p.ink : token(r.colour) },
+      label: { show: named, formatter: tidy(r.short), color: o.colourAxis ? p.ink : token(r.colour) },
       labelLine: { show: named && side },
     };
   };
   const labelled = {
     label: { position: "right", fontFamily: p.sans, fontSize: 12, distance: 8 },
     labelLine: { lineStyle: { color: alpha(p.muted, 0.35), width: 1 }, length2: 4 },
-    labelLayout: side ? () => ({ x: o.size.width - gutter + 14, moveOverlap: "shiftY", align: "left" }) : { hideOverlap: true },
+    labelLayout: { moveOverlap: "shiftY", hideOverlap: true },
   };
   series.push({ type: "scatter", z: 3, data: o.rows.filter((r) => !r.best).map(point), emphasis: { scale: 1.5 }, ...labelled });
   series.push({ type: "scatter", z: 4, data: o.rows.filter((r) => r.best).map(point), emphasis: { scale: 1.5 }, ...labelled });
@@ -133,6 +134,7 @@ const tidy = (name: string) => name.replace(/\(([a-z]+)[^)]*\)/i, "($1)");
 const lg = (a: Axis) => (v: number) => (a.log ? Math.log10(v) : v);
 
 export function option3d(o: {
+  size?: Size;
   rows: Row[]; axes: [Axis, Axis, Axis]; labels: boolean; selected: string | null; view: string;
   surface?: { a: number[]; b: number[]; z: Array<Array<number | null>> } | null;
   probe?: { a: number; b: number; z: number | null; a0: number; b0: number } | null;
@@ -202,6 +204,8 @@ export function option3d(o: {
       emphasis: { itemStyle: { color: p.ink } } });
   }
   const view = VIEWS3D[o.view] ?? VIEWS3D.iso;
+  // Pull the camera back in a short or narrow chart, so the whole box stays in frame at any window size.
+  const fit = o.size ? Math.max(1, 640 / Math.min(o.size.height, o.size.width * 0.62)) : 1;
   return {
     backgroundColor: "transparent", textStyle: { fontFamily: p.sans }, tooltip: tooltip(p),
     xAxis3D: axis(ax), yAxis3D: axis(ay), zAxis3D: axis(az),
@@ -209,7 +213,7 @@ export function option3d(o: {
       boxWidth: 125, boxDepth: 125, boxHeight: 85, top: -20,
       environment: "none", light: { main: { intensity: 1.1 }, ambient: { intensity: 0.4 } },
       axisPointer: { show: true, lineStyle: { color: alpha(p.ink, 0.5) } },
-      viewControl: { projection: "perspective", alpha: view.alpha, beta: view.beta, distance: 215, minDistance: 110, maxDistance: 420,
+      viewControl: { projection: "perspective", alpha: view.alpha, beta: view.beta, distance: Math.round(205 * fit), minDistance: 110, maxDistance: 520,
         damping: 0.85, rotateSensitivity: 1.2, zoomSensitivity: 1.2, panSensitivity: 1, animationDurationUpdate: 500 },
       axisLine: { lineStyle: { color: alpha(p.ink, 0.25) } },
     },
