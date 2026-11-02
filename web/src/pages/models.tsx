@@ -53,7 +53,8 @@ function Models() {
   // Chart: any axes. Plans: how much of the chosen benchmark's work each measured plan gets done per week.
   const [view, setView] = createSignal<"chart" | "plans">(params.get("view") === "plans" ? "plans" : "chart");
   // Plans per week (what a limit gets done) or per dollar (what the money gets done, comparable across plan sizes).
-  const [perDollar, setPerDollar] = createSignal(params.get("basis") === "dollar");
+  const [basis, setBasis] = createSignal<"week" | "dollar" | "price">(params.get("basis") === "dollar" ? "dollar" : params.get("basis") === "price" ? "price" : "week");
+  const perDollar = () => basis() === "dollar";
   const provider = (key: string) => (key === "claude" ? "Anthropic" : key === "codex" ? "OpenAI" : key);
 
   const [mode, setMode] = createSignal<Mode>(params.get("mode") === "agent" ? "agent" : "model");
@@ -120,7 +121,7 @@ function Models() {
     if (zAxis() && !valid.has(zAxis())) setZ(NONE);
   });
   createEffect(() => {
-    const q = new URLSearchParams({ ...(mode() === "agent" ? { mode: "agent" } : {}), ...(view() === "plans" ? { view: "plans", ...(perDollar() ? { basis: "dollar" } : {}) } : {}), lens: lens(), x: xAxis(), y: yAxis(), ...(zAxis() ? { z: zAxis() } : {}), ...(zAxis() && !orbit() ? { orbit: "0" } : {}) });
+    const q = new URLSearchParams({ ...(mode() === "agent" ? { mode: "agent" } : {}), ...(view() === "plans" ? { view: "plans", ...(basis() !== "week" ? { basis: basis() } : {}) } : {}), lens: lens(), x: xAxis(), y: yAxis(), ...(zAxis() ? { z: zAxis() } : {}), ...(zAxis() && !orbit() ? { orbit: "0" } : {}) });
     history.replaceState(null, "", `${location.pathname}?${q}`);
   });
 
@@ -234,7 +235,47 @@ function Models() {
       return { name: plan.name, colour: familyColor(provider(plan.provider)), dash: n > 0, points: points.filter((q: any) => q.tasks > 0) };
     }).filter((s) => s.points.length);
   });
+  // Plans in 3D: tasks per week, the plan's weekly price, the score. Each plan's curve sits at its price, and the
+  // surface is the best score reachable at a given workload for at most a given weekly spend.
+  const weekPrice = (plan: Plan) => plan.monthly ? plan.monthly * 12 / 52 : null;
+  const plans3d = () => {
+    const priced = planSeries().map((s, i) => ({ s, plan: plans().find((p) => p.name === s.name)! })).filter((x) => x.plan && weekPrice(x.plan));
+    if (!priced.length) return null;
+    const rows: Row[] = [];
+    const rowsScore = new Map<string, number>();
+    const lines: Array<{ colour: string; dash: boolean; points: number[][] }> = [];
+    // One name per price level (the top score there): plans at the same price would otherwise stack their labels.
+    const topAt = new Map<number, string>();
+    for (const { s, plan } of priced) for (const q of s.points) {
+      const w = weekPrice(plan)!, cur = topAt.get(w);
+      const curScore = cur ? rowsScore.get(cur) ?? -Infinity : -Infinity;
+      if (q.best && q.score > curScore) { topAt.set(w, `${q.key}|${plan.name}`); rowsScore.set(`${q.key}|${plan.name}`, q.score); }
+    }
+    const named = new Set(topAt.values());
+    for (const { s, plan } of priced) {
+      const w = weekPrice(plan)!;
+      const best = s.points.filter((q) => q.best).sort((a, b) => a.tasks - b.tasks);
+      for (const q of s.points) rows.push({ key: `${q.key}|${plan.name}`, label: q.label, short: q.short, colour: s.colour, group: plan.name,
+        hover: q.hover, v: [q.tasks, w, q.score], best: q.best, mine: false, pinned: false, dim: false, named: named.has(`${q.key}|${plan.name}`) });
+      if (best.length > 1) lines.push({ colour: s.colour, dash: s.dash, points: best.map((q) => [q.tasks, w, q.score]) });
+    }
+    const tasks = rows.map((r) => r.v[0]);
+    const lo = Math.log10(Math.min(...tasks)), hi = Math.log10(Math.max(...tasks));
+    const a = Array.from({ length: 36 }, (_, i) => 10 ** (lo + (hi - lo) * i / 35));
+    const b = [...new Set(rows.map((r) => r.v[1]))].sort((x, y) => x - y);
+    const z = b.map((price) => a.map((t) => {
+      let m: number | null = null;
+      for (const r of rows) if (r.v[1] <= price && r.v[0] >= t && (m === null || r.v[2] > m)) m = r.v[2];
+      return m;
+    }));
+    return { rows, lines, surface: b.length > 1 ? { a, b, z } : null };
+  };
   const chartOption = (size: { width: number; height: number }) => {
+    if (view() === "plans" && basis() === "price") {
+      const d = plans3d();
+      if (d) return option3d({ size, rows: d.rows, lines: d.lines, surface: d.surface, labels: labels(), selected: selected(), view: camera(),
+        axes: [{ title: "Tasks / week", log: true, unit: "integer", higherBetter: true }, { title: "Plan price / week", log: false, unit: "currency", higherBetter: false }, axisMeta("score")] });
+    }
     if (view() === "plans") return optionPlans({ plans: planSeries(), score: axisMeta("score"), labels: labels(), size, perDollar: perDollar() });
     const r = rows();
     if (flat()) {
@@ -297,8 +338,8 @@ function Models() {
           options={[{ value: "chart", label: "Chart" }, { value: "plans", label: "Plans" }]} />
       </Show>
       <Show when={view() === "plans"}>
-        <Segmented label="Basis" size="sm" value={perDollar() ? "dollar" : "week"} onChange={(v) => setPerDollar(v === "dollar")}
-          options={[{ value: "week", label: "Per week" }, { value: "dollar", label: "Per $" }]} />
+        <Segmented label="Basis" size="sm" value={basis()} onChange={(v) => setBasis(v as any)}
+          options={[{ value: "week", label: "Per week" }, { value: "dollar", label: "Per $" }, { value: "price", label: "× Price 3D" }]} />
       </Show>
       <Show when={view() === "chart"}>
       <span class="sb-pick-group">
@@ -341,14 +382,14 @@ function Models() {
     <div class="sb-canvas" data-rail={rail() ? "on" : "off"}>
       <section class="sb-canvas-main" aria-label="Chart">
         <div class="sb-canvas-head">
-          <h2>{view() === "plans" ? `${meta()?.label ?? ""} vs tasks per ${perDollar() ? "dollar" : "week"}, by plan`
+          <h2>{view() === "plans" ? (basis() === "price" ? `${meta()?.label ?? ""} vs tasks per week vs plan price` : `${meta()?.label ?? ""} vs tasks per ${perDollar() ? "dollar" : "week"}, by plan`)
             : `${title(yAxis())} vs ${title(xAxis())}${is3d() ? (orbit() ? ` vs ${title(zAxis())}` : ` · colour: ${title(zAxis())}`) : ""}`}</h2>
           <div class="sb-chart-legend">
             <Show when={view() === "plans"} fallback={<>
             <span><i data-best="" />best trade-off</span>
             <Show when={me()?.mine.size}><span><i data-ring="" />in measured usage</span></Show>
             <span>{items().length} shown · {is3d() && orbit() ? "drag to orbit" : "scroll to zoom"}</span></>}>
-              <span>{perDollar() ? "tasks / $ = tasks per week ÷ the week's share of the plan's price" : "tasks / week = plan value ÷ cost per task"} · each line a plan's best trade-offs</span>
+              <span>{basis() === "price" ? "each plan's curve at its price · surface: best score for the workload at or under that price · drag to orbit" : perDollar() ? "tasks / $ = tasks per week ÷ the week's share of the plan's price" : "tasks / week = plan value ÷ cost per task"} · each line a plan's best trade-offs</span>
             </Show>
           </div>
         </div>
@@ -381,7 +422,7 @@ function Models() {
                     lead={<Swatch colour={series.colour} />} />}</For></div>
               </Inset>}</For>
           </Show>
-          <Show when={is3d() && orbit() && view() === "chart"}>
+          <Show when={(is3d() && orbit() && view() === "chart") || (view() === "plans" && basis() === "price")}>
             <Inset title="Camera" tight>
               <Segmented label="Camera" size="sm" value={camera()} onChange={setCamera}
                 options={[{ value: "iso", label: "3D" }, { value: "front", label: "Front" }, { value: "side", label: "Side" }, { value: "top", label: "Top" }]} />

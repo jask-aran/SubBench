@@ -138,6 +138,7 @@ export function option3d(o: {
   rows: Row[]; axes: [Axis, Axis, Axis]; labels: boolean; selected: string | null; view: string;
   surface?: { a: number[]; b: number[]; z: Array<Array<number | null>> } | null;
   probe?: { a: number; b: number; z: number | null; a0: number; b0: number } | null;
+  lines?: Array<{ colour: string; dash: boolean; points: number[][] }>;
 }) {
   const p = palette();
   const [ax, ay, az] = o.axes;
@@ -163,6 +164,8 @@ export function option3d(o: {
     series.push({ type: "surface", silent: true, data, shading: "color", wireframe: { show: true, lineStyle: { color: alpha(p.ink, 0.12), width: 1 } },
       itemStyle: { opacity: 0.45 }, dataShape: [o.surface.b.length, o.surface.a.length] });
   }
+  for (const l of o.lines ?? []) series.push({ type: "line3D", silent: true, data: l.points.map((q) => [fx(q[0]), fy(q[1]), fz(q[2])]),
+    lineStyle: { color: token(l.colour), width: 3, opacity: l.dash ? 0.7 : 1 } });
   series.push({ type: "scatter3D", data: o.rows.filter((r) => !r.best).map(item), symbolSize: 7,
     emphasis: { itemStyle: { color: p.ink }, label: { show: false } } });
   const ringed = o.rows.filter((r) => (r.mine || r.pinned) && !r.dim);
@@ -194,7 +197,7 @@ export function option3d(o: {
   const toName = o.rows.filter((r) => r.named && !r.dim).sort((a, b) => Number(b.mine) - Number(a.mine) || b.v[2] - a.v[2]).filter((r) => {
     if (placed.length >= 8) return false;
     const q = pos(r);
-    if (placed.some((c) => Math.hypot(c[0] - q[0], c[1] - q[1], (c[2] - q[2]) * 2.5) < 0.12)) return false;
+    if (placed.some((c) => Math.hypot(c[0] - q[0], c[1] - q[1], (c[2] - q[2]) * 2.5) < 0.18)) return false;
     placed.push(q);
     return true;
   });
