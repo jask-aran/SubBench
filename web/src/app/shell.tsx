@@ -37,7 +37,7 @@ export function Site(props: { page: PageKey; title: string; place?: string; acti
       foot={<>
         <div class="sb-nav-status" data-state={status().state}>
           <span class="sb-dot" />
-          <span>{status().state === "live" ? `Subscription data · ${ago(health()?.last_report_at)}` : status().state === "demo" ? "Demo subscription data" : status().state === "stale" ? "Subscription data stale" : "Subscription data offline"}</span>
+          <span>{status().state === "live" ? `Updated ${ago(health()?.last_report_at)}` : status().state === "demo" ? "Demo data" : status().state === "stale" ? "Stale" : "Offline"}</span>
         </div>
       </>}>
       <NavGroup label="Pages">
@@ -71,12 +71,12 @@ function Foot() {
   const h = () => health();
   return <footer class="sb-foot" data-stale={status().state === "stale" || status().state === "down" ? "" : undefined}>
     <span>
-      <Show when={h()} fallback={"Subscription reports unavailable · values shown can be out of date"}>
-        {(status().state === "stale" ? "Data is stale · " : "") + (h()?.demo ? "Demo data, not a measurement · " : "")
-          + `computed ${ago(h()?.last_report_at)} · ingested ${ago(h()?.last_ingest_at)} · ${Number(h()?.entitlement_rows ?? 0).toLocaleString()} quota readings`}
+      <Show when={h()} fallback={"Subscription data offline"}>
+        {(status().state === "stale" ? "Stale · " : "") + (h()?.demo ? "Demo data · " : "")
+          + `Updated ${ago(h()?.last_report_at)} · ${Number(h()?.entitlement_rows ?? 0).toLocaleString()} readings`}
       </Show>
     </span>
-    <span>Benchmarks: Artificial Analysis, DeepSWE, FrontierCode via LLM-Pareto</span>
+    <span>Benchmarks: Artificial Analysis, DeepSWE, FrontierCode</span>
   </footer>;
 }
 

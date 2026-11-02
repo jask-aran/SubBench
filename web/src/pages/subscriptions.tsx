@@ -1,6 +1,6 @@
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Site, mount } from "../app/shell";
-import { Hero, Section, Inset, Figure, Legend, Skeleton } from "../app/bits";
+import { Section, Inset, Figure, Legend, Skeleton } from "../app/bits";
 import { Plot, basic } from "../app/plot";
 import { valueLines, hoverHTML } from "../app/charts";
 import { loadReports, productColors, poll, type Reports } from "../app/data";
@@ -51,11 +51,9 @@ function Subscriptions() {
   const divergences = () => reports()?.current?.divergences || [];
 
   return <Site page="subscriptions" title="Subscriptions">
-    <Hero small kicker="Subscriptions" title="Value of one full limit"
-      lede="The public API price of the usage one full limit window delivers. A figure appears once its window is complete and the estimator marks it confirmed; the smaller range beneath it is what it is settled to. Every completed window from the last 35 days is pooled, across every account on the plan." />
 
     <Show when={!reports.loading} fallback={<Skeleton height="10rem" />}>
-      <Show when={cards().length} fallback={<Inset><DashEmpty>{reports()?.error ? `Subscription reports are unavailable: ${reports()!.error}` : "Nothing is being measured yet."}</DashEmpty></Inset>}>
+      <Show when={cards().length} fallback={<Inset><DashEmpty>{reports()?.error ? `Subscription reports are unavailable: ${reports()!.error}` : "Nothing measured yet"}</DashEmpty></Inset>}>
         <div class="sb-grid two">
           <For each={cards()}>{(card: any) =>
             <Inset>
@@ -66,7 +64,7 @@ function Subscriptions() {
                     <Figure label={limit.window.label}
                       value={limit.state === "settled" ? money(limit.row.estimate_usd) : limit.state === "range" ? range(limit.row) : undefined}
                       meta={limit.state === "settled" ? <>{range(limit.row)} · {plural(limit.row.window_count, "window")} · {plural(limit.row.account_count, "account")}</>
-                        : limit.state === "range" ? "range only, not yet settled" : undefined} />
+                        : limit.state === "range" ? "unsettled" : undefined} />
                     <Show when={limit.live}>{(live: any) =>
                       <div class="sb-live"><b>in progress {money(live().estimate_usd)}</b> · {range(live())} · {Math.round(live().covered_quota_percent)}% measured</div>}</Show>
                   </div>}</For>
@@ -76,12 +74,12 @@ function Subscriptions() {
       </Show>
     </Show>
 
-    <Section title="Value over time" note="One line per product. Each point pools every completed, confirmed window that finished in that period, across every account holding the plan, so it measures the product rather than one subscriber.">
+    <Section title="Value over time">
       <div class="sb-grid two">
         <For each={[{ title: "Weekly limit", data: weekly }, { title: "5-hour limit", data: five }]}>{(panel) =>
-          <Inset title={panel.title} note={panel.data()?.note}>
+          <Inset title={panel.title}>
             <Show when={panel.data()} fallback={<Show when={!reports.loading} fallback={<Skeleton height="260px" />}>
-              <div class="sb-chart-empty">No completed high-confidence {panel.title.toLowerCase()} estimate yet.</div></Show>}>
+              <div class="sb-chart-empty">No confirmed windows yet</div></Show>}>
               <Plot plotly={basic} data={() => panel.data()!.chart.traces} layout={() => panel.data()!.chart.layout} label={`${panel.title} value over time`} />
               <Legend items={panel.data()!.names.map((name) => ({ label: name, colour: colours().get(name) }))} />
             </Show>
@@ -89,40 +87,40 @@ function Subscriptions() {
       </div>
     </Section>
 
-    <Section title="Model mix" note="Token share of each model in recent weekly windows. Quota per dollar moves with the mix, so a change in value usually starts here.">
-      <Show when={providers().length} fallback={<Inset><DashEmpty>No model mix reported yet.</DashEmpty></Inset>}>
+    <Section title="Model mix">
+      <Show when={providers().length} fallback={<Inset><DashEmpty>No model mix yet</DashEmpty></Inset>}>
         <div class="sb-grid two">
           <For each={providers()}>{(provider) => <MixPanel models={reports()?.models?.models || []} provider={provider} />}</For>
         </div>
       </Show>
     </Section>
 
-    <Section title="Consistency checks" note="Two independent measurements of one allowance must agree. A disagreement means an assumption is wrong, or the provider changed something.">
+    <Section title="Checks">
       <div class="sb-grid two">
         <Inset title="Divergences">
-          <Show when={divergences().length} fallback={<div class="sb-callout" data-tone="ok"><b>Every independent measurement agrees</b> within the 35% threshold.</div>}>
+          <Show when={divergences().length} fallback={<div class="sb-callout" data-tone="ok"><b>All agree</b> (within 35%)</div>}>
             <div class="sb-rows"><For each={divergences()}>{(row: any) =>
               <div class="sb-callout" data-tone="warn"><b>{row.provider} · {row.subject}</b> differs by {Number(row.difference_percent ?? row.difference ?? 0).toFixed(1)}%. {row.detail}</div>}</For></div>
           </Show>
         </Inset>
-        <Inset title="Window ratios" note="How many full 5-hour limits fit in one weekly limit">
-          <Show when={ratios().length} fallback={<DashEmpty>No ratio measured yet.</DashEmpty>}>
+        <Inset title="5-hour limits per week">
+          <Show when={ratios().length} fallback={<DashEmpty>None yet</DashEmpty>}>
             <div class="sb-rows"><For each={ratios()}>{(row: any) =>
               <DashRow primary={row.provider === "codex" ? "ChatGPT" : row.provider === "claude" ? "Claude" : row.provider}
                 context={row.account_id ? String(row.account_id).slice(0, 13) : "single source"}
-                trailing={`${Number(row.per_long_window ?? 1 / row.ratio).toFixed(2)} ${row.short_window.replace("_", "-")} limits per ${row.long_window}`} />}</For></div>
+                trailing={`${Number(row.per_long_window ?? 1 / row.ratio).toFixed(2)}`} />}</For></div>
           </Show>
         </Inset>
       </div>
     </Section>
 
-    <Section title="Completed estimates" note="The individual windows behind the figures above, each with the account it was measured on. Lower-confidence and open windows are not listed."
+    <Section title="Windows"
       tools={<Segmented label="Limit" size="sm" value={limitFilter()} onChange={(v) => { setLimitFilter(v); setShown(20); }}
         options={[{ value: "weekly", label: "Weekly" }, { value: "five_hour", label: "5-hour" }, { value: "all", label: "All" }]} />}>
       <Inset flush>
         <div class="sb-table-wrap">
           <table class="sb-table">
-            <Show when={estimates().length} fallback={<caption>No completed high-confidence estimate yet.</caption>}>
+            <Show when={estimates().length} fallback={<caption>No confirmed windows yet</caption>}>
               <thead><tr><th>Completed</th><th>Product</th><th>Limit</th><th class="num">API equivalent</th><th class="num">Coverage</th><th>Source account</th></tr></thead>
               <tbody><For each={estimates().slice(0, shown())}>{(row: any) =>
                 <tr>
@@ -142,13 +140,6 @@ function Subscriptions() {
       </Inset>
     </Section>
 
-    <Section title="How the number is made">
-      <div class="sb-grid three">
-        <Inset tight><div class="sb-prose"><p><b>1 · Value the usage.</b> Token counts from the local agent logs, priced at the public API rate for each model and token class, summed inside the reset window.</p></div></Inset>
-        <Inset tight><div class="sb-prose"><p><b>2 · Slope against the meter.</b> Every pair of quota readings where both quota and value advance implies a value for the whole window. Pairs under 2 points, stale, or spanning unseen usage are rejected.</p></div></Inset>
-        <Inset tight><div class="sb-prose"><p><b>3 · Weighted median.</b> The figure is the quota-weighted median of the valid slopes, so one 50-point pair counts as much as fifty 1-point pairs.</p></div></Inset>
-      </div>
-    </Section>
   </Site>;
 }
 
@@ -156,7 +147,7 @@ function MixPanel(props: { models: any[]; provider: string }) {
   const totals = createMemo(() => modelTotals(props.models, { provider: props.provider, windows: 6 }));
   const colourOf = createMemo(() => new Map(totals().map((row: any, i: number) => [row.model, MIX_COLOURS[i] ?? "var(--series-other)"])));
   const windows = createMemo(() => mixByWindow(props.models, { provider: props.provider, window: "weekly", limit: 8 }));
-  return <Inset title={props.provider === "codex" ? "ChatGPT · Codex" : props.provider === "claude" ? "Claude · Claude Code" : props.provider} note="Recent weekly windows, newest last">
+  return <Inset title={props.provider === "codex" ? "ChatGPT · Codex" : props.provider === "claude" ? "Claude · Claude Code" : props.provider}>
     <div class="sb-rows" style={{ gap: "var(--space-md)" }}>
       <For each={windows()}>{(w: any) =>
         <div style={{ display: "grid", "grid-template-columns": "5.5rem 1fr 4.5rem", "align-items": "center", gap: "var(--space-lg)" }}>

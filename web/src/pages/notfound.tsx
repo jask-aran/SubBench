@@ -1,8 +1,9 @@
 import { Site, mount } from "../app/shell";
-import { Hero, link } from "../app/bits";
+import { link } from "../app/bits";
 import { Button } from "../conduit/ui/controls";
+import { DashEmpty } from "../conduit/ui/dashboard";
 
 mount(() => <Site page="notfound" title="Not found">
-  <Hero kicker="404" title={<>Nothing on this <em>frontier.</em></>} lede="That page does not exist. The subscription dashboard and the model explorers are in the sidebar."
-    actions={<Button onClick={link("/")}>Back to overview</Button>} />
+  <DashEmpty>Page not found.</DashEmpty>
+  <div class="sb-actions"><Button onClick={link("/")}>Overview</Button></div>
 </Site>);

@@ -1,6 +1,6 @@
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Site, mount } from "../app/shell";
-import { Hero, Section, Inset, Figure, Legend, Bars, Skeleton, link } from "../app/bits";
+import { Section, Inset, Figure, Legend, Bars, Skeleton, link } from "../app/bits";
 import { Plot, basic } from "../app/plot";
 import { frontierScatter, valueLines, hoverHTML } from "../app/charts";
 import { joinedScatter } from "../app/points";
@@ -88,17 +88,11 @@ function Overview() {
   });
 
   return <Site page="overview" title="Overview">
-    <Hero kicker="Subscription value × model frontier" title={<>What your AI subscription is <em>actually worth.</em></>}
-      lede="SubBench measures the public-API value of coding-agent subscriptions from the quota they really consume, then sets it beside the cost, speed and capability frontier of every benchmarked model."
-      actions={<>
-        <Button onClick={link("/subscriptions/")}>Subscription value</Button>
-        <Button variant="secondary" onClick={link("/surface/")}>Explore the 3D surface</Button>
-      </>} />
 
     <Inset>
       <div class="sb-grid figures">
         <Show when={!reports.loading} fallback={<Skeleton height="4.5rem" />}>
-          <For each={me()?.products || []} fallback={<Figure label="Subscriptions" empty={reports()?.error ? "Subscription reports unavailable" : "Nothing measured yet"} />}>{(item) =>
+          <For each={me()?.products || []} fallback={<Figure label="Subscriptions" empty={reports()?.error ? "Unavailable" : "None yet"} />}>{(item) =>
             <Figure label={item.card.name} colour={colours().get(item.card.name)} value={money(item.headline.value)} unit="/ week"
               meta={<>{item.headline.kind === "settled" ? <>≈ <b>{money(item.headline.value * 52 / 12)}</b> / month · {plural(item.headline.row.window_count, "window")}</>
                 : item.headline.kind === "live" ? <>in progress · {Math.round(item.headline.row.covered_quota_percent)}% measured</> : <>range only, not yet settled</>}</>} />}</For>
@@ -106,11 +100,11 @@ function Overview() {
         <Figure label="Models benchmarked" value={index() ? String(index()!.bundle.counts.models) : "—"}
           meta={index() ? <>{index()!.bundle.counts.agents} agent configs · {index()!.bundle.counts.metrics} lenses</> : "loading…"} />
         <Figure label="Your most-used model" value={topModel() ? `${Math.round(topModel()!.share * 100)}%` : undefined} unit="of tokens"
-          empty="No usage reported yet" meta={topModel() ? <><b>{topModel()!.name}</b>{topModel()!.matched ? "" : " · not benchmarked yet"}</> : undefined} />
+          empty="None yet" meta={topModel() ? <><b>{topModel()!.name}</b>{topModel()!.matched ? "" : " · not benchmarked"}</> : undefined} />
       </div>
     </Inset>
 
-    <Section title="Weekly value over time" note="API-equivalent value of one full weekly limit. Each point pools every completed, confirmed window of that week across the accounts holding the plan; the dotted end is the week still running."
+    <Section title="Weekly value"
       tools={<Button variant="ghost" size="sm" onClick={link("/subscriptions/")}>All limits</Button>}>
       <Inset>
         <Show when={trend()} fallback={<Show when={!reports.loading} fallback={<Skeleton height="300px" />}><div class="sb-chart-empty">Subscription reports are unavailable right now.</div></Show>}>
@@ -120,7 +114,7 @@ function Overview() {
       </Inset>
     </Section>
 
-    <Section title="What one week buys" note="One weekly limit at public API prices, divided by what one benchmark task costs on each model: the models on that benchmark's cost frontier, plus the ones your own usage runs on."
+    <Section title="Tasks per weekly limit"
       tools={<>
         <Show when={(me()?.products.length ?? 0) > 1}>
           <Segmented label="Subscription" size="sm" value={chosen()?.card.name ?? ""} onChange={setProduct}
@@ -130,24 +124,16 @@ function Overview() {
           <For each={buyOptions()}>{(metric: any) => <option value={metric.id}>{metric.label}</option>}</For>
         </Select>
       </>}>
-      <div class="sb-grid main-aside">
-        <Inset title={chosen() ? `${chosen()!.card.name} · ${money(chosen()!.headline.value)} per week` : "Tasks per weekly limit"}
-          note="Bars are tasks per weekly limit; sorted by benchmark score.">
+      <div class="sb-grid">
+        <Inset title={chosen() ? `${chosen()!.card.name} · ${money(chosen()!.headline.value)} per week` : "Tasks per weekly limit"}>
           <Show when={index() && !reports.loading} fallback={<Skeleton height="18rem" />}>
-            <Bars rows={buys()} empty={chosen() ? "No model on this benchmark publishes a cost per task." : "A weekly value appears once the collector has measured a subscription."} />
+            <Bars rows={buys()} empty={chosen() ? "No cost data for this benchmark" : "No weekly value yet"} />
           </Show>
-        </Inset>
-        <Inset title="How to read this">
-          <div class="sb-prose">
-            <p><b>Tasks per weekly limit</b> is the subscription's measured API-equivalent value divided by the benchmark's measured cost per task.</p>
-            <p>It is a throughput, not a promise: a real workload spends different tokens per task than the benchmark does, and a subscription's meter does not price every model alike.</p>
-            <p>Models marked <b>yours</b> are matched from the model names in your own usage logs.</p>
-          </div>
         </Inset>
       </div>
     </Section>
 
-    <Section title="Your models on the frontier" note="Intelligence Index against cost per task. The stepped line is the Pareto frontier: nothing sits above and to the left of it. Ringed points are the models in your own usage."
+    <Section title="Score vs cost"
       tools={<Button variant="ghost" size="sm" onClick={link("/frontier/")}>Open explorer</Button>}>
       <Inset>
         <Show when={mini()} fallback={<Skeleton height="420px" />}>
@@ -159,16 +145,6 @@ function Overview() {
       </Inset>
     </Section>
 
-    <Section title="Go deeper">
-      <div class="sb-grid two">
-        <Inset href="/surface/" title="The 3D Pareto surface" note="Cost, time and score at once">
-          <p class="sb-prose">The surface is the best score any model reaches within a cost and a time budget, so its height answers "what is the best I can get for this much money and this much waiting".</p>
-        </Inset>
-        <Inset href="/frontier/" title="Frontier explorer" note="24 capability lenses · models and coding agents">
-          <p class="sb-prose">Artificial Analysis, DeepSWE and FrontierCode lenses against cost, time or tokens, with an efficiency solver and side-by-side comparison.</p>
-        </Inset>
-      </div>
-    </Section>
   </Site>;
 }
 

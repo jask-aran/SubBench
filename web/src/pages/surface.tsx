@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Site, mount } from "../app/shell";
-import { Hero, Inset, Section, Legend, FamilyChips, Skeleton } from "../app/bits";
+import { Inset, Section, Legend, FamilyChips, Skeleton } from "../app/bits";
 import { Plot, gl3d, theme } from "../app/plot";
 import { frontierScatter, hoverHTML, type ScatterPoint } from "../app/charts";
 import { loadFrontier, loadReports, personal } from "../app/data";
@@ -182,9 +182,7 @@ function Surface() {
   const toggle = (name: string) => { const next = new Set<string>(hidden()); next.has(name) ? next.delete(name) : next.add(name); setHidden(next); };
   const solo = (name: string) => setHidden(new Set<string>(families().map((f) => f.name).filter((n) => n !== name)));
 
-  return <Site page="surface" title="3D Pareto surface">
-    <Hero small kicker="3D Pareto surface" title={<>Cost, time and score, <em>at once.</em></>}
-      lede="A two-axis chart hides a trade-off: a model can be cheap and slow, or fast and expensive. The surface is the best score reachable within a cost and a time budget; the outlined points are the 3D Pareto set, which nothing beats on all three at once. Drag to orbit, scroll to zoom, click a point to drop it to the floor." />
+  return <Site page="surface" title="3D surface">
 
     <div class="sb-section-tools" style={{ "margin-bottom": "var(--space-lg)" }}>
       <Select aria-label="Capability lens" bare={false} value={metric()} onChange={(e) => { setMetric(e.currentTarget.value); setSelected(null); }}>
@@ -205,27 +203,35 @@ function Surface() {
               ref={(handle) => { api = handle; }}
               onClick={(event) => { const id = event?.points?.find((p: any) => typeof p.customdata === "string")?.customdata; setSelected(id && id !== selected() ? id : null); }} />
           </Show>
-          <div class="sb-stage-hint">Drag to orbit · scroll to zoom · double-click to reset</div>
         </div>
         <div style={{ "margin-top": "var(--space-md)" }}><FamilyChips families={families()} hidden={hidden()} onToggle={toggle} onSolo={solo} /></div>
-        <Legend items={[{ label: "3D Pareto set (outlined, labelled)", colour: "var(--foreground)", kind: "dot" }, { label: "Your models", colour: "var(--foreground)", kind: "ring" },
-          { label: "Budget probe", colour: "var(--foreground)" }]} />
+        <Legend items={[{ label: "Pareto set", colour: "var(--foreground)", kind: "dot" }, { label: "Your models", colour: "var(--foreground)", kind: "ring" },
+          { label: "Budget", colour: "var(--foreground)" }]} />
       </div>
 
       <div class="sb-grid">
-        <Inset title="Budget probe" note="Set a ceiling on cost and time; the surface gives the best score inside it.">
+        <Inset title="Budget">
           <label class="sb-range"><span class="sb-range-head">Cost per task ≤ <b>{price(caps().cost)}</b></span>
             <input type="range" min="0" max="1000" value={costPos()} onInput={(e) => setCostPos(Number(e.currentTarget.value))} /></label>
           <label class="sb-range"><span class="sb-range-head">Time per task ≤ <b>{duration(caps().time)}</b></span>
             <input type="range" min="0" max="1000" value={timePos()} onInput={(e) => setTimePos(Number(e.currentTarget.value))} /></label>
           <div style={{ "margin-top": "var(--space-lg)" }}>
-            <Show when={probe()} fallback={<DashEmpty>Nothing visible fits this budget.</DashEmpty>}>{(best) =>
-              <div class="sb-callout"><b>{label(best())}</b> is the best within budget: {fmtScore(best().observation.score, meta()?.format)} for {price(best().observation.resources.cost)} and {duration(best().observation.resources.time)} per task.
-                <Show when={tasksPerEntitlement(weekly(), best().observation.resources.cost)}>{(per) => <> A weekly limit buys about <b>{integer(per())}</b> of them.</>}</Show></div>}
+            <Show when={probe()} fallback={<DashEmpty>None</DashEmpty>}>{(best) => {
+              const per = tasksPerEntitlement(weekly(), best().observation.resources.cost);
+              return <div class="sb-callout">
+                <b>{label(best())}</b>
+                <dl class="sb-kv" style={{ "margin-top": "var(--space-sm)" }}>
+                  <dt>Score</dt><dd>{fmtScore(best().observation.score, meta()?.format)}</dd>
+                  <dt>Cost / task</dt><dd>{price(best().observation.resources.cost)}</dd>
+                  <dt>Time / task</dt><dd>{duration(best().observation.resources.time)}</dd>
+                  <Show when={per}><dt>Tasks / week</dt><dd>{integer(per)}</dd></Show>
+                </dl>
+              </div>;
+            }}
             </Show>
           </div>
         </Inset>
-        <Inset title="3D Pareto set" note="Best score first" aside={<span class="sb-tag" data-tone="quiet">{front().length}</span>}>
+        <Inset title="Pareto set" aside={<span class="sb-tag" data-tone="quiet">{front().length}</span>}>
           <div class="sb-rows">
             <For each={[...front()].sort((a: any, b: any) => b.observation.score - a.observation.score)} fallback={<DashEmpty>Nothing visible.</DashEmpty>}>{(p: any) =>
               <DashRow element="button" current={selected() === key(p)} onClick={() => setSelected(selected() === key(p) ? null : key(p))}
@@ -236,7 +242,7 @@ function Surface() {
       </div>
     </div>
 
-    <Section title="The three projections" note="The same points flattened onto each pair of axes, with the 3D Pareto set outlined. A point can be on the 3D set and look dominated in one projection, because it wins on the axis that projection hides.">
+    <Section title="Projections">
       <div class="sb-grid three">
         <For each={[{ title: "Cost × score", chart: projCost }, { title: "Time × score", chart: projTime }, { title: "Cost × time", chart: projPlane }]}>{(panel) =>
           <Inset title={panel.title}>
