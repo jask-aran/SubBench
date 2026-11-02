@@ -1,0 +1,243 @@
+{
+  "archive_version": 1,
+  "collected_at": "2026-07-22T14:32:43Z",
+  "job": {
+    "collection_id": "547f73e159144d5ab862d02f728de0d9",
+    "type": "frontier_manifest"
+  },
+  "response": {
+    "collected_at": "2026-07-22T14:32:43Z",
+    "data": {
+      "manifest": {
+        "collection_id": "547f73e159144d5ab862d02f728de0d9",
+        "completed": true,
+        "discovered_model_count": 116,
+        "error": null,
+        "filters": {
+          "eligibility": "active",
+          "include_deprecated": false,
+          "since": null
+        },
+        "finished_at": "2026-07-22T14:32:43Z",
+        "model_batch_count": 3,
+        "runs": {
+          "catalogue": "190f6f3ff4c747679c4ff3b7495c06ac",
+          "coding_agents": "5e634010b2fd4673ae352b77b50121a0",
+          "models": [
+            "2bcca87545bb4e09bb9d382d0e121278",
+            "068d199992cb4d4bb81dbfb96a7fe54c",
+            "06d695e512b14e679cd178ea9eafc147"
+          ]
+        },
+        "selected_model_count": 89,
+        "selected_model_slugs": [
+          "gemini-3-6-flash",
+          "gemini-3-5-flash-lite",
+          "kimi-k3",
+          "muse-spark-1-1",
+          "gpt-5-6-terra-xhigh",
+          "gpt-5-6-terra-non-reasoning",
+          "gpt-5-6-terra-medium",
+          "gpt-5-6-terra-low",
+          "gpt-5-6-terra-high",
+          "gpt-5-6-terra",
+          "gpt-5-6-sol-xhigh",
+          "gpt-5-6-sol-non-reasoning",
+          "gpt-5-6-sol-medium",
+          "gpt-5-6-sol-low",
+          "gpt-5-6-sol-high",
+          "gpt-5-6-sol",
+          "gpt-5-6-luna-xhigh",
+          "gpt-5-6-luna-non-reasoning",
+          "gpt-5-6-luna-medium",
+          "gpt-5-6-luna-low",
+          "gpt-5-6-luna-high",
+          "gpt-5-6-luna",
+          "grok-4-5",
+          "hy3",
+          "claude-sonnet-5-non-reasoning",
+          "claude-sonnet-5",
+          "gpt-5-5-instant-06-26",
+          "glm-5-2",
+          "north-mini-code",
+          "claude-fable-5",
+          "nvidia-nemotron-3-ultra-550b-a55b",
+          "qwen3-7-plus",
+          "minimax-m3",
+          "claude-opus-4-8",
+          "hypernova-60b",
+          "command-a-plus",
+          "qwen3-7-max",
+          "gemini-3-5-flash",
+          "ring-2-6-1t",
+          "grok-4-3-non-reasoning",
+          "mistral-medium-3-5",
+          "deepseek-v4-pro-high",
+          "deepseek-v4-pro",
+          "deepseek-v4-flash-high",
+          "deepseek-v4-flash",
+          "qwen3-6-27b-non-reasoning",
+          "qwen3-6-27b",
+          "mimo-v2-5-pro",
+          "mimo-v2-5-0424",
+          "qwen3-6-35b-a3b-non-reasoning",
+          "qwen3-6-35b-a3b",
+          "qwen3-6-plus",
+          "gemma-4-31b-non-reasoning",
+          "gemma-4-26b-a4b",
+          "trinity-large-thinking",
+          "mistral-small-4",
+          "nvidia-nemotron-3-super-120b-a12b",
+          "gemini-3-1-flash-lite-preview",
+          "qwen3-5-9b",
+          "qwen3-5-35b-a3b-non-reasoning",
+          "qwen3-5-122b-a10b-non-reasoning",
+          "qwen3-5-122b-a10b",
+          "mercury-2",
+          "gemini-3-1-pro-preview",
+          "qwen3-5-397b-a17b",
+          "qwen3-coder-next",
+          "nvidia-nemotron-3-nano-30b-a3b-reasoning",
+          "devstral-small-2",
+          "devstral-2",
+          "mistral-large-3",
+          "ministral-3-8b",
+          "ministral-3-3b",
+          "ministral-3-14b",
+          "nova-2-0-pro-reasoning-medium",
+          "nova-2-0-pro-reasoning-low",
+          "nova-2-0-pro",
+          "nova-2-0-lite-reasoning",
+          "claude-4-5-haiku-reasoning",
+          "magistral-medium-2509",
+          "magistral-small-2509",
+          "qwen3-next-80b-a3b-reasoning",
+          "gpt-oss-20b",
+          "gpt-oss-120b-low",
+          "gpt-oss-120b",
+          "gemini-2-5-pro",
+          "llama-4-scout",
+          "llama-4-maverick",
+          "llama-3-3-instruct-70b",
+          "phi-4-mini"
+        ],
+        "skipped_models": [
+          {
+            "reason": "deprecated",
+            "slug": "grok-build-0-1-06-16"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "grok-4-3"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-5-5-non-reasoning"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-5-5-medium"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-5-5-low"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-5-5-high"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-5-5"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "kimi-k2-6"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "claude-opus-4-7"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "glm-5-1"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-5-4-nano"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-5-4-mini"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "claude-sonnet-4-6-adaptive"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "glm-4-7"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-5-1"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "glm-4-6-reasoning"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "claude-4-5-sonnet-thinking"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "mistral-medium-3-1"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-5"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "qwen3-30b-a3b-2507-reasoning"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "mistral-small-3-2"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-4-1-nano"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "gpt-4-1-mini"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "deepseek-v3-0324"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "mistral-small-3-1"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "deepseek-r1-0120"
+          },
+          {
+            "reason": "deprecated",
+            "slug": "deepseek-v3"
+          }
+        ],
+        "started_at": "2026-07-22T14:32:32Z"
+      }
+    },
+    "entity_type": "frontier_collection_manifest",
+    "schema_version": 2,
+    "status": "success"
+  },
+  "response_sha256": "60b5458445e23289e7c8b1fbc03002a02118063c83bf14cda6a95cd4663811bf",
+  "run_id": "bbe8c591e5084087a857a347cea8f1af"
+}

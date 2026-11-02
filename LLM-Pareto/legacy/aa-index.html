@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AA Model Explorer</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --grid:#2a2e38;
+    --text:#e8eaed; --muted:#9aa0ac; --accent:#f5c451; --good:#6ee7b7;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{padding:12px 22px;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    display:flex;flex-direction:column;overflow:hidden;}
+  h1{font-size:18px;font-weight:600;margin:0 0 2px;flex-shrink:0;}
+  p.sub{margin:0 0 12px;color:var(--muted);font-size:13px;flex-shrink:0;}
+  .layout{display:flex;gap:16px;flex:1;min-height:0;align-items:stretch;}
+  .main{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:10px;
+    background:var(--panel);border:1px solid var(--grid);border-radius:10px;padding:10px 12px;flex-shrink:0;}
+  .ctrl{display:flex;flex-direction:column;gap:4px;}
+  .ctrl label{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);}
+  select,button.tg{background:var(--panel2);border:1px solid var(--grid);color:var(--text);
+    font-size:12px;padding:6px 8px;border-radius:6px;cursor:pointer;}
+  button.tg.active{border-color:var(--accent);color:var(--accent);}
+  #blend-weight-wrap{display:none;flex-direction:column;gap:4px;min-width:170px;}
+  #blend-weight-wrap.show{display:flex;}
+  .wlabels{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);}
+  .chart-wrap{background:var(--panel);border:1px solid var(--grid);border-radius:10px;
+    padding:12px;position:relative;flex:1;min-height:0;display:flex;flex-direction:column;}
+  svg{display:block;width:100%;height:100%;min-height:0;}
+  .axis-label{fill:var(--muted);font-size:11px;}
+  .tick-label{fill:var(--muted);font-size:10px;}
+  .gridline{stroke:var(--grid);stroke-width:1;}
+  .model-path{fill:none;stroke-width:2;opacity:.8;}
+  .frontier-path{fill:none;stroke:rgba(255,255,255,.5);stroke-width:2;stroke-dasharray:6 4;}
+  .pt{stroke:#0f1115;stroke-width:1.2;cursor:pointer;}
+  .solver-ring{fill:none;stroke:var(--good);stroke-width:2.5;}
+  #tooltip{position:absolute;pointer-events:none;background:#21252f;border:1px solid var(--grid);
+    border-radius:6px;padding:8px 10px;font-size:11.5px;line-height:1.65;color:var(--text);
+    display:none;z-index:10;white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.4);}
+  #tooltip b{color:var(--accent);}
+  .legend{display:flex;flex-direction:column;gap:2px;margin-top:8px;padding-top:8px;border-top:1px solid var(--grid);flex-shrink:0;max-height:220px;overflow-y:auto;}
+  .legend-group{display:flex;flex-direction:column;gap:1px;}
+  .legend-family{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--text);cursor:pointer;padding:3px 4px;border-radius:4px;user-select:none;}
+  .legend-family:hover{background:var(--panel2);}
+  .legend-family .arrow{font-size:8px;color:var(--muted);width:12px;flex-shrink:0;transition:transform .15s;}
+  .legend-family .arrow.collapsed{transform:rotate(-90deg);}
+  .legend-family .count{font-size:9px;color:var(--muted);font-weight:400;margin-left:auto;}
+  .legend-family .fam-swatch{width:8px;height:8px;border-radius:2px;flex:0 0 auto;}
+  .legend-item{display:flex;align-items:center;gap:5px;font-size:10.5px;color:var(--muted);cursor:pointer;padding:1px 4px 1px 22px;border-radius:3px;user-select:none;}
+  .legend-item:hover{background:var(--panel2);}
+  .legend-item.off{opacity:.3;text-decoration:line-through;}
+  .legend-swatch{width:8px;height:8px;border-radius:2px;flex:0 0 auto;}
+  .legend-tools{display:flex;gap:8px;padding:3px 4px 0;flex-shrink:0;}
+  .legend-tools button{background:none;border:none;color:var(--muted);font-size:10px;cursor:pointer;text-decoration:underline;padding:0;}
+  #ctx-menu{position:fixed;background:var(--panel2);border:1px solid var(--grid);border-radius:6px;padding:4px 0;font-size:11px;z-index:100;display:none;min-width:130px;box-shadow:0 4px 16px rgba(0,0,0,.5);}
+  #ctx-menu div{padding:5px 14px;cursor:pointer;color:var(--text);}
+  #ctx-menu div:hover{background:var(--panel);}
+  .side{width:270px;flex:0 0 270px;display:flex;flex-direction:column;gap:16px;overflow-y:auto;min-height:0;}
+  .card{background:var(--panel);border:1px solid var(--grid);border-radius:10px;padding:14px 16px;}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--text);margin:0 0 10px;}
+  .solver-row{display:flex;flex-direction:column;gap:8px;font-size:12px;color:var(--muted);}
+  .seg{display:flex;gap:6px;}
+  .seg button{flex:1;background:var(--panel2);border:1px solid var(--grid);color:var(--text);
+    font-size:11px;padding:5px;border-radius:6px;cursor:pointer;}
+  .seg button.active{border-color:var(--accent);color:var(--accent);}
+  input[type=range]{width:100%;accent-color:var(--accent);}
+  #solver-target-val{color:var(--accent);font-weight:600;}
+  #solver-result{background:rgba(110,231,183,.08);border:1px solid rgba(110,231,183,.35);
+    border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.55;color:var(--text);margin-top:4px;}
+  .frontier-note{font-size:11.5px;line-height:1.55;color:var(--muted);}
+  .frontier-note b{color:var(--text);}
+  ol#frontier-list{margin:0 0 0 18px;padding:0;font-size:11.5px;color:var(--muted);max-height:230px;overflow:auto;}
+  ol#frontier-list li{margin-bottom:5px;}
+  .footnote{margin-top:10px;color:var(--muted);font-size:11px;line-height:1.5;flex-shrink:0;}
+  .footnote code{color:var(--text);background:#21252f;padding:1px 4px;border-radius:4px;}
+</style>
+</head>
+<body>
+
+<h1>AA Model Explorer <a href="./index.html" style="font-size:12px;font-weight:400;color:var(--accent);text-decoration:none;margin-left:10px;">DeepSWE &rarr;</a></h1>
+<p class="sub">Models from Artificial Analysis vs cost, time, and tokens. Toggle between Intelligence Index and Coding Index on the capability axis.</p>
+
+<div class="layout">
+  <div class="main">
+    <div class="controls">
+      <div class="ctrl">
+        <label>Y axis (capability)</label>
+        <select id="sel-y">
+          <option value="intelligence_index">Intelligence Index</option>
+          <option value="coding_index">Coding Index</option>
+        </select>
+      </div>
+      <div class="ctrl">
+        <label>X axis (resource)</label>
+        <select id="sel-x">
+          <option value="cost">Cost ($)</option>
+          <option value="dur">Time (s)</option>
+          <option value="outTok">Output tokens</option>
+          <option value="blend">Blend index</option>
+        </select>
+      </div>
+      <div id="blend-weight-wrap" class="ctrl">
+        <label>Blend weight</label>
+        <div class="wlabels"><span>cost</span><span>time</span></div>
+        <input type="range" id="blend-weight" min="0" max="100" value="50">
+      </div>
+      <div class="ctrl">
+        <label>Bubble size</label>
+        <select id="sel-size">
+          <option value="none">None (uniform)</option>
+          <option value="cost">Cost ($)</option>
+          <option value="dur">Time (s)</option>
+          <option value="outTok">Output tokens</option>
+          <option value="inTok">Input tokens</option>
+          <option value="speed">Output speed (tok/s)</option>
+          <option value="ttft">TTFT (s)</option>
+        </select>
+      </div>
+      <div class="ctrl">
+        <label>Frontier</label>
+        <button class="tg active" id="frontier-toggle">Show</button>
+      </div>
+      <div class="ctrl">
+        <label>Log X</label>
+        <button class="tg" id="log-toggle">Off</button>
+      </div>
+    </div>
+
+    <div class="chart-wrap">
+      <svg id="chart"></svg>
+      <div id="tooltip"></div>
+    </div>
+
+    <div class="legend" id="legend"></div>
+    <div class="legend-tools">
+      <button id="leg-all">show all</button>
+      <button id="leg-none">hide all</button>
+    </div>
+    <div id="ctx-menu"></div>
+  </div>
+
+  <div class="side">
+    <div class="card">
+      <h2>Pareto frontier</h2>
+      <div class="frontier-note" id="frontier-note">Models on the frontier dominate on both axes vs visible peers.</div>
+      <ol id="frontier-list"></ol>
+    </div>
+
+    <div class="card">
+      <h2>Efficiency solver</h2>
+      <div class="solver-row">
+        <div>
+          <label style="font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);">
+            Min capability: <span id="solver-target-val">50%</span> of Y-max
+          </label>
+          <input type="range" id="solver-target" min="1" max="99" value="50" style="margin-top:4px;">
+        </div>
+        <div>
+          <label style="font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);">Minimise:</label>
+          <div class="seg" id="solver-min-seg">
+            <button class="active" data-k="cost">cost</button>
+            <button data-k="dur">time</button>
+            <button data-k="blend">blend</button>
+          </div>
+        </div>
+        <div id="solver-result"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="footnote">Data from <code>aa-data.json</code> (local archive snapshot). Coloured by model family.</div>
+
+<script>
+"use strict";
+
+// ---- config ----
+const metricMeta={
+  cost:{label:"Cost ($)",fmt:v=>"$"+v.toFixed(4)},
+  dur:{label:"Time (s)",fmt:v=>v.toFixed(1)+"s"},
+  outTok:{label:"Output tokens",fmt:v=>(v/1000).toFixed(0)+"k"},
+  inTok:{label:"Input tokens",fmt:v=>(v/1000).toFixed(0)+"k"},
+  speed:{label:"Output speed",fmt:v=>v.toFixed(0)+" tok/s"},
+  ttft:{label:"TTFT",fmt:v=>v.toFixed(1)+"s"},
+  intelligence_index:{label:"Intelligence Index",fmt:v=>v.toFixed(1)},
+  coding_index:{label:"Coding Index",fmt:v=>v.toFixed(1)},
+};
+
+const families=[
+  {pattern:/^claude/,hue:28,name:"Anthropic"},
+  {pattern:/^gpt/,   hue:145,name:"OpenAI"},
+  {pattern:/^gemini/,hue:215,name:"Google"},
+  {pattern:/^kimi/,  hue:325,name:"Moonshot"},
+  {pattern:/^grok/,  hue:0,  name:"xAI"},
+  {pattern:/^muse/,  hue:185,name:"Meta"},
+  {pattern:/^glm/,   hue:275,name:"ZhipuAI"},
+  {pattern:/^deepseek/,hue:210,name:"DeepSeek"},
+  {pattern:/^qwen/,  hue:345,name:"Qwen"},
+  {pattern:/^llama/, hue:260,name:"Meta Llama"},
+  {pattern:/^mistral|^ministral|^magistral/,hue:165,name:"Mistral"},
+  {pattern:/^nova/,  hue:310,name:"Amazon"},
+  {pattern:/^nvidia|^nemotron/,hue:100,name:"NVIDIA"},
+  {pattern:/^command/,hue:230,name:"Cohere"},
+  {pattern:/^ring/,  hue:55, name:"Ring"},
+  {pattern:/^gemma/, hue:20, name:"Google Gemma"},
+  {pattern:/^trinity|^devstral|^hypernova|^mercury|^hy3|^north|^minimax|^mimo|^phi/,hue:80,name:"Other"},
+];
+
+let data=[], byModel={}, sortedModels=[];
+const palette={}, hidden=new Set();
+let logX=false, frontierOn=true;
+
+// ---- helpers ----
+function capVal(d){
+  const y=document.getElementById("sel-y").value;
+  return d[y];
+}
+function xRaw(d){
+  const x=document.getElementById("sel-x").value;
+  if(x==="cost")return d.cost_per_task;
+  if(x==="dur")return d.time_per_task;
+  if(x==="outTok")return d.output_tokens_per_task;
+  if(x==="blend")return blendVal(d);
+  return d.cost_per_task;
+}
+function sizeRaw(d){
+  const s=document.getElementById("sel-size").value;
+  if(s==="none")return 1;
+  if(s==="cost")return d.cost_per_task;
+  if(s==="dur")return d.time_per_task;
+  if(s==="outTok")return d.output_tokens_per_task;
+  if(s==="inTok")return d.input_tokens_per_task;
+  if(s==="speed")return d.output_speed||1;
+  if(s==="ttft")return d.ttft||1;
+  return 1;
+}
+function blendVal(d){
+  const w1=+document.getElementById("blend-weight").value/100,w2=1-w1;
+  const vis=visibleRows();
+  if(!vis.length)return 0;
+  const maxC=Math.max(...vis.map(v=>v.cost_per_task));
+  const maxT=Math.max(...vis.map(v=>v.time_per_task));
+  if(maxC<=0||maxT<=0)return 0;
+  return w1*(d.cost_per_task/maxC)+w2*(d.time_per_task/maxT);
+}
+
+function modelKey(d){return d.slug.replace(/-(?:xhigh|high|medium|low|none|non-reasoning|-preview)$/,"");}
+
+function visibleRows(){return data.filter(d=>!hidden.has(modelKey(d)));}
+
+// ---- colour palette ----
+function buildPalette(){
+  const grouped={};
+  Object.keys(byModel).forEach(m=>{
+    const best=Math.max(...byModel[m].map(d=>capVal(d)));
+    const fi=families.findIndex(f=>f.pattern.test(m));
+    if(fi>=0)(grouped[fi]=grouped[fi]||[]).push({model:m,best});
+  });
+  const hStep=4,sStep=10,lStep=12;
+  Object.entries(grouped).forEach(([fi,models])=>{
+    models.sort((a,b)=>b.best-a.best);
+    const base=families[fi].hue;
+    models.forEach(({model},i)=>{
+      palette[model]=`hsl(${base+i*hStep},${95-i*sStep}%,${38+i*lStep}%)`;
+    });
+  });
+  Object.keys(byModel).forEach(m=>{
+    if(palette[m])return;
+    let h=0;
+    for(let i=0;i<m.length;i++)h=(h*31+m.charCodeAt(i))|0;
+    palette[m]=`hsl(${((h>>>0)%360)},65%,55%)`;
+  });
+}
+
+// ---- init ----
+async function init(){
+  const r=await fetch("./aa-data.json");
+  const j=await r.json();
+  data=j.models;
+  document.querySelector(".sub").textContent=`${data.length} models from Artificial Analysis vs cost, time, and tokens.`;
+  data.forEach(d=>{
+    const k=modelKey(d);
+    (byModel[k]=byModel[k]||[]).push(d);
+  });
+  sortedModels=Object.keys(byModel).sort();
+  buildDefaultHidden();
+  initHidden();
+  buildPalette();
+  syncLegend();
+  refresh();
+}
+
+// ---- render ----
+function render(){
+  const svg=document.getElementById("chart");
+  const rect=svg.getBoundingClientRect();
+  const W=rect.width-16,H=Math.max(rect.height-16,280);
+  const M={t:26,r:14,b:44,l:56};
+  const plotW=W-M.l-M.r,plotH=H-M.t-M.b;
+  if(plotW<=0||plotH<=0)return;
+
+  const pts=visibleRows();
+  if(!pts.length){svg.innerHTML='';document.getElementById("solver-result").innerHTML='';return;}
+
+  // Hide solver ring if no visible points
+  document.querySelector(".solver-ring")?.remove();
+
+  const xSel=document.getElementById("sel-x").value;
+  const ySel=document.getElementById("sel-y").value;
+
+  let xs=pts.map(d=>xRaw(d));
+  let ys=pts.map(d=>capVal(d));
+  if(logX)xs=xs.map(v=>v<=0?0.001:Math.log10(v));
+
+  const xMin=Math.min(...xs),xMax=Math.max(...xs);
+  const yMin=Math.min(...ys),yMax=Math.max(...ys);
+  const xPad=(xMax-xMin)*.08||1,yPad=(yMax-yMin)*.05||(yMax*.05||1);
+  const xLo=xMin-xPad,xHi=xMax+xPad;
+  const yLo=yMin-yPad,yHi=yMax+yPad;
+
+  const xScale=v=>M.l+(v-xLo)/(xHi-xLo)*plotW;
+  const yScale=v=>M.t+plotH-(v-yLo)/(yHi-yLo)*plotH;
+  const invX=px=>xLo+(px-M.l)/plotW*(xHi-xLo);
+
+  let svgContent='<defs><clipPath id="cp"><rect x="'+M.l+'" y="'+M.t+'" width="'+plotW+'" height="'+plotH+'" /></clipPath></defs>';
+
+  // background
+  svgContent+=`<rect x="${M.l}" y="${M.t}" width="${plotW}" height="${plotH}" fill="var(--panel)" opacity=".4"/>`;
+
+  // grid + axis labels
+  const nTicks=5;
+  for(let i=0;i<=nTicks;i++){
+    const frac=i/nTicks;
+    const xv=xLo+frac*(xHi-xLo),yv=yLo+frac*(yHi-yLo);
+    const x=M.l+frac*plotW,y=M.t+plotH-frac*plotH;
+    if(i>0&&i<nTicks){
+      svgContent+=`<line x1="${x}" y1="${M.t}" x2="${x}" y2="${M.t+plotH}" class="gridline" opacity=".4"/>`;
+      svgContent+=`<line x1="${M.l}" y1="${y}" x2="${M.l+plotW}" y2="${y}" class="gridline" opacity=".4"/>`;
+    }
+    // axis tick labels
+    svgContent+=`<text x="${x}" y="${H-10}" text-anchor="middle" class="tick-label">${fmtX(xv,xSel)}</text>`;
+    svgContent+=`<text x="${M.l-10}" y="${y+4}" text-anchor="end" class="tick-label">${yv.toFixed(1)}</text>`;
+  }
+
+  // axis labels
+  svgContent+=`<text x="${M.l+plotW/2}" y="${H-26}" text-anchor="middle" class="axis-label">${metricMeta[xSel==='blend'?'cost':xSel]?.label||xSel}</text>`;
+  svgContent+=`<text x="14" y="${M.t+plotH/2}" text-anchor="middle" class="axis-label" transform="rotate(-90,14,${M.t+plotH/2})">${metricMeta[ySel].label}</text>`;
+
+  // clip
+  svgContent+=`<g clip-path="url(#cp)">`;
+
+  // model connection lines (per-family)
+  const byKey={};
+  pts.forEach(d=>{
+    const k=modelKey(d);
+    if(!byKey[k])byKey[k]=[];
+    byKey[k].push(d);
+  });
+
+  Object.keys(byKey).forEach(k=>{
+    if(hidden.has(k))return;
+    const members=byKey[k].sort((a,b)=>xRaw(a)-xRaw(b));
+    if(members.length<2)return;
+    let d='';
+    members.forEach((m,i)=>{
+      const cx=xScale(logX?Math.max(Math.log10(xRaw(m)),xLo-1):xRaw(m));
+      const cy=yScale(capVal(m));
+      d+=i===0?`M${cx},${cy}`:`L${cx},${cy}`;
+    });
+    svgContent+=`<path d="${d}" class="model-path" stroke="${palette[k]}" stroke-dasharray="4 3" opacity=".4"/>`;
+  });
+
+  // Pareto frontier
+  const frontierPts=pareto(pts,xScale,yScale);
+  if(frontierPts.length>1&&frontierOn){
+    let d='';let first=true;
+    frontierPts.forEach(([mx,my])=>{
+      d+=first?`M${mx},${my}`:`L${mx},${my}`;first=false;
+    });
+    svgContent+=`<path d="${d}" class="frontier-path"/>`;
+  }
+  // update frontier list
+  updateFrontierList(frontierPts);
+
+  // points
+  const rVals=pts.map(d=>sizeRaw(d));
+  const rMin=Math.min(...rVals),rMax=Math.max(...rVals);
+
+  pts.forEach(d=>{
+    const k=modelKey(d);
+    const cx=xScale(logX?Math.max(Math.log10(xRaw(d)),xLo-1):xRaw(d));
+    const cy=yScale(capVal(d));
+    const r=document.getElementById("sel-size").value==="none"?6:5+10*(sizeRaw(d)-rMin)/(rMax-rMin||1);
+    const col=palette[k]||"#888";
+    svgContent+=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="${col}" opacity=".85" class="pt"
+      data-slug="${d.slug}" data-key="${k}" onclick="showTooltip(event,'${d.slug}')"
+      onmouseenter="showTooltip(event,'${d.slug}')" onmousemove="moveTooltip(event)" onmouseleave="hideTooltip()"/>`;
+  });
+
+  svgContent+=`</g><text x="${M.l}" y="${M.t-6}" fill="var(--muted)" font-size="10">${pts.length} models</text>`;
+
+  svg.innerHTML=svgContent;
+  renderSolver();
+}
+
+function fmtX(v,xSel){
+  if(logX)return '10^'+v.toFixed(1);
+  if(xSel==="cost"||xSel==="blend")return "$"+v.toFixed(4);
+  if(xSel==="dur")return v.toFixed(0)+"s";
+  if(xSel==="outTok"||xSel==="inTok")return (v/1000).toFixed(0)+"k";
+  return v.toFixed(2);
+}
+
+// ---- Pareto ----
+function pareto(pts,xS,yS){
+  const byX={};
+  pts.forEach(d=>{
+    const x=logX?Math.max(Math.log10(xRaw(d)),-10):xRaw(d);
+    const y=capVal(d);
+    if(!byX[x]||byX[x][1]<y)byX[x]=[xS(x),yS(y)];
+  });
+  const sorted=Object.entries(byX).sort((a,b)=>+a[0]-b[0]);
+  const frontier=[];
+  let maxY=-Infinity;
+  if(document.getElementById("sel-x").value==="blend"){
+    // blend: lower is better
+    for(const [x,[mx,my]]of sorted){
+      if(my>maxY){maxY=my;frontier.push([mx,my]);}
+    }
+  } else {
+    // cost/time/tokens: lower is better
+    for(const [x,[mx,my]]of sorted){
+      if(my>maxY){maxY=my;frontier.push([mx,my]);}
+    }
+  }
+  return frontier;
+}
+
+function updateFrontierList(frontierPts){
+  const ol=document.getElementById("frontier-list");
+  const pts=visibleRows();
+  if(!frontierOn||frontierPts.length<2){ol.innerHTML='<li style="color:var(--muted)">Toggle frontier on.</li>';return;}
+  const xSel=document.getElementById("sel-x").value;
+  // map frontier svg coords back to data
+  const rect=document.getElementById("chart").getBoundingClientRect();
+  const W=rect.width-16,H=Math.max(rect.height-16,280);
+  const M={t:26,r:14,b:44,l:56},plotW=W-M.l-M.r,plotH=H-M.t-M.b;
+  if(plotW<=0)return;
+  const xs=pts.map(d=>logX?Math.max(Math.log10(xRaw(d)),-10):xRaw(d));
+  const ys=pts.map(d=>capVal(d));
+  const xMin=Math.min(...xs),xMax=Math.max(...xs);
+  const yMin=Math.min(...ys),yMax=Math.max(...ys);
+  const xPad=(xMax-xMin)*.08||1,yPad=(yMax-yMin)*.05||(yMax*.05||1);
+
+  const xLo=xMin-xPad,xHi=xMax+xPad,yLo=yMin-yPad,yHi=yMax+yPad;
+  const invX=px=>xLo+(px-M.l)/plotW*(xHi-xLo);
+  const invY=py=>yLo+(M.t+plotH-py)/plotH*(yHi-yLo);
+
+  const frontierData=frontierPts.map(([px,py])=>{
+    const fx=invX(px),fy=invY(py);
+    // find closest model
+    let best=null,bestDist=Infinity;
+    pts.forEach(d=>{
+      const dx=logX?Math.max(Math.log10(xRaw(d)),-10):xRaw(d);
+      const dy=capVal(d);
+      const dist=(dx-fx)**2+(dy-fy)**2;
+      if(dist<bestDist){bestDist=dist;best=d;}
+    });
+    return best;
+  }).filter(Boolean);
+
+  ol.innerHTML=frontierData.map(d=>{
+    const k=modelKey(d);
+    const col=palette[k]||"#888";
+    const ii=d.intelligence_index.toFixed(1);
+    const ci=d.coding_index.toFixed(1);
+    const c=d.cost_per_task.toFixed(4);
+    const t=d.time_per_task.toFixed(0);
+    return `<li><span style="color:${col};font-weight:600">${d.slug}</span> — II:${ii} CI:${ci} $${c} ${t}s</li>`;
+  }).join("");
+}
+
+// ---- tooltip ----
+function showTooltip(e,slug){
+  const d=data.find(x=>x.slug===slug);
+  if(!d)return;
+  const k=modelKey(d),col=palette[k]||"#888";
+  const ii=d.intelligence_index.toFixed(1);
+  const ci=d.coding_index.toFixed(1);
+  const c=d.cost_per_task.toFixed(4);
+  const t=d.time_per_task.toFixed(1);
+  const out=(d.output_tokens_per_task/1000).toFixed(0);
+  const spd=d.output_speed?.toFixed(0)||"N/A";
+  document.getElementById("tooltip").innerHTML=
+    `<div style="color:${col};font-weight:600;margin-bottom:2px">${d.slug}</div>`+
+    `II: <b>${ii}</b> &nbsp; CI: <b>${ci}</b><br>`+
+    `cost: <b>$${c}</b> &nbsp; time: <b>${t}s</b><br>`+
+    `out: <b>${out}k tok</b> &nbsp; speed: <b>${spd} tok/s</b>`;
+  moveTooltip(e);
+  document.getElementById("tooltip").style.display="block";
+}
+function moveTooltip(e){
+  const tt=document.getElementById("tooltip");
+  const wrap=tt.parentElement;
+  const wr=wrap.getBoundingClientRect();
+  tt.style.left=(e.clientX-wr.left+12)+"px";
+  tt.style.top=(e.clientY-wr.top-10)+"px";
+}
+function hideTooltip(){document.getElementById("tooltip").style.display="none";}
+
+// ---- legend ----
+const famCollapsed={}; // family index → bool
+// family models that are hidden by default
+const defaultHidden=[];
+function buildDefaultHidden(){
+  Object.keys(byModel).forEach(k=>{
+    if(/non-reasoning/.test(k))defaultHidden.push(k);
+  });
+}
+
+// Build family → modelKeys mapping
+function famIndex(mk){
+  for(let i=0;i<families.length;i++){
+    if(families[i].pattern.test(mk))return i;
+  }
+  return -1;
+}
+function byFamilyMap(){
+  const m={};
+  Object.keys(byModel).sort().forEach(k=>{
+    const fi=famIndex(k);
+    if(fi>=0){(m[fi]=m[fi]||[]).push(k);}
+    else{(m[-1]=m[-1]||[]).push(k);}
+  });
+  return m;
+}
+
+function syncLegend(){
+  const el=document.getElementById("legend");
+  const bf=byFamilyMap();
+  const items=[];
+
+  Object.keys(bf).sort((a,b)=>+(a)-+(b)).forEach(fi=>{
+    const keys=bf[fi];
+    const fam=fi>=0?families[fi]:null;
+    const name=fam?fam.name:"Other";
+    const col=fam?`hsl(${fam.hue},65%,55%)`:"#888";
+    const collapsed=famCollapsed[fi]||false;
+    const visible=keys.filter(k=>!hidden.has(k)).length;
+
+    // family header
+    items.push(`<div class="legend-group">`);
+    items.push(`<div class="legend-family" data-fi="${fi}" onclick="toggleFamilyAll(${fi})" oncontextmenu="famCtx(event,${fi})">
+      <span class="arrow${collapsed?' collapsed':''}">&#9660;</span>
+      <span class="fam-swatch" style="background:${col}"></span>${name}
+      <span class="count">${visible}/${keys.length}</span>
+    </div>`);
+
+    if(!collapsed){
+      keys.forEach(k=>{
+        const col2=palette[k]||"#888";
+        const off=hidden.has(k)?" off":"";
+        items.push(`<div class="legend-item${off}" data-key="${k}" onclick="toggleModel('${k}')"
+          oncontextmenu="modelCtx(event,'${k}')">${k}</div>`);
+      });
+    }
+    items.push(`</div>`);
+  });
+  el.innerHTML=items.join("");
+}
+
+// click family header → toggle all models in family
+function toggleFamilyAll(fi){
+  const bf=byFamilyMap();
+  const keys=bf[fi];
+  if(!keys)return;
+  const anyHidden=keys.some(k=>hidden.has(k));
+  keys.forEach(k=>{
+    if(anyHidden)hidden.delete(k);else hidden.add(k);
+  });
+  syncLegend();refresh();
+}
+
+// click model → toggle single
+function toggleModel(k){
+  if(hidden.has(k))hidden.delete(k);else hidden.add(k);
+  syncLegend();refresh();
+}
+
+// context menu
+function modelCtx(e,k){
+  e.preventDefault();
+  showCtxMenu(e,[
+    {label:"Hide \""+k+"\"",fn:()=>{hidden.add(k);syncLegend();refresh();}},
+    {label:"Show only \""+k+"\"",fn:()=>{hidden.clear();syncLegend();refresh();}},
+    {label:"Cancel",fn:()=>{}},
+  ]);
+}
+function famCtx(e,fi){
+  e.preventDefault();
+  const fam=fi>=0?families[fi]:null;
+  const name=fam?fam.name:"Other";
+  const bf=byFamilyMap();
+  const keys=bf[fi]||[];
+  showCtxMenu(e,[
+    {label:"Hide all "+name,fn:()=>{keys.forEach(k=>hidden.add(k));syncLegend();refresh();}},
+    {label:"Show only "+name,fn:()=>{hidden.clear();keys.forEach(k=>hidden.delete(k));Object.keys(byModel).forEach(mk=>{if(!keys.includes(mk))hidden.add(mk);});syncLegend();refresh();}},
+    {label:"Expand/collapse",fn:()=>{famCollapsed[fi]=!famCollapsed[fi];syncLegend();}},
+    {label:"Cancel",fn:()=>{}},
+  ]);
+}
+
+function showCtxMenu(e,items){
+  const menu=document.getElementById("ctx-menu");
+  menu.innerHTML=items.map((item,i)=>`<div data-idx="${i}">${item.label}</div>`).join("");
+  menu.style.display="block";
+  menu.style.left=Math.min(e.clientX,document.documentElement.clientWidth-menu.offsetWidth)+"px";
+  menu.style.top=Math.min(e.clientY,document.documentElement.clientHeight-menu.offsetHeight)+"px";
+  menu.querySelectorAll("div").forEach(el=>{
+    el.onclick=()=>{const idx=+el.dataset.idx;items[idx].fn();hideCtxMenu();};
+  });
+  // close on click outside
+  setTimeout(()=>document.addEventListener("click",hideCtxMenu,{once:true}),0);
+}
+function hideCtxMenu(){document.getElementById("ctx-menu").style.display="none";}
+
+// initialise default-hidden in init()
+function initHidden(){
+  defaultHidden.forEach(k=>hidden.add(k));
+}
+
+document.getElementById("leg-all").onclick=()=>{hidden.clear();initHidden();syncLegend();refresh();};
+document.getElementById("leg-none").onclick=()=>{Object.keys(byModel).forEach(k=>hidden.add(k));syncLegend();refresh();};
+
+// ---- solver ----
+function solve(){
+  const pts=visibleRows();
+  if(!pts.length)return null;
+  const target=+document.getElementById("solver-target").value/100;
+  const ySel=document.getElementById("sel-y").value;
+  const yMax=Math.max(...pts.map(d=>capVal(d)));
+  const threshold=yMax*target;
+  const candidates=pts.filter(d=>capVal(d)>=threshold);
+  if(!candidates.length)return null;
+  const active=document.querySelector("#solver-min-seg .active");
+  const minBy=active?active.dataset.k:"cost";
+  let best=null,bestV=Infinity;
+  candidates.forEach(d=>{
+    let v;
+    if(minBy==="cost")v=d.cost_per_task;
+    else if(minBy==="dur")v=d.time_per_task;
+    else v=blendVal(d);
+    if(v<bestV){bestV=v;best=d;}
+  });
+  return best;
+}
+
+function renderSolver(){
+  const win=solve();
+  const box=document.getElementById("solver-result");
+  document.getElementById("solver-target-val").textContent=(+document.getElementById("solver-target").value)+"%";
+  if(!win){
+    const ySel=document.getElementById("sel-y").value;
+    box.innerHTML=`No visible model reaches ${(+document.getElementById("solver-target").value)}% of max ${metricMeta[ySel].label}.`;
+    return;
+  }
+  const ySel=document.getElementById("sel-y").value;
+  const active=document.querySelector("#solver-min-seg .active");
+  const minBy=active?active.dataset.k:"cost";
+  const label={cost:"cost",dur:"time",blend:"blend index"}[minBy];
+  const valStr=minBy==="blend"?blendVal(win).toFixed(3):minBy==="cost"?`$${win.cost_per_task.toFixed(4)}`:win.time_per_task.toFixed(1)+"s";
+  const k=modelKey(win);
+  box.innerHTML=`Most efficient model &ge; ${(+document.getElementById("solver-target").value)}% (min ${label}):<br>`+
+    `<span style="color:${palette[k]}">${win.slug}</span><br>`+
+    `${metricMeta[ySel].label}: ${capVal(win).toFixed(1)}&nbsp;&nbsp;cost: $${win.cost_per_task.toFixed(4)}&nbsp;&nbsp;time: ${win.time_per_task.toFixed(1)}s`;
+}
+
+// ---- refresh ----
+function refresh(){
+  render();
+  document.querySelector(".solver-ring")?.remove();
+  // add solver ring on SVG
+  const win=solve();
+  if(!win)return;
+  const pts=visibleRows();
+  if(!pts.length)return;
+  const xSel=document.getElementById("sel-x").value;
+  const xs=pts.map(d=>logX?Math.max(Math.log10(xRaw(d)),-10):xRaw(d));
+  const ys=pts.map(d=>capVal(d));
+  const xMin=Math.min(...xs),xMax=Math.max(...xs);
+  const yMin=Math.min(...ys),yMax=Math.max(...ys);
+  const xPad=(xMax-xMin)*.08||1,yPad=(yMax-yMin)*.05||(yMax*.05||1);
+  const xLo=xMin-xPad,xHi=xMax+xPad,yLo=yMin-yPad,yHi=yMax+yPad;
+  const svg=document.getElementById("chart");
+  const rect=svg.getBoundingClientRect();
+  const W=rect.width-16,H=Math.max(rect.height-16,280);
+  const M={t:26,r:14,b:44,l:56},plotW=W-M.l-M.r,plotH=H-M.t-M.b;
+  if(plotW<=0)return;
+  const xScale=v=>M.l+(v-xLo)/(xHi-xLo)*plotW;
+  const yScale=v=>M.t+plotH-(v-yLo)/(yHi-yLo)*plotH;
+  const cx=xScale(logX?Math.max(Math.log10(xRaw(win)),-10):xRaw(win));
+  const cy=yScale(capVal(win));
+  const ring=document.createElementNS("http://www.w3.org/2000/svg","circle");
+  ring.setAttribute("cx",cx);ring.setAttribute("cy",cy);
+  ring.setAttribute("r","14");ring.setAttribute("class","solver-ring");
+  svg.appendChild(ring);
+}
+
+// ---- event wiring ----
+document.getElementById("sel-y").onchange=()=>{buildPalette();syncLegend();refresh();};
+document.getElementById("sel-x").onchange=()=>{
+  document.getElementById("blend-weight-wrap").classList.toggle("show",this.value==="blend");
+  refresh();
+};
+document.getElementById("sel-size").onchange=refresh;
+document.getElementById("blend-weight").oninput=refresh;
+document.getElementById("frontier-toggle").onclick=function(){
+  frontierOn=!frontierOn;this.classList.toggle("active");refresh();
+};
+document.getElementById("log-toggle").onclick=function(){
+  logX=!logX;this.textContent=logX?"On":"Off";this.classList.toggle("active");refresh();
+};
+document.getElementById("solver-target").oninput=refresh;
+document.querySelectorAll("#solver-min-seg button").forEach(b=>{
+  b.onclick=function(){
+    document.querySelectorAll("#solver-min-seg button").forEach(x=>x.classList.remove("active"));
+    this.classList.add("active");refresh();
+  };
+});
+
+// resize debounce
+let resizeTimer;
+window.onresize=()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(refresh,100);};
+
+init();
+</script>
+</body>
+</html>

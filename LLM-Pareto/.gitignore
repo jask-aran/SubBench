@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local collection output. Reset backups use the same prefix.
+data/
+data.reset-*/

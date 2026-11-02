@@ -1,0 +1,37 @@
+name: Update leaderboard data
+
+on:
+  schedule:
+    # Daily at 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:  # manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch and transform leaderboard data
+        run: bash update.sh
+
+      - name: Commit updated data
+        run: |
+          # Only commit if the file actually changed
+          if git diff --quiet leaderboard.json; then
+            echo "No changes — skipping commit"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          GENERATED=$(python3 -c "import json; print(json.load(open('leaderboard.json'))[0]['model'] if json.load(open('leaderboard.json')) else 'none')" 2>/dev/null || echo "unknown")
+
+          git add leaderboard.json
+          git commit -m "update leaderboard.json from datacurve live data [skip ci]"
+
+          git push
