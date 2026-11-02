@@ -54,13 +54,18 @@ subbench watch --reconcile 3600   # maximum time between full reconciliations
 
 ### What the database keeps
 
-The database keeps three layers apart:
+The database keeps four layers apart:
 
 1. **Usage evidence.** The daily usage report, and the token classes and USD cost
    calculated from it. No log text is kept.
 2. **Entitlement evidence.** One quota reading for each window at each poll: the used
    percent, the reset time and the window length.
-3. **Inference.** Every estimate. SubBench calculates each estimate again from layers 1
+3. **Hourly usage.** Token counts, requests and cost per UTC hour and model, in
+   `usage_hourly`, updated in place as an hour fills. A closed hour keeps the account that
+   was active when it was spent. The estimator does not read this yet: it still sums the
+   daily imports, so every figure stays comparable with the history recorded before. The
+   hourly table is the finer evidence for edge-of-window attribution, and it stays local.
+4. **Inference.** Every estimate. SubBench calculates each estimate again from layers 1
    and 2. It never treats an estimate as source data.
 
 SubBench keeps the raw payloads. Therefore an improvement to the estimator applies to all
@@ -549,6 +554,8 @@ subbench data backup ~/subbench-backup.sqlite3
 subbench data prune --days 90 --yes      # drop raw usage older than the cutoff
 subbench data reset --yes                # delete every observation
 
+subbench detail hourly                   # spend per UTC hour, the last 24 hours
+subbench detail hourly --hours 168 --by-model
 subbench detail models                   # token share of each model
 subbench detail weights                  # per-model quota weights
 subbench detail accounts                 # known accounts and plans

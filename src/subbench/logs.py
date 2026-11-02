@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -74,6 +74,7 @@ class Entry:
     model: str
     tokens: Tokens
     reasoning: int = 0
+    hour: str = ""  # the UTC hour the request was made in, e.g. 2026-11-02T14:00:00+00:00
     key: str | None = None  # Claude's message and request id, for de-duplication
     cost: float | None = None  # a cost the log itself recorded, which wins over a computed one
 
@@ -88,15 +89,18 @@ class _FileState:
     model: str | None = None
 
 
-def _day(timestamp: Any) -> str | None:
+def _when(timestamp: Any) -> tuple[str, str] | None:
+    """The local calendar day (as ccusage reported it) and the UTC hour of a timestamp."""
     if not isinstance(timestamp, str) or not timestamp:
         return None
     try:
         moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except ValueError:
         return None
-    # The local calendar day, as ccusage reported it.
-    return (moment.astimezone() if moment.tzinfo else moment).date().isoformat()
+    if moment.tzinfo is None:
+        moment = moment.astimezone()
+    hour = moment.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+    return moment.astimezone().date().isoformat(), hour
 
 
 def _int(value: Any) -> int:
@@ -118,8 +122,8 @@ def _claude_entry(record: dict[str, Any]) -> Entry | None:
     model = message.get("model")
     if not isinstance(usage, dict) or not isinstance(model, str) or not model or model == "<synthetic>":
         return None
-    day = _day(record.get("timestamp"))
-    if day is None:
+    when = _when(record.get("timestamp"))
+    if when is None:
         return None
     written = _int(usage.get("cache_creation_input_tokens"))
     split = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
@@ -136,7 +140,7 @@ def _claude_entry(record: dict[str, Any]) -> Entry | None:
     message_id, request_id = message.get("id"), record.get("requestId")
     key = f"{message_id}:{request_id}" if message_id and request_id else None
     cost = record.get("costUSD")
-    return Entry(day=day, model=model, tokens=tokens, key=key,
+    return Entry(day=when[0], hour=when[1], model=model, tokens=tokens, key=key,
                  cost=float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None)
 
 
@@ -183,13 +187,14 @@ def _codex_step(state: _FileState, record: dict[str, Any]) -> Entry | None:
         return None
     if not any(delta.values()):
         return None
-    day = _day(record.get("timestamp"))
-    if day is None:
+    when = _when(record.get("timestamp"))
+    if when is None:
         return None
     # Codex counts cached tokens inside input and reasoning inside output.
     cached = min(delta["cached_input_tokens"], delta["input_tokens"])
     tokens = Tokens(input=delta["input_tokens"] - cached, cache_read=cached, output=delta["output_tokens"])
-    return Entry(day=day, model=model or CODEX_FALLBACK_MODEL, tokens=tokens, reasoning=delta["reasoning_output_tokens"])
+    return Entry(day=when[0], hour=when[1], model=model or CODEX_FALLBACK_MODEL, tokens=tokens,
+                 reasoning=delta["reasoning_output_tokens"])
 
 
 class LogReader:
@@ -254,6 +259,11 @@ class LogReader:
                 collected.append(entry)
         return collected
 
+    def hourly(self) -> dict[tuple[str, str], dict[str, float]]:
+        prices = self.prices or default_prices()
+        self.prices = prices
+        return hourly_buckets(self.entries(), prices)
+
     def daily(self, *, since: date | None = None) -> dict[str, Any]:
         """The ccusage `daily --json` report for this provider."""
         prices = self.prices or default_prices()
@@ -299,6 +309,26 @@ def daily_report(entries: Iterable[Entry], prices: Prices, *, provider: str, sin
         totals["totalCost"] += row["totalCost"]
     totals["totalCost"] = round(totals["totalCost"], 10)
     return {"daily": daily, "totals": totals, "source": f"subbench {provider} logs"}
+
+
+def hourly_buckets(entries: Iterable[Entry], prices: Prices) -> dict[tuple[str, str], dict[str, float]]:
+    """Spend per (UTC hour, model): the same tokens and prices as the daily report, finer."""
+    buckets: dict[tuple[str, str], dict[str, float]] = {}
+    for entry in entries:
+        cost = entry.cost if entry.cost is not None else prices.cost(entry.model, entry.tokens)
+        bucket = buckets.setdefault((entry.hour, entry.model), {
+            "input_tokens": 0, "cache_write_tokens": 0, "cache_read_tokens": 0, "output_tokens": 0,
+            "reasoning_output_tokens": 0, "requests": 0, "cost_usd": 0.0})
+        bucket["input_tokens"] += entry.tokens.input
+        bucket["cache_write_tokens"] += entry.tokens.cache_write_5m + entry.tokens.cache_write_1h
+        bucket["cache_read_tokens"] += entry.tokens.cache_read
+        bucket["output_tokens"] += entry.tokens.output
+        bucket["reasoning_output_tokens"] += entry.reasoning
+        bucket["requests"] += 1
+        bucket["cost_usd"] += cost
+    for bucket in buckets.values():
+        bucket["cost_usd"] = round(bucket["cost_usd"], 10)
+    return buckets
 
 
 def raw(report: dict[str, Any]) -> bytes:

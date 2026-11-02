@@ -119,7 +119,8 @@ def statement() -> str:
         where = ", ".join(str(r) for r in logs.roots(provider))
         lines.append(f"  {provider}: {where}")
         lines.extend(f"    - {field}" for field in fields)
-    lines += ["", "Stored locally: daily token totals and costs per model, quota readings, derived values.", ""]
+    lines += ["", "Stored locally: token totals and costs per model, per day and per hour; quota readings;",
+              "derived values. Hourly totals are never sent.", ""]
     lines.append("Network: these hosts and no others (enforced in subbench/net.py):")
     for host, what in net.allowed_hosts().items():
         lines.append(f"  {host}: {what}")

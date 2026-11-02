@@ -266,3 +266,39 @@ def test_config_write_keeps_other_lines_and_is_private(tmp_path):
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     with pytest.raises(ValueError):
         config.write(path, "BAD KEY", "x")
+
+
+# ---------------------------------------------------------------- hourly
+
+def test_hourly_buckets_add_up_to_the_daily_report(home):
+    reader = logs.LogReader("claude", Prices(_bundled()))
+    hours = reader.hourly()
+    daily = reader.daily()
+    assert sum(b["cost_usd"] for b in hours.values()) == pytest.approx(daily["totals"]["totalCost"])
+    assert ("2026-10-01T10:00:00+00:00", "claude-haiku-5-5") in hours
+    # m2 was logged twice and is one request.
+    assert hours[("2026-10-01T11:00:00+00:00", "claude-sonnet-5-5")]["requests"] == 1
+
+
+def test_hours_are_utc_whatever_the_local_zone(home, monkeypatch):
+    monkeypatch.setenv("TZ", "Australia/Sydney")
+    time.tzset()
+    reader = logs.LogReader("codex", Prices(_bundled()))
+    assert {hour for hour, _model in reader.hourly()} == {"2026-10-01T09:00:00+00:00"}
+    assert [row["date"] for row in reader.daily()["daily"]] == ["2026-10-01"]  # 19:00 in Sydney
+
+
+def test_a_closed_hour_keeps_the_account_that_spent_it(home, tmp_path):
+    from subbench.store import hourly, save_hourly
+
+    db = connect(tmp_path / "db.sqlite3")
+    reader = logs.LogReader("codex", Prices(_bundled()))
+    assert save_hourly(db, provider="codex", account_id="acct-A", buckets=reader.hourly(), now="t1") == 2
+    # Another account becomes active; nothing old changed, so nothing is rewritten.
+    assert save_hourly(db, provider="codex", account_id="acct-B", buckets=reader.hourly(), now="t2") == 0
+    rollout = next((home / ".codex" / "sessions").rglob("*.jsonl"))
+    with rollout.open("a") as handle:
+        handle.write(_line(_token_count("2026-10-01T10:05:00Z", _usage(60000, 30000, 2900, 300), _usage(10000, 0, 1000, 0))) + "\n")
+    assert save_hourly(db, provider="codex", account_id="acct-B", buckets=reader.hourly(), now="t3") == 1
+    accounts = {(row["hour"][11:13], row["account_id"]) for row in hourly(db)}
+    assert accounts == {("09", "acct-A"), ("10", "acct-B")}

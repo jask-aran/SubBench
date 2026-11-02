@@ -19,7 +19,7 @@ from .crosssolve import account_plans, combined_estimates, divergences
 from .push import VALUE_REPORT_KIND, push_all, value_report
 from .weights import observations_from_windows, solve
 from .regression import MIN_QUOTA_DELTA_PERCENT, _cluster_resets, robust_estimates
-from .store import connect, estimate_windows, list_accounts, list_imports, load_report, model_mix, regression_points, save_import
+from .store import connect, estimate_windows, hourly, list_accounts, list_imports, load_report, model_mix, regression_points, save_import
 from .timeseries import detect_regime_changes, rolling_values, window_history
 from .watcher import RUNNERS, WatchTarget, ccusage_command, native_report, watch
 
@@ -184,6 +184,11 @@ def build_parser() -> argparse.ArgumentParser:
     detail_weights = detail_commands.add_parser("weights", help="Fit per-model quota weights, or explain why not yet")
     detail_weights.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
     detail_weights.add_argument("--json", action="store_true", dest="as_json")
+    detail_hourly = detail_commands.add_parser("hourly", help="Spend per hour (UTC) from the built-in log reader")
+    detail_hourly.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
+    detail_hourly.add_argument("--hours", type=int, default=24, help="How many hours back (default: 24)")
+    detail_hourly.add_argument("--by-model", action="store_true", help="One line per model rather than per hour")
+    detail_hourly.add_argument("--json", action="store_true", dest="as_json")
     detail_accounts = detail_commands.add_parser("accounts", help="List discovered accounts")
     detail_accounts.add_argument("--provider", choices=("all", "claude", "codex"), default="all")
     convergence = detail_commands.add_parser(
@@ -404,8 +409,37 @@ def _data(db, args) -> int:
     raise AssertionError(args.data_command)
 
 
+def _print_hourly(db, args, provider: str | None) -> int:
+    since = (datetime.now(timezone.utc) - timedelta(hours=args.hours)).replace(minute=0, second=0, microsecond=0).isoformat()
+    rows = [dict(row) for row in hourly(db, provider=provider, since=since)]
+    if args.as_json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("No hourly usage yet. The built-in collector (`subbench watch`) records it.")
+        return 0
+    if args.by_model:
+        print("hour (UTC)        provider  model                          requests      tokens       cost")
+        for row in rows:
+            tokens = row["input_tokens"] + row["cache_write_tokens"] + row["cache_read_tokens"] + row["output_tokens"]
+            print(f"{row['hour'][:16]}  {row['provider']:<8}  {row['model'][:30]:<30} {row['requests']:>8} {tokens:>11,} {row['cost_usd']:>10.2f}")
+        return 0
+    totals: dict[tuple[str, str], list[float]] = {}
+    for row in rows:
+        entry = totals.setdefault((row["hour"], row["provider"]), [0, 0, 0.0])
+        entry[0] += row["requests"]
+        entry[1] += row["input_tokens"] + row["cache_write_tokens"] + row["cache_read_tokens"] + row["output_tokens"]
+        entry[2] += row["cost_usd"]
+    print("hour (UTC)        provider  requests       tokens       cost")
+    for (hour, prov), (requests, tokens, cost) in sorted(totals.items()):
+        print(f"{hour[:16]}  {prov:<8}  {int(requests):>8} {int(tokens):>12,} {cost:>10.2f}")
+    return 0
+
+
 def _detail(db, args) -> int:
     provider = None if args.provider == "all" else args.provider
+    if args.detail_command == "hourly":
+        return _print_hourly(db, args, provider)
     if args.detail_command == "accounts":
         return _print_accounts(db, args.provider)
     if args.detail_command == "convergence":

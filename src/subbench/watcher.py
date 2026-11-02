@@ -14,7 +14,7 @@ from .entitlement import collect_entitlements
 from .incremental import AuthFileDetector, LogChangeDetector
 from .logs import LogReader, raw as logs_raw
 from .push import build_reports, push_all
-from .store import dropped_periods, plan_moves, save_entitlements, save_import, upsert_account
+from .store import dropped_periods, plan_moves, save_entitlements, save_hourly, save_import, upsert_account
 
 
 @dataclass(frozen=True)
@@ -113,6 +113,10 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
                 messages.append(f"usage {'recorded' if created else 'unchanged'} import {import_id} ({row_count} rows)")
             else:
                 messages.append("usage: no local sessions yet")
+            hours = save_hourly(db, provider=target.provider, account_id=account_id,
+                                buckets=reader(target.provider).hourly(), now=datetime.now(timezone.utc).isoformat())
+            if hours:
+                messages.append(f"{hours} hour(s) updated")
             unknown = sorted(reader(target.provider).prices.unknown) if reader(target.provider).prices else []
             if unknown:
                 messages.append(f"no price for {', '.join(unknown)}")

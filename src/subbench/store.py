@@ -110,6 +110,26 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- Spend per hour (UTC), per model, from the built-in log reader. One row per hour and
+-- model, updated in place as the hour fills, rather than a snapshot per import: an hour
+-- that has closed does not change again. account_id is the account active when the hour
+-- last changed, which is the account that spent it. Additive: older databases gain the
+-- table on their next open, and nothing reads it in place of the daily imports.
+CREATE TABLE IF NOT EXISTS usage_hourly (
+    provider                TEXT NOT NULL,
+    hour                    TEXT NOT NULL,
+    model                   TEXT NOT NULL,
+    account_id              TEXT,
+    input_tokens            INTEGER NOT NULL,
+    cache_write_tokens      INTEGER NOT NULL,
+    cache_read_tokens       INTEGER NOT NULL,
+    output_tokens           INTEGER NOT NULL,
+    reasoning_output_tokens INTEGER NOT NULL,
+    requests                INTEGER NOT NULL,
+    cost_usd                REAL NOT NULL,
+    updated_at              TEXT NOT NULL,
+    PRIMARY KEY (provider, hour, model)
+);
 CREATE INDEX IF NOT EXISTS entitlement_lookup
     ON entitlement_snapshots(provider, window, observed_at);
 CREATE INDEX IF NOT EXISTS entitlement_account_lookup
@@ -711,3 +731,46 @@ def load_report(db: sqlite3.Connection, kind: str) -> tuple[str, dict[str, Any]]
         return str(row["generated_at"]), json.loads(row["payload"])
     except (TypeError, ValueError):
         return None
+
+
+HOURLY_FIELDS = ("input_tokens", "cache_write_tokens", "cache_read_tokens", "output_tokens",
+                 "reasoning_output_tokens", "requests", "cost_usd")
+
+
+def save_hourly(db: sqlite3.Connection, *, provider: str, account_id: str | None,
+                buckets: dict[tuple[str, str], dict[str, float]], now: str) -> int:
+    """Write the hours whose figures changed. Returns how many rows were written.
+
+    Only a changed hour is written, so an hour keeps the account it was spent on even after
+    another account becomes active.
+    """
+    current = {
+        (row["hour"], row["model"]): tuple(row[f] for f in HOURLY_FIELDS)
+        for row in db.execute(f"SELECT hour, model, {', '.join(HOURLY_FIELDS)} FROM usage_hourly WHERE provider = ?", (provider,))
+    }
+    changed = []
+    for (hour, model), values in buckets.items():
+        row = tuple(values[f] for f in HOURLY_FIELDS)
+        old = current.get((hour, model))
+        if old is None or any(abs(float(a) - float(b)) > 1e-9 for a, b in zip(old, row)):
+            changed.append((provider, hour, model, account_id, *row, now))
+    if changed:
+        with db:
+            db.executemany(
+                f"""INSERT INTO usage_hourly (provider, hour, model, account_id, {', '.join(HOURLY_FIELDS)}, updated_at)
+                    VALUES ({', '.join('?' for _ in range(5 + len(HOURLY_FIELDS)))})
+                    ON CONFLICT (provider, hour, model) DO UPDATE SET
+                    account_id = excluded.account_id, {', '.join(f'{f} = excluded.{f}' for f in HOURLY_FIELDS)},
+                    updated_at = excluded.updated_at""",
+                changed,
+            )
+    return len(changed)
+
+
+def hourly(db: sqlite3.Connection, *, provider: str | None = None, since: str | None = None) -> list[sqlite3.Row]:
+    return list(db.execute(
+        """SELECT * FROM usage_hourly
+            WHERE (? IS NULL OR provider = ?) AND (? IS NULL OR hour >= ?)
+            ORDER BY hour, provider, model""",
+        (provider, provider, since, since),
+    ))
