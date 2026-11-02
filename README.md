@@ -65,11 +65,24 @@ The database keeps four layers apart:
    was active when it was spent. The estimator does not read this yet: it still sums the
    daily imports, so every figure stays comparable with the history recorded before. The
    hourly table is the finer evidence for edge-of-window attribution, and it stays local.
-4. **Inference.** Every estimate. SubBench calculates each estimate again from layers 1
-   and 2. It never treats an estimate as source data.
+4. **Inference.** Every estimate, derived from layers 1 and 2 and never treated as source
+   data. A window's estimate is stored in `window_estimates` once the window has reset,
+   with a digest of the readings it came from, the peers its reference rate came from,
+   and the estimator version. Each cycle then estimates only the open windows (one per
+   series) and reads the rest back. A window is computed again only if its readings
+   change (a late usage import repriced them) or the estimator version changes.
+
+A window's reference rate, which detects quota spent off this machine, comes from the
+windows in its series that had closed before it closed. That is what makes a closed
+window's estimate final: no later window can change it.
 
 SubBench keeps the raw payloads. Therefore an improvement to the estimator applies to all
-history, and not only to new data.
+history, and not only to new data: a new estimator version recomputes every window once.
+
+The two quadratic loops (every pair of readings in a window) run as numpy array
+operations in `subbench/kernels.py`, with the same arithmetic in the same order as the
+loops they replace. `tests/test_estimator_kernels.py` checks the results are identical to
+the original pure-Python estimator, kept in `tests/reference_estimator.py`.
 
 SubBench discards a usage report that is identical to the previous payload. The
 `imports.last_seen_at` column records when SubBench last confirmed a payload. This

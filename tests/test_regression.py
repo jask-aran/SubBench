@@ -9,6 +9,14 @@ from subbench.regression import (
 )
 
 
+# Reset times for the peer-reference tests. A window's reference comes from windows that
+# closed before it did, so each peer resets before its target, as their readings imply.
+PEER_A = "2026-07-25T12:00:00+00:00"
+PEER_B = "2026-07-26T06:00:00+00:00"
+PEER = "2026-07-26T12:00:00+00:00"
+TARGET = "2026-07-28T00:00:00+00:00"
+
+
 def point(used, cost, observed, reset="reset-a", account_id=None):
     return {
         "provider": "codex",
@@ -233,20 +241,20 @@ def test_partly_offmachine_stretch_is_excluded_by_a_clean_peer_window():
     # nowhere near the window's own rate, because most of that quota was spent in a
     # provider's cloud runner and only a little locally. Presence of spend is not
     # proportionality of spend.
-    points = [point(0, 0.0, "2026-07-27T00:00:00Z", "reset-b")]
+    points = [point(0, 0.0, "2026-07-27T00:00:00Z", TARGET)]
     cost = 0.0
     for index in range(1, 13):          # a clean stretch at $100 per 100%
         cost += 1.0
-        points.append(point(index, cost, f"2026-07-27T{index:02d}:00:00Z", "reset-b"))
+        points.append(point(index, cost, f"2026-07-27T{index:02d}:00:00Z", TARGET))
     cost += 0.25                        # 11 points of quota, almost all of it elsewhere
-    points.append(point(23, cost, "2026-07-27T13:00:00Z", "reset-b"))
+    points.append(point(23, cost, "2026-07-27T13:00:00Z", TARGET))
     for index in range(1, 8):
         cost += 1.0
-        points.append(point(23 + index, cost, f"2026-07-27T{13 + index:02d}:00:00Z", "reset-b"))
+        points.append(point(23 + index, cost, f"2026-07-27T{13 + index:02d}:00:00Z", TARGET))
 
     points.extend([
-        point(0, 0.0, "2026-07-26T00:00:00Z", "reset-a"),
-        point(50, 50.0, "2026-07-26T01:00:00Z", "reset-a"),
+        point(0, 0.0, "2026-07-26T00:00:00Z", PEER),
+        point(50, 50.0, "2026-07-26T01:00:00Z", PEER),
     ])
 
     estimate = robust_estimates(points)[0]
@@ -290,61 +298,61 @@ def test_a_meter_running_ahead_of_the_logs_is_not_mistaken_for_missing_usage():
 
 def test_issue_7_wide_low_cost_window_is_rejected_by_a_peer_reference():
     target = [
-        point(31, 0.00, "2026-07-27T00:00:00Z", "target"),
-        point(32, 1.00, "2026-07-27T00:01:00Z", "target"),
-        point(33, 2.00, "2026-07-27T00:02:00Z", "target"),
-        point(56, 2.00, "2026-07-27T00:05:00Z", "target"),
-        point(56, 2.00, "2026-07-27T00:18:00Z", "target"),
-        point(59, 2.50, "2026-07-27T00:20:00Z", "target"),
-        point(61, 2.50, "2026-07-27T00:21:00Z", "target"),
-        point(61, 2.50, "2026-07-27T00:22:00Z", "target"),
-        point(61, 2.50, "2026-07-27T00:24:00Z", "target"),
-        point(85, 2.50, "2026-07-27T00:27:00Z", "target"),
-        point(85, 2.50, "2026-07-27T00:29:00Z", "target"),
-        point(85, 2.50, "2026-07-27T00:38:00Z", "target"),
-        point(100, 3.38, "2026-07-27T01:44:00Z", "target"),
+        point(31, 0.00, "2026-07-27T00:00:00Z", TARGET),
+        point(32, 1.00, "2026-07-27T00:01:00Z", TARGET),
+        point(33, 2.00, "2026-07-27T00:02:00Z", TARGET),
+        point(56, 2.00, "2026-07-27T00:05:00Z", TARGET),
+        point(56, 2.00, "2026-07-27T00:18:00Z", TARGET),
+        point(59, 2.50, "2026-07-27T00:20:00Z", TARGET),
+        point(61, 2.50, "2026-07-27T00:21:00Z", TARGET),
+        point(61, 2.50, "2026-07-27T00:22:00Z", TARGET),
+        point(61, 2.50, "2026-07-27T00:24:00Z", TARGET),
+        point(85, 2.50, "2026-07-27T00:27:00Z", TARGET),
+        point(85, 2.50, "2026-07-27T00:29:00Z", TARGET),
+        point(85, 2.50, "2026-07-27T00:38:00Z", TARGET),
+        point(100, 3.38, "2026-07-27T01:44:00Z", TARGET),
     ]
     peer = [
-        point(0, 0.00, "2026-07-26T00:00:00Z", "peer"),
-        point(50, 50.00, "2026-07-26T01:00:00Z", "peer"),
+        point(0, 0.00, "2026-07-26T00:00:00Z", PEER),
+        point(50, 50.00, "2026-07-26T01:00:00Z", PEER),
     ]
 
     estimates = robust_estimates(target + peer)
 
-    assert [estimate.reset_key for estimate in estimates] == ["peer"]
+    assert [estimate.reset_key for estimate in estimates] == [PEER]
 
 
 def test_clean_peer_windows_supply_the_relative_reference_rate():
     target = [
-        point(0, 0.00, "2026-07-27T00:00:00Z", "target"),
-        point(50, 50.00, "2026-07-27T01:00:00Z", "target"),
+        point(0, 0.00, "2026-07-27T00:00:00Z", TARGET),
+        point(50, 50.00, "2026-07-27T01:00:00Z", TARGET),
     ]
     peers = [
-        point(0, 0.00, "2026-07-25T00:00:00Z", "peer-a"),
-        point(50, 50.00, "2026-07-25T01:00:00Z", "peer-a"),
-        point(0, 0.00, "2026-07-26T00:00:00Z", "peer-b"),
-        point(40, 44.00, "2026-07-26T01:00:00Z", "peer-b"),
+        point(0, 0.00, "2026-07-25T00:00:00Z", PEER_A),
+        point(50, 50.00, "2026-07-25T01:00:00Z", PEER_A),
+        point(0, 0.00, "2026-07-26T00:00:00Z", PEER_B),
+        point(40, 44.00, "2026-07-26T01:00:00Z", PEER_B),
     ]
 
     estimates = robust_estimates(target + peers)
-    target_estimate = next(estimate for estimate in estimates if estimate.reset_key == "target")
+    target_estimate = next(estimate for estimate in estimates if estimate.reset_key == TARGET)
 
     assert target_estimate.estimate_usd == 100.0
 
 
 def test_pairs_crossing_a_flagged_interval_are_excluded():
     target = [
-        point(0, 0.0, "2026-07-27T00:00:00Z", "target"),
-        point(20, 20.0, "2026-07-27T01:00:00Z", "target"),
-        point(40, 20.5, "2026-07-27T02:00:00Z", "target"),
-        point(60, 40.5, "2026-07-27T03:00:00Z", "target"),
+        point(0, 0.0, "2026-07-27T00:00:00Z", TARGET),
+        point(20, 20.0, "2026-07-27T01:00:00Z", TARGET),
+        point(40, 20.5, "2026-07-27T02:00:00Z", TARGET),
+        point(60, 40.5, "2026-07-27T03:00:00Z", TARGET),
     ]
     peer = [
-        point(0, 0.0, "2026-07-26T00:00:00Z", "peer"),
-        point(50, 50.0, "2026-07-26T01:00:00Z", "peer"),
+        point(0, 0.0, "2026-07-26T00:00:00Z", PEER),
+        point(50, 50.0, "2026-07-26T01:00:00Z", PEER),
     ]
 
-    slopes = [slope for slope in pairwise_slopes(target + peer) if slope.reset_key == "target"]
+    slopes = [slope for slope in pairwise_slopes(target + peer) if slope.reset_key == TARGET]
 
     assert {(slope.left_used_percent, slope.right_used_percent) for slope in slopes} == {
         (0.0, 20.0),
@@ -354,34 +362,34 @@ def test_pairs_crossing_a_flagged_interval_are_excluded():
 
 def test_no_estimate_is_emitted_when_all_target_pairs_are_contaminated():
     target = [
-        point(0, 0.0, "2026-07-27T00:00:00Z", "target"),
-        point(20, 0.5, "2026-07-27T01:00:00Z", "target"),
-        point(40, 1.0, "2026-07-27T02:00:00Z", "target"),
+        point(0, 0.0, "2026-07-27T00:00:00Z", TARGET),
+        point(20, 0.5, "2026-07-27T01:00:00Z", TARGET),
+        point(40, 1.0, "2026-07-27T02:00:00Z", TARGET),
     ]
     peer = [
-        point(0, 0.0, "2026-07-26T00:00:00Z", "peer"),
-        point(50, 50.0, "2026-07-26T01:00:00Z", "peer"),
+        point(0, 0.0, "2026-07-26T00:00:00Z", PEER),
+        point(50, 50.0, "2026-07-26T01:00:00Z", PEER),
     ]
 
     estimates = robust_estimates(target + peer)
 
-    assert [estimate.reset_key for estimate in estimates] == ["peer"]
+    assert [estimate.reset_key for estimate in estimates] == [PEER]
 
 
 def test_short_meter_delay_interval_remains_valid_with_a_peer_reference():
     target = [
-        point(10, 2.00, "2026-07-27T00:00:00Z", "target"),
-        point(21, 2.00, "2026-07-27T00:01:00Z", "target"),
-        point(22, 4.20, "2026-07-27T00:03:00Z", "target"),
-        point(30, 6.00, "2026-07-27T00:20:00Z", "target"),
+        point(10, 2.00, "2026-07-27T00:00:00Z", TARGET),
+        point(21, 2.00, "2026-07-27T00:01:00Z", TARGET),
+        point(22, 4.20, "2026-07-27T00:03:00Z", TARGET),
+        point(30, 6.00, "2026-07-27T00:20:00Z", TARGET),
     ]
     peer = [
-        point(0, 0.0, "2026-07-26T00:00:00Z", "peer"),
-        point(50, 50.0, "2026-07-26T01:00:00Z", "peer"),
+        point(0, 0.0, "2026-07-26T00:00:00Z", PEER),
+        point(50, 50.0, "2026-07-26T01:00:00Z", PEER),
     ]
 
     target_estimate = next(
-        estimate for estimate in robust_estimates(target + peer) if estimate.reset_key == "target"
+        estimate for estimate in robust_estimates(target + peer) if estimate.reset_key == TARGET
     )
 
     assert target_estimate.unobserved_quota_percent == 0.0

@@ -110,6 +110,23 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- One row per closed reset window: its estimate, and what it was computed from. A window
+-- whose readings (evidence) and reference peers (peers) are unchanged is read back rather
+-- than recomputed, so each cycle only estimates the open windows. Keyed by estimator
+-- version: a changed estimator recomputes everything once, and older rows stay for audit.
+CREATE TABLE IF NOT EXISTS window_estimates (
+    provider          TEXT NOT NULL,
+    account_key       TEXT NOT NULL,
+    plan_key          TEXT NOT NULL,
+    window            TEXT NOT NULL,
+    reset_key         TEXT NOT NULL,
+    estimator_version TEXT NOT NULL,
+    evidence          TEXT NOT NULL,
+    peers             TEXT NOT NULL,
+    estimate          TEXT,
+    computed_at       TEXT NOT NULL,
+    PRIMARY KEY (provider, account_key, plan_key, window, reset_key, estimator_version)
+);
 -- Spend per hour (UTC), per model, from the built-in log reader. One row per hour and
 -- model, updated in place as the hour fills, rather than a snapshot per import: an hour
 -- that has closed does not change again. account_id is the account active when the hour
@@ -774,3 +791,50 @@ def hourly(db: sqlite3.Connection, *, provider: str | None = None, since: str | 
             ORDER BY hour, provider, model""",
         (provider, provider, since, since),
     ))
+
+
+class WindowEstimateStore:
+    """regression.robust_estimates' store: closed windows' estimates, read and written in bulk."""
+
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self.db = db
+        self._loaded: dict[str, dict[tuple, tuple[str, str, Any]]] = {}
+        self._pending: list[tuple] = []
+
+    @staticmethod
+    def _key(key: tuple) -> tuple:
+        provider, account_id, plan, window, reset_key = key
+        return (provider, account_id or "", plan or "", window, reset_key)
+
+    def get(self, key: tuple, version: str):
+        if version not in self._loaded:
+            from .regression import RegressionEstimate
+
+            rows = {}
+            for row in self.db.execute(
+                "SELECT provider, account_key, plan_key, window, reset_key, evidence, peers, estimate "
+                "FROM window_estimates WHERE estimator_version = ?", (version,)
+            ):
+                estimate = RegressionEstimate(**json.loads(row["estimate"])) if row["estimate"] else None
+                rows[(row["provider"], row["account_key"], row["plan_key"], row["window"], row["reset_key"])] = (
+                    row["evidence"], row["peers"], estimate)
+            self._loaded[version] = rows
+        return self._loaded[version].get(self._key(key))
+
+    def put(self, key: tuple, version: str, evidence: str, peers: str, estimate) -> None:
+        from dataclasses import asdict
+
+        stored = json.dumps(asdict(estimate)) if estimate is not None else None
+        self._loaded.setdefault(version, {})[self._key(key)] = (evidence, peers, estimate)
+        self._pending.append((*self._key(key), version, evidence, peers, stored, imported_at()))
+
+    def flush(self) -> None:
+        if not self._pending:
+            return
+        with self.db:
+            self.db.executemany(
+                "INSERT OR REPLACE INTO window_estimates (provider, account_key, plan_key, window, reset_key, "
+                "estimator_version, evidence, peers, estimate, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                self._pending,
+            )
+        self._pending = []

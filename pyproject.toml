@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Jaskaran Singh" }]
-dependencies = ["plotext>=5.3,<6"]
+dependencies = ["plotext>=5.3,<6", "numpy>=1.26"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]

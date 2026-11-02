@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from functools import lru_cache
+from datetime import datetime, timedelta, timezone
+from collections import OrderedDict
 from random import Random
 from statistics import median
 from typing import Iterable, Mapping, Any
+
+from . import kernels
 
 # provider, account_id, plan, window, reset_key. One series of comparable quota points.
 SeriesKey = tuple[str, str | None, str | None, str, str]
@@ -285,64 +289,14 @@ def _unobserved_intervals(
     Also totals the quota that advanced, and how much of it advanced unmeasured, so a
     report can say how much of the window the estimate actually rests on.
     """
-    # Every column this quadratic loop reads is converted once. It used to parse both
-    # endpoints' timestamps on each of its several million iterations, which cost more
-    # than the arithmetic it guards.
-    used = [float(row["used_percent"]) for row in rows]
-    cost = [float(row["cost_usd"]) for row in rows]
-    moments = [_moment(row.get("observed_at")) for row in rows]
-    anchor = next((moment for moment in moments if moment is not None), None)
-    # Minutes from the first dated reading, so an interval is one subtraction. An undated
-    # row keeps the old meaning of an unbounded gap: it is tested on quota alone.
-    elapsed: list[float | None] = [
-        None if moment is None or anchor is None else (moment - anchor).total_seconds() / 60.0
-        for moment in moments
-    ]
-
-    flagged = [False] * max(len(rows) - 1, 0)
-    # Readings below the ceiling up to each index. A pair can sit at 100% on both ends
-    # and still have left it in between: the post-reset blip, then a real week that
-    # fills again. Extra credit is only spend that never left the ceiling.
-    ceiling_below = [0]
-    for value in used:
-        ceiling_below.append(ceiling_below[-1] + (value < QUOTA_CEILING_PERCENT))
-    for start in range(len(rows)):
-        left_used = used[start]
-        left_cost = cost[start]
-        left_elapsed = elapsed[start]
-        for end in range(start + 1, len(rows)):
-            quota_delta = used[end] - left_used
-            value_delta = cost[end] - left_cost
-            right_elapsed = elapsed[end]
-            if (
-                left_elapsed is not None
-                and right_elapsed is not None
-                and right_elapsed - left_elapsed < UNOBSERVED_MIN_MINUTES
-            ):
-                continue
-            unobserved = (
-                quota_delta >= UNOBSERVED_QUOTA_POINTS
-                and value_delta < quota_delta * min_value_per_quota_point
-            )
-            if not unobserved and reference_rate and quota_delta >= UNOBSERVED_RATE_MIN_QUOTA:
-                # Proportion, not presence: spend that moved but nowhere near far enough for
-                # the quota it accompanied means most of that quota was consumed elsewhere.
-                rate = value_delta / (quota_delta / 100.0)
-                unobserved = rate < reference_rate * UNOBSERVED_RATE_FRACTION
-            if (
-                not unobserved
-                and quota_delta <= 0
-                and value_delta >= UNMETERED_MIN_VALUE_USD
-                and left_used >= QUOTA_CEILING_PERCENT
-                and used[end] >= QUOTA_CEILING_PERCENT
-                and ceiling_below[end + 1] == ceiling_below[start]
-            ):
-                # The limit is spent and work continues on extra credit. The whole span
-                # has to stay at the ceiling. A 100% blip and a later real 100% have
-                # both ends there, and treating that pair as extra credit discards the week.
-                unobserved = True
-            if unobserved:
-                flagged[start:end] = [True] * (end - start)
+    cols = kernels.columns(rows)
+    used = cols.used_list
+    flagged = kernels.unobserved_flags(
+        cols, min_value_per_quota_point=min_value_per_quota_point, reference_rate=reference_rate,
+        quota_points=UNOBSERVED_QUOTA_POINTS, rate_fraction=UNOBSERVED_RATE_FRACTION,
+        rate_min_quota=UNOBSERVED_RATE_MIN_QUOTA, min_minutes=UNOBSERVED_MIN_MINUTES,
+        ceiling=QUOTA_CEILING_PERCENT, unmetered_min_value=UNMETERED_MIN_VALUE_USD,
+    ).tolist()
 
     counts = [0]
     advanced = 0.0
@@ -442,24 +396,212 @@ def _valid_pairs(
     reference_rate: float | None = None,
 ) -> list[tuple[Mapping[str, Any], Mapping[str, Any], float, float, float]]:
     """Every ordered pair whose quota and value both moved far enough to be informative."""
-    pairs: list[tuple[Mapping[str, Any], Mapping[str, Any], float, float, float]] = []
-    floor = max(min_quota_delta, 0.0)
-    unobserved, _, _ = _unobserved_intervals(
+    found = _pair_arrays(rows, min_quota_delta=min_quota_delta,
+                         min_value_per_quota_point=min_value_per_quota_point, reference_rate=reference_rate)[0]
+    return [
+        (rows[left], rows[right], quota, value, slope)
+        for left, right, quota, value, slope in zip(
+            found.left.tolist(), found.right.tolist(), found.quota.tolist(), found.value.tolist(), found.slope.tolist())
+    ]
+
+
+# Per-window results keyed by the window's evidence, so a window seen again (as a peer, or
+# in the next replay sample) is not recomputed. Bounded by the bytes its arrays hold.
+_CACHE = kernels.ByteBudgetCache()
+
+
+def _pair_arrays(
+    rows: list[Mapping[str, Any]],
+    *,
+    min_quota_delta: float,
+    min_value_per_quota_point: float = MIN_VALUE_PER_QUOTA_POINT,
+    reference_rate: float | None = None,
+    key: int | None = None,
+) -> tuple[kernels.Pairs, list[int], float, float]:
+    """The window's valid pairs and its unobserved prefix, advanced and unmeasured quota."""
+    key = (kernels.fingerprint(rows) if key is None else key, min_quota_delta, min_value_per_quota_point, reference_rate)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached
+    counts, advanced, unmeasured = _unobserved_intervals(
         rows, min_value_per_quota_point=min_value_per_quota_point, reference_rate=reference_rate,
     )
-    for index, left in enumerate(rows):
-        for offset, right in enumerate(rows[index + 1 :], start=index + 1):
-            # Skip the pair if any interval between its endpoints was never observed.
-            if unobserved[offset] > unobserved[index]:
-                continue
-            quota_delta = float(right["used_percent"]) - float(left["used_percent"])
-            value_delta = float(right["cost_usd"]) - float(left["cost_usd"])
-            # A pair where quota moved but recorded value did not is a stale or
-            # incomplete usage import, not evidence that the quota was free.
-            if quota_delta < floor or quota_delta <= 0 or value_delta <= 0:
-                continue
-            pairs.append((left, right, quota_delta, value_delta, value_delta / (quota_delta / 100.0)))
-    return pairs
+    found = kernels.valid_pairs(kernels.columns(rows), kernels.np.asarray(counts), floor=max(min_quota_delta, 0.0))
+    nbytes = sum(array.nbytes for array in (found.left, found.right, found.quota, found.value, found.slope))
+    return _CACHE.put(key, (found, counts, advanced, unmeasured), nbytes + 64 * len(counts))
+
+
+def _peer_reference_rates(
+    groups: list[tuple[SeriesKey, list[dict[str, Any]]]],
+    *,
+    min_quota_delta: float,
+) -> dict[SeriesKey, float | None]:
+    """Return one reference rate per window, using only other reset windows.
+
+    A target window must not define the rate that decides whether its own evidence is
+    missing. Otherwise a single under-recorded window can make its low rate look normal.
+    Peer pairs use the absolute floor only; relative filtering needs a trusted peer and is
+    applied later to the target window.
+    """
+    by_series: dict[
+        tuple[str, str | None, str | None, str],
+        list[tuple[SeriesKey, list[dict[str, Any]]]],
+    ] = {}
+    for key, rows in groups:
+        by_series.setdefault(key[:4], []).append((key, rows))
+
+    # Each window's own pairs, computed once. Every window is a peer of every other window
+    # in its series, so building K reference rates by asking each target for its peers'
+    # pairs made K*(K-1) calls where K suffice, and each call is quadratic in that window's
+    # readings. On a month of observations that alone was most of the twenty seconds every
+    # command spent before printing anything.
+    contributions: dict[SeriesKey, tuple[Any, Any, float]] = {}
+    for key, rows in groups:
+        found = _pair_arrays(rows, min_quota_delta=min_quota_delta)[0]
+        # Python's sum, in pair order, as the loop totalled them.
+        contributions[key] = (found.slope, found.quota, sum(found.quota.tolist()))
+
+    references: dict[SeriesKey, float | None] = {}
+    for series, members in by_series.items():
+        slopes = kernels.np.concatenate([contributions[key][0] for key, _ in members])
+        weights = kernels.np.concatenate([contributions[key][1] for key, _ in members])
+        sources = kernels.np.concatenate([
+            kernels.np.full(contributions[key][0].size, index, dtype=kernels.np.int64)
+            for index, (key, _) in enumerate(members)
+        ])
+        totals = [contributions[key][2] for key, _ in members]
+        grand_total = sum(totals)
+        order = kernels.np.argsort(slopes, kind="stable")
+        ordered_slopes, ordered_weights, ordered_sources = slopes[order], weights[order], sources[order]
+        for index, (member_key, _rows) in enumerate(members):
+            references[member_key] = _reference_from_pool(
+                ordered_slopes, ordered_weights, ordered_sources != index, (grand_total - totals[index]) * 0.5)
+    return references
+
+
+def _reference_from_pool(ordered_slopes, ordered_weights, others, threshold: float) -> float | None:
+    """The walk over the pooled, sorted slopes that skips the target's own: its weighted median."""
+    if threshold <= 0:
+        # No peer contributed a usable pair, so this window has no reference and only the
+        # absolute floor applies to it.
+        return None
+    cumulative = kernels.np.cumsum(ordered_weights[others])
+    position = int(kernels.np.searchsorted(cumulative, threshold, side="left"))
+    if position < cumulative.size:
+        return float(ordered_slopes[others][position])
+    return float(ordered_slopes[-1])
+
+
+def independent_intervals(
+    rows: list[Mapping[str, Any]],
+    *,
+    unobserved: list[int],
+    min_quota_delta: float = MIN_QUOTA_DELTA_PERCENT,
+) -> list[tuple[float, float]]:
+    """The window as consecutive non-overlapping (quota, value) blocks.
+
+    These are the window's independent evidence: every valid pair is a sum of a run of
+    them, so they carry the same information without counting any of it twice.
+
+    A block closes once the meter has moved far enough to be worth dividing by, never on
+    every reading. Requiring both to move within one reading looks equivalent and is not:
+    the provider ticks a whole percent at a time while ccusage reports dollars
+    continuously, so the two arrive out of phase and most readings move one or the other.
+    On one real window that filter kept 97 blocks holding $26.56 of the $93.57 actually
+    spent, and valued a full limit at a third of its true rate.
+    """
+    intervals: list[tuple[float, float]] = []
+    start = 0
+    for index in range(1, len(rows)):
+        if unobserved[index] > unobserved[index - 1]:
+            # A flagged step contaminates the block being built, so drop it and restart.
+            start = index
+            continue
+        quota_delta = float(rows[index]["used_percent"]) - float(rows[start]["used_percent"])
+        if quota_delta < 0:
+            # Meter reversed after a spike. Do not keep 100% as the baseline for later blocks.
+            start = index
+            continue
+        value_delta = float(rows[index]["cost_usd"]) - float(rows[start]["cost_usd"])
+        if quota_delta >= min_quota_delta and value_delta > 0:
+            intervals.append((quota_delta, value_delta))
+            start = index
+    return intervals
+
+
+def bootstrap_band(
+    intervals: list[tuple[float, float]],
+    *,
+    samples: int = BOOTSTRAP_SAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[float | None, float | None]:
+    """A tenth-to-ninetieth interval for the window's rate, by resampling increments.
+
+    The statistic is total value over total quota, which is what the widest pair of a
+    window measures and what the quota-weighted median of its pairs approximates. Both
+    describe one full limit, so the interval is on the same scale as the estimate.
+    """
+    if len(intervals) < MIN_BOOTSTRAP_INTERVALS:
+        return None, None
+    rng = Random(seed)
+    count = len(intervals)
+    rates: list[float] = []
+    for _ in range(samples):
+        quota = value = 0.0
+        for _ in range(count):
+            drawn_quota, drawn_value = intervals[rng.randrange(count)]
+            quota += drawn_quota
+            value += drawn_value
+        if quota > 0:
+            rates.append(value / (quota / 100.0))
+    if not rates:
+        return None, None
+    rates.sort()
+    pick = lambda p: rates[min(int(p * (len(rates) - 1) + 0.5), len(rates) - 1)]
+    return pick(0.10), pick(0.90)
+
+
+def _valid_pairs(
+    rows: list[Mapping[str, Any]],
+    *,
+    min_quota_delta: float,
+    min_value_per_quota_point: float = MIN_VALUE_PER_QUOTA_POINT,
+    reference_rate: float | None = None,
+) -> list[tuple[Mapping[str, Any], Mapping[str, Any], float, float, float]]:
+    """Every ordered pair whose quota and value both moved far enough to be informative."""
+    found = _pair_arrays(rows, min_quota_delta=min_quota_delta,
+                         min_value_per_quota_point=min_value_per_quota_point, reference_rate=reference_rate)[0]
+    return [
+        (rows[left], rows[right], quota, value, slope)
+        for left, right, quota, value, slope in zip(
+            found.left.tolist(), found.right.tolist(), found.quota.tolist(), found.value.tolist(), found.slope.tolist())
+    ]
+
+
+# Per-window results keyed by the window's evidence, so a window seen again (as a peer, or
+# in the next replay sample) is not recomputed. Bounded by the bytes its arrays hold.
+_CACHE = kernels.ByteBudgetCache()
+
+
+def _pair_arrays(
+    rows: list[Mapping[str, Any]],
+    *,
+    min_quota_delta: float,
+    min_value_per_quota_point: float = MIN_VALUE_PER_QUOTA_POINT,
+    reference_rate: float | None = None,
+    key: int | None = None,
+) -> tuple[kernels.Pairs, list[int], float, float]:
+    """The window's valid pairs and its unobserved prefix, advanced and unmeasured quota."""
+    key = (kernels.fingerprint(rows) if key is None else key, min_quota_delta, min_value_per_quota_point, reference_rate)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached
+    counts, advanced, unmeasured = _unobserved_intervals(
+        rows, min_value_per_quota_point=min_value_per_quota_point, reference_rate=reference_rate,
+    )
+    found = kernels.valid_pairs(kernels.columns(rows), kernels.np.asarray(counts), floor=max(min_quota_delta, 0.0))
+    nbytes = sum(array.nbytes for array in (found.left, found.right, found.quota, found.value, found.slope))
+    return _CACHE.put(key, (found, counts, advanced, unmeasured), nbytes + 64 * len(counts))
 
 
 def _peer_reference_rates(
@@ -635,66 +777,232 @@ def _marginal_estimate(
     )
 
 
+_ESTIMATES: "OrderedDict[tuple, RegressionEstimate | None]" = OrderedDict()
+
+
+def _estimate_window(
+    key: SeriesKey, ordered: list[dict[str, Any]], reference: float | None, *,
+    min_quota_delta: float, marginal_span: float,
+) -> RegressionEstimate | None:
+    memo = (key, kernels.fingerprint(ordered), reference, min_quota_delta, marginal_span)
+    if memo in _ESTIMATES:
+        _ESTIMATES.move_to_end(memo)
+        return _ESTIMATES[memo]
+    estimate = _compute_window(key, ordered, reference, min_quota_delta=min_quota_delta, marginal_span=marginal_span)
+    _ESTIMATES[memo] = estimate
+    if len(_ESTIMATES) > 4096:
+        _ESTIMATES.popitem(last=False)
+    return estimate
+
+
+def _compute_window(
+    key: SeriesKey, ordered: list[dict[str, Any]], reference: float | None, *,
+    min_quota_delta: float, marginal_span: float,
+) -> RegressionEstimate | None:
+    provider, account_id, plan, window, reset_key = key
+    found, unobserved_prefix, advanced, unmeasured = _pair_arrays(
+        ordered, min_quota_delta=min_quota_delta, reference_rate=reference)
+    if not len(found):
+        return None
+    left_used = kernels.np.array([float(row["used_percent"]) for row in ordered])
+    marginal, marginal_lower, marginal_upper, marginal_count, marginal_observed = (
+        _marginal_from_arrays(found, left_used, marginal_span=marginal_span)
+    )
+    intervals = independent_intervals(ordered, unobserved=unobserved_prefix)
+    lower, upper = bootstrap_band(intervals)
+    quota_values = [float(row["used_percent"]) for row in ordered]
+    cost_values = [float(row["cost_usd"]) for row in ordered]
+    return RegressionEstimate(
+        provider=provider,
+        window=window,
+        reset_key=reset_key,
+        estimate_usd=kernels.weighted_quantile(found.slope, found.quota, 0.5),
+        # None when there are too few increments to resample. The confidence tier
+        # treats an absent band as "not shown to be settled", never as a narrow one.
+        lower_usd=lower if lower is not None else 0.0,
+        upper_usd=upper if upper is not None else 0.0,
+        observation_count=len(ordered),
+        slope_count=len(found),
+        quota_span_percent=max(quota_values) - min(quota_values),
+        api_value_span_usd=max(cost_values) - min(cost_values),
+        latest_observed_at=str(ordered[-1]["observed_at"]),
+        account_id=account_id,
+        marginal_usd=marginal,
+        marginal_lower_usd=marginal_lower,
+        marginal_upper_usd=marginal_upper,
+        marginal_slope_count=marginal_count,
+        marginal_span_percent=marginal_observed,
+        covered_quota_percent=advanced - unmeasured,
+        unobserved_quota_percent=unmeasured,
+        plan=plan,
+        interval_count=len(intervals) if lower is not None else 0,
+    )
+
+
+def _marginal_from_arrays(found, used, *, marginal_span: float):
+    """_marginal_estimate over the vectorised pairs."""
+    if not len(found) or marginal_span <= 0:
+        return None, None, None, 0, 0.0
+    right_used = used[found.right]
+    left_used = used[found.left]
+    latest = float(right_used.max())
+    threshold = latest - marginal_span
+    recent = left_used >= threshold
+    if not recent.any():
+        return None, None, None, 0, 0.0
+    slopes = found.slope[recent]
+    weights = found.quota[recent]
+    earliest = float(left_used[recent].min())
+    return (
+        kernels.weighted_quantile(slopes, weights, 0.5),
+        kernels.weighted_quantile(slopes, weights, 0.10),
+        kernels.weighted_quantile(slopes, weights, 0.90),
+        int(recent.sum()),
+        latest - earliest,
+    )
+
+
+# Pooled, sorted peer slopes and their running weight, keyed by which windows went in. A
+# replay asks for the same peers at every sample inside one window, so they are sorted once.
+_POOLS = kernels.ByteBudgetCache(256 * 1024 * 1024)
+
+
+def _reference_for(
+    groups: list[tuple[SeriesKey, list[dict[str, Any]]]], target: SeriesKey, *, min_quota_delta: float,
+) -> float | None:
+    """_peer_reference_rates for one window: the same pool, the same walk, the same answer."""
+    members = []
+    for key, rows in groups:
+        if key[:4] != target[:4]:
+            continue
+        fp = kernels.fingerprint(rows)
+        found = _pair_arrays(rows, min_quota_delta=min_quota_delta, key=fp)[0]
+        members.append((key, fp, found, sum(found.quota.tolist())))
+    totals = [member[3] for member in members]
+    index = next(position for position, member in enumerate(members) if member[0] == target)
+    threshold = (sum(totals) - totals[index]) * 0.5
+    if threshold <= 0:
+        return None
+    peers = [member for position, member in enumerate(members) if position != index]
+    pool_key = (min_quota_delta, tuple(member[1] for member in peers))
+    pool = _POOLS.get(pool_key)
+    if pool is None:
+        slopes = kernels.np.concatenate([member[2].slope for member in peers])
+        weights = kernels.np.concatenate([member[2].quota for member in peers])
+        order = kernels.np.argsort(slopes, kind="stable")
+        pool = _POOLS.put(pool_key, (slopes[order], kernels.np.cumsum(weights[order])), slopes.nbytes * 2)
+    ordered_slopes, cumulative = pool
+    position = int(kernels.np.searchsorted(cumulative, threshold, side="left"))
+    if position < cumulative.size:
+        return float(ordered_slopes[position])
+    own = members[index][2].slope
+    return float(max(ordered_slopes[-1], own.max() if own.size else ordered_slopes[-1]))
+
+
+def _closed(reset_key: str, now: datetime) -> bool:
+    try:
+        moment = datetime.fromisoformat(reset_key.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment <= now
+
+
+def _peers(members, key: SeriesKey, now: datetime):
+    """The windows a window's reference comes from: those that had closed when it closed.
+
+    For the open window, every closed one. A closed window never gains a peer afterwards,
+    so its estimate is final once computed, which is what lets it be stored.
+    """
+    own_closed = _closed(key[4], now)
+    return [
+        (peer_key, rows) for peer_key, rows in members
+        if peer_key != key and _closed(peer_key[4], now) and (not own_closed or peer_key[4] < key[4])
+    ]
+
+
+def _estimate_in_series(
+    members, key: SeriesKey, rows, *, now: datetime, fingerprints: dict, store, version: str | None,
+    min_quota_delta: float, marginal_span: float,
+) -> RegressionEstimate | None:
+    peers = _peers(members, key, now)
+    peer_print = kernels.digest_of(fingerprints[peer_key] for peer_key, _ in peers)
+    if store is not None:
+        saved = store.get(key, version)
+        if saved is not None and saved[0] == fingerprints[key] and saved[1] == peer_print:
+            return saved[2]
+    # The target in its place among its peers, in the series' own order.
+    pool = [(member_key, member_rows) for member_key, member_rows in members
+            if member_key == key or any(member_key == peer_key for peer_key, _ in peers)]
+    reference = _reference_for(pool, key, min_quota_delta=min_quota_delta)
+    estimate = _estimate_window(key, rows, reference, min_quota_delta=min_quota_delta, marginal_span=marginal_span)
+    if store is not None and _closed(key[4], now):
+        store.put(key, version, fingerprints[key], peer_print, estimate)
+    return estimate
+
+
+def newest_estimate(
+    points: Iterable[Mapping[str, Any]], *, provider: str, account_id: str | None, window: str,
+    now: datetime | None = None,
+    min_quota_delta: float = MIN_QUOTA_DELTA_PERCENT, marginal_span: float = MARGINAL_QUOTA_SPAN_PERCENT,
+) -> RegressionEstimate | None:
+    """The newest estimate robust_estimates(points) would give for one series, computing only it.
+
+    The same choice as taking the latest of robust_estimates' answers for the series: the
+    windows are tried newest first, in that function's order, and the first with any
+    usable pair is the answer. Windows that cannot be the answer are never estimated.
+    """
+    now = now or datetime.now(timezone.utc)
+    groups = list(_ordered_groups(points))
+    candidates = [(key, rows) for key, rows in groups
+                  if key[0] == provider and key[1] == account_id and key[3] == window]
+    candidates.sort(key=lambda item: str(item[1][-1]["observed_at"]), reverse=True)
+    for key, ordered in candidates:
+        members = [(k, r) for k, r in groups if k[:4] == key[:4]]
+        fingerprints = {k: kernels.fingerprint(r) for k, r in members}
+        estimate = _estimate_in_series(members, key, ordered, now=now, fingerprints=fingerprints, store=None,
+                                       version=None, min_quota_delta=min_quota_delta, marginal_span=marginal_span)
+        if estimate is not None:
+            return estimate
+    return None
+
+
 def robust_estimates(
     points: Iterable[Mapping[str, Any]],
     *,
     min_quota_delta: float = MIN_QUOTA_DELTA_PERCENT,
     marginal_span: float = MARGINAL_QUOTA_SPAN_PERCENT,
+    now: datetime | None = None,
+    store: Any = None,
 ) -> list[RegressionEstimate]:
-    estimates: list[RegressionEstimate] = []
+    """Every window's estimate.
+
+    With a store, a closed window whose evidence and peers are unchanged is read back
+    rather than computed: only open windows, and windows whose readings changed, cost
+    anything. The store is keyed by estimator version, so changing the estimator
+    recomputes everything once.
+    """
+    now = now or datetime.now(timezone.utc)
+    version = None
+    if store is not None:
+        from .timeline import estimator_version
+
+        version = estimator_version()
     groups = list(_ordered_groups(points))
-    references = _peer_reference_rates(groups, min_quota_delta=min_quota_delta)
-    for (provider, account_id, plan, window, reset_key), ordered in groups:
-        reference = references[(provider, account_id, plan, window, reset_key)]
-        pairs = _valid_pairs(
-            ordered,
-            min_quota_delta=min_quota_delta,
-            reference_rate=reference,
-        )
-        if not pairs:
-            continue
-        slopes = [pair[4] for pair in pairs]
-        weights = [pair[2] for pair in pairs]
-        marginal, marginal_lower, marginal_upper, marginal_count, marginal_observed = (
-            _marginal_estimate(pairs, marginal_span=marginal_span)
-        )
-
-        unobserved_prefix, advanced, unmeasured = _unobserved_intervals(
-            ordered, min_value_per_quota_point=MIN_VALUE_PER_QUOTA_POINT,
-            reference_rate=reference,
-        )
-        intervals = independent_intervals(ordered, unobserved=unobserved_prefix)
-        lower, upper = bootstrap_band(intervals)
-        quota_values = [float(row["used_percent"]) for row in ordered]
-        cost_values = [float(row["cost_usd"]) for row in ordered]
-        estimates.append(
-            RegressionEstimate(
-                provider=provider,
-                window=window,
-                reset_key=reset_key,
-                estimate_usd=weighted_quantile(slopes, weights, 0.5),
-                # None when there are too few increments to resample. The confidence tier
-                # treats an absent band as "not shown to be settled", never as a narrow one.
-                lower_usd=lower if lower is not None else 0.0,
-                upper_usd=upper if upper is not None else 0.0,
-                observation_count=len(ordered),
-                slope_count=len(slopes),
-                quota_span_percent=max(quota_values) - min(quota_values),
-                api_value_span_usd=max(cost_values) - min(cost_values),
-                latest_observed_at=str(ordered[-1]["observed_at"]),
-                account_id=account_id,
-                marginal_usd=marginal,
-                marginal_lower_usd=marginal_lower,
-                marginal_upper_usd=marginal_upper,
-                marginal_slope_count=marginal_count,
-                marginal_span_percent=marginal_observed,
-                covered_quota_percent=advanced - unmeasured,
-                unobserved_quota_percent=unmeasured,
-                plan=plan,
-                interval_count=len(intervals) if lower is not None else 0,
-            )
-        )
-
+    by_series: dict[tuple, list] = {}
+    for key, rows in groups:
+        by_series.setdefault(key[:4], []).append((key, rows))
+    estimates: list[RegressionEstimate] = []
+    for members in by_series.values():
+        fingerprints = {key: kernels.fingerprint(rows) for key, rows in members}
+        for key, rows in members:
+            estimate = _estimate_in_series(members, key, rows, now=now, fingerprints=fingerprints, store=store,
+                                           version=version, min_quota_delta=min_quota_delta, marginal_span=marginal_span)
+            if estimate is not None:
+                estimates.append(estimate)
+    if store is not None:
+        store.flush()
     return sorted(estimates, key=lambda row: row.latest_observed_at, reverse=True)
 
 
@@ -767,7 +1075,13 @@ def _is_ceiling_glitch(used: list[float], drop_at: int) -> bool:
 def _reset_key(value: Any) -> str:
     if value is None:
         return "unknown"
-    raw = str(value)
+    return _reset_key_text(str(value))
+
+
+@lru_cache(maxsize=65536)
+def _reset_key_text(raw: str) -> str:
+    # Pure in its argument, and a history repeats the same few reset times thousands of
+    # times, so each is parsed once.
     try:
         timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:

@@ -160,7 +160,8 @@ def build_payload(
     return pseudonymise(payload)
 
 
-def value_report(db: sqlite3.Connection) -> dict[str, Any]:
+def value_report(db: sqlite3.Connection, *, points: list[dict[str, Any]] | None = None,
+                 measured: list | None = None) -> dict[str, Any]:
     """Every measurement the dashboard shows, and the only place they are derived.
 
     The command line renders this too, so a figure in the terminal and the same figure on
@@ -171,11 +172,14 @@ def value_report(db: sqlite3.Connection) -> dict[str, Any]:
     from .regression import robust_estimates
     from .server.confidence import LIKELY, classify
     from .ccusage import imported_at
-    from .store import regression_points, save_report
+    from .store import WindowEstimateStore, regression_points, save_report
     from .timeseries import window_history
 
-    points = [dict(row) for row in regression_points(db)]
-    estimates, _ratios = combined_estimates(points, robust_estimates(points))
+    if points is None:
+        points = [dict(row) for row in regression_points(db)]
+    if measured is None:
+        measured = robust_estimates(points, store=WindowEstimateStore(db))
+    estimates, _ratios = combined_estimates(points, measured)
     tiers = {
         (e.provider, e.window, e.account_id, e.plan, e.reset_key): classify(e, estimates).as_dict()
         for e in estimates
@@ -222,13 +226,15 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
     from .regression import robust_estimates
     from .products import open_estimates, product_estimates, product_label, product_series
     from .server.confidence import LIKELY, classify
-    from .store import model_mix, regression_points
+    from .store import WindowEstimateStore, model_mix, regression_points
     from .timeline import build_series
     from .timeseries import detect_regime_changes, rolling_values, window_history
     from .weights import observations_from_windows, solve
 
     points = [dict(row) for row in regression_points(db)]
-    estimates, ratios = combined_estimates(points, robust_estimates(points))
+    # Closed windows come back from the store; only open ones are estimated.
+    measured = robust_estimates(points, store=WindowEstimateStore(db))
+    estimates, ratios = combined_estimates(points, measured)
     plans = account_plans(db)
     mix = [dict(row) for row in model_mix(db)]
 
@@ -288,12 +294,13 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
         # products carries one pooled estimate per product and window. The page shows it as
         # the headline figure, because a product held on two accounts is one entitlement
         # measured twice and the pooled number uses both.
-        "history": value_report(db),
+        "history": value_report(db, points=points, measured=measured),
         # replay=False: the replay curve re-runs the whole estimator once per sampled
         # observation, so its cost grows with the square of the history and reached four
         # minutes on one month. The page reads history and health only, so paying that on
         # every push bought nothing. `subbench chart` still computes it on demand.
-        "series": build_series(points, replay=False),
+        # The estimates computed above, not a second and third estimator pass.
+        "series": build_series(points, replay=False, estimates=measured),
         "models": {"models": models},
         "weights": {"providers": [solve(observations, provider=name).as_dict() for name in providers]},
     }

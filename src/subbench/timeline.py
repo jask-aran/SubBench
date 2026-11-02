@@ -89,7 +89,9 @@ TARGET_WINDOWS = ("weekly", "five_hour")
 
 # A policy marker is versioned with the estimator so replay data cannot make a policy
 # change look like a provider change when the numeric thresholds stay the same.
-ESTIMATOR_POLICY = "peer-reset-reference-v2-unmetered-guard-bootstrap-band"
+# v3: a window's reference rate comes only from windows that closed before it did, so a
+# closed window's estimate is final and can be stored rather than recomputed every cycle.
+ESTIMATOR_POLICY = "closed-peer-reference-v3-unmetered-guard-bootstrap-band"
 
 # Replaying every observation is quadratic in pairs and cubic overall. The shape of a
 # convergence curve survives sampling; its cost does not.
@@ -165,6 +167,7 @@ def settled_timeline(
     *,
     target_window: str = "weekly",
     now: datetime | None = None,
+    estimates: list | None = None,
 ) -> list[TimelinePoint]:
     """One point per reset window, expressed in `target_window` terms.
 
@@ -184,7 +187,7 @@ def settled_timeline(
     moment = now or datetime.now(timezone.utc)
 
     timeline: list[TimelinePoint] = []
-    for estimate in robust_estimates(rows):
+    for estimate in (robust_estimates(rows) if estimates is None else estimates):
         if estimate.estimate_usd <= 0 or estimate.covered_quota_percent < MIN_SETTLED_QUOTA_PERCENT:
             continue
         scale = 1.0
@@ -247,14 +250,14 @@ def replay_series(
 
         for index in indices:
             prefix = ordered[: index + 1]
-            estimates = [
-                e for e in robust_estimates(prefix)
-                if e.provider == provider and e.account_id == account_id and e.window == window
-            ]
-            if not estimates:
+            # The newest window is the one still being measured. Only it is estimated:
+            # the same answer as the latest of robust_estimates(prefix) for this series.
+            # "What we knew then": windows that had closed by this reading are the peers.
+            moment = regression._moment(prefix[-1]["observed_at"])
+            estimate = regression.newest_estimate(prefix, provider=provider, account_id=account_id, window=window,
+                                                  now=moment)
+            if estimate is None:
                 continue
-            # The newest window is the one still being measured.
-            estimate = max(estimates, key=lambda e: e.latest_observed_at)
             if estimate.estimate_usd <= 0 or estimate.covered_quota_percent < MIN_REPLAY_QUOTA_PERCENT:
                 continue
             replayed.append(TimelinePoint(
@@ -277,7 +280,8 @@ def replay_series(
 
 
 def build_series(
-    points: Iterable[Mapping[str, Any]], *, replay: bool = True, now: datetime | None = None
+    points: Iterable[Mapping[str, Any]], *, replay: bool = True, now: datetime | None = None,
+    estimates: list | None = None,
 ) -> dict[str, Any]:
     """Both window lengths in one flat list, distinguished by `window`.
 
@@ -285,9 +289,11 @@ def build_series(
     change on either side of the push.
     """
     rows = list(points)
+    # One estimator pass for both target windows, or none when the caller has one already.
+    estimates = robust_estimates(rows) if estimates is None else estimates
     settled: list[dict[str, Any]] = []
     for target in TARGET_WINDOWS:
-        settled.extend(row.as_dict() for row in settled_timeline(rows, target_window=target, now=now))
+        settled.extend(row.as_dict() for row in settled_timeline(rows, target_window=target, now=now, estimates=estimates))
     payload: dict[str, Any] = {
         "estimator_version": estimator_version(),
         "settled": settled,
