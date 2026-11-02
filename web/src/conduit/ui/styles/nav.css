@@ -3,6 +3,7 @@
    keyboard focus, a press, a held focus, a selection) is the wash and white; current is white at the current
    weight with a heavier stroke and no fill, and so is the folder holding it (within); open beside is white at
    the resting weight. The sizes are the density's tokens. */
+@font-face { font-family: "Conduit Wordmark"; src: url("../fonts/druk-wide-web-super.woff2") format("woff2"); font-style: normal; font-weight: 400; font-display: swap; }
 :root, [data-density], .ui-nav-pane {
   /* The pane open and folded to its rail, in the sidebar's size. */
   --nav-width: calc(18.125 * var(--u-space)); --nav-rail-width: calc(3.25 * var(--u-space));

@@ -14,8 +14,9 @@ Changes from upstream, kept as small as possible so a re-copy is a plain diff:
 - `ui/haptics.ts`: no Capacitor plugin; a browser's `navigator.vibrate` stands in for it.
 - `ui/styles/foundations.css`: the Inconsolata import and the Meslo terminal font are
   removed (SubBench draws no terminal).
-- `ui/styles/nav.css`: the Conduit wordmark font face is removed; SubBench sets
-  `--font-wordmark` to Geist in `web/src/site.css`.
+- `ui/styles/nav.css`: the wordmark's font face points at `ui/fonts/druk-wide-web-super.woff2`
+  (Druk Wide Super, copied from `conduit-web/src/client/assets/fonts/`). Druk is a commercial
+  typeface: this copy is only as licensed as Conduit's.
 
 Do not style these pieces from outside. Per Conduit's DESIGN.md, a piece that needs more is
 changed here, in the piece, and the site's own layout lives in `web/src/site.css`.

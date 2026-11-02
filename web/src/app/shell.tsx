@@ -1,7 +1,7 @@
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
 import { render } from "solid-js/web";
-import { HouseIcon, WalletIcon, ChartScatterIcon, MenuIcon, ExternalLinkIcon, XIcon } from "lucide-solid";
-import { NavPane, NavBrand, NavGroup, NavRow } from "../conduit/ui/nav";
+import { HouseIcon, WalletIcon, ChartScatterIcon, MenuIcon, ExternalLinkIcon, XIcon, PanelLeftCloseIcon, PanelLeftOpenIcon } from "lucide-solid";
+import { NavPane, NavBrand, NavGroup, NavRow, NavRail, NavRailSection, RailButton } from "../conduit/ui/nav";
 import { Header, HeaderCrumb, HeaderButton, HeaderNote } from "../conduit/ui/header";
 import { health, healthState, refreshHealth, poll } from "./data";
 // @ts-ignore
@@ -28,17 +28,28 @@ export function Site(props: { page: PageKey; title: string; place?: string; acti
   const narrowQuery = matchMedia("(max-width: 760px)");
   const [narrow, setNarrow] = createSignal(narrowQuery.matches);
   narrowQuery.addEventListener("change", () => { setNarrow(narrowQuery.matches); setDrawer("shut"); });
+  // Folded to its rail on a desktop, remembered across pages.
+  const [folded, setFolded] = createSignal((() => { try { return localStorage.getItem("sb-nav") === "folded"; } catch { return false; } })());
+  const fold = (next: boolean) => { setFolded(next); try { localStorage.setItem("sb-nav", next ? "folded" : "open"); } catch { /* not remembered */ } };
   onMount(() => poll(refreshHealth));
   const status = () => healthState();
   return <div class="sb-frame" data-drawer={drawer()}>
-    <NavPane drawer={narrow() ? drawer() : undefined} head={<><NavBrand name="SubBench" onClick={go("/")} />
-      <Show when={narrow()}><HeaderButton label="Close menu" icon={<XIcon />} onClick={() => setDrawer("shut")} /></Show></>}
+    <NavPane drawer={narrow() ? drawer() : undefined} collapsed={!narrow() && folded()} folded={!narrow() && folded()}
+      head={<><NavBrand name="SubBench" onClick={go("/")} />
+      <Show when={narrow()} fallback={<HeaderButton class="sb-nav-toggle" label={folded() ? "Expand sidebar" : "Collapse sidebar"}
+        icon={folded() ? <PanelLeftOpenIcon /> : <PanelLeftCloseIcon />} onClick={() => fold(!folded())} />}>
+        <HeaderButton label="Close menu" icon={<XIcon />} onClick={() => setDrawer("shut")} /></Show></>}
       foot={<>
         <div class="sb-nav-status" data-state={status().state}>
           <span class="sb-dot" />
           <span>{status().state === "live" ? `Updated ${ago(health()?.last_report_at)}` : status().state === "demo" ? "Demo data" : status().state === "stale" ? "Stale" : "Offline"}</span>
         </div>
       </>}>
+      <NavRail label="Pages">
+        <NavRailSection>
+          <For each={PAGES}>{(page) => <RailButton aria-label={page.label} title={page.label} current={page.key === props.page} onClick={go(page.href)}>{page.icon()}</RailButton>}</For>
+        </NavRailSection>
+      </NavRail>
       <NavGroup label="Pages">
         <For each={PAGES}>{(page) =>
           <NavRow icon={page.icon()} current={page.key === props.page} onClick={go(page.href)}>{page.label}</NavRow>}</For>
