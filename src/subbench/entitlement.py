@@ -27,9 +27,11 @@ class EntitlementWindow:
 
 
 # A provider that does not name the plan beside its meter leaves SubBench unable to tell
-# one product from another. Claude's usage endpoint is such a provider: it returns the
-# meters and nothing about the subscription behind them. The plan may then be declared,
-# per provider, as SUBBENCH_PLAN_CLAUDE=pro.
+# one product from another. Claude's usage endpoint returns meters only. The usage command
+# asks the profile endpoint for the current tier and copies it onto the payload. The login
+# file is a fallback: Claude Code rewrites it only when it next fetches the profile, which
+# can be days after an upgrade. A declaration, SUBBENCH_PLAN_CLAUDE, fills in only when
+# neither is present.
 #
 # A declared plan is asserted by the operator, not measured, so it is only ever a fallback:
 # a plan the provider does report always wins, and an upgrade the provider reports is
@@ -136,10 +138,20 @@ def _normalise_codex(payload: dict[str, Any], *, account_id: str | None = None) 
     return rows
 
 
+def _claude_plan(payload: dict[str, Any]) -> str | None:
+    # default_claude_max_5x is the provider's tier name. The product key is the part after
+    # that prefix, matching the max_20x form Codex already reports.
+    tier = _first_text(payload, ("organizationRateLimitTier", "rateLimitTier", "rate_limit_tier"))
+    if tier:
+        prefix = "default_claude_"
+        return tier[len(prefix):] if tier.startswith(prefix) else tier
+    return _first_text(payload, ("subscription_type", "subscriptionType", "plan", "tier"))
+
+
 def _normalise_claude(payload: dict[str, Any]) -> list[EntitlementWindow]:
     account_id = _first_text(payload, ("account_uuid", "accountUuid", "account_id", "accountId",
                                       "organization_uuid", "organizationUuid"))
-    plan = _first_text(payload, ("subscription_type", "subscriptionType", "plan", "tier"))
+    plan = _claude_plan(payload)
     aliases = {
         "five_hour": "five_hour",
         "fiveHour": "five_hour",

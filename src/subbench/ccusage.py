@@ -141,8 +141,10 @@ def _normalise_row(
     if not any(tokens.values()):
         return None
 
-    # Codex cached input is included in total input. Claude cache read/write are
-    # reported as separate API token classes, so cached_input_tokens is normally zero.
+    # ccusage's Codex JSON has already split cache out of input (cacheReadTokens)
+    # and left reasoning inside output, so cached_input_tokens is normally zero here.
+    # Codex rollouts are the other shape: input includes cached tokens. This guard is
+    # for a payload that still uses that inclusive shape with cachedInputTokens.
     if provider == "codex" and tokens["cached_input_tokens"] > tokens["input_tokens"]:
         raise CcusageSchemaError(
             f"cached input exceeds total input at {source_path}; refusing to create an invalid valuation row"

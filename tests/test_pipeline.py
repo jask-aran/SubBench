@@ -162,3 +162,27 @@ def test_dropped_periods_flags_a_shrinking_ccusage_report(tmp_path: Path) -> Non
     assert dropped_periods(db, provider="codex", account_id="acct-A", rows=grown) == set()
     # Another account's history must not be compared against this one.
     assert dropped_periods(db, provider="codex", account_id="acct-B", rows=short) == set()
+
+
+def test_a_plan_change_on_the_same_account_is_named(tmp_path: Path) -> None:
+    from subbench.entitlement import EntitlementWindow
+    from subbench.store import plan_moves, save_entitlements
+
+    db = connect(tmp_path / "subbench.sqlite3")
+    save_entitlements(db, [EntitlementWindow(
+        "claude", "weekly", 35.0, "2026-10-26T19:00:00+00:00", 10080, "test", plan="pro",
+    )], "2026-10-20T11:24:00+00:00")
+    same = EntitlementWindow(
+        "claude", "weekly", 36.0, "2026-10-26T19:00:00+00:00", 10080, "test", plan="pro",
+    )
+    moved = EntitlementWindow(
+        "claude", "weekly", 2.0, "2026-10-26T19:00:00+00:00", 10080, "test", plan="max_5x",
+    )
+
+    assert plan_moves(db, [same]) == []
+    assert plan_moves(db, [moved]) == ["plan changed pro -> max_5x (weekly)"]
+    # Absence is not a move. A provider that has not named a plan must not split the series.
+    unnamed = EntitlementWindow(
+        "claude", "weekly", 2.0, "2026-10-26T19:00:00+00:00", 10080, "test", plan=None,
+    )
+    assert plan_moves(db, [unnamed]) == []

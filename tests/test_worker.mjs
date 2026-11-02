@@ -20,7 +20,7 @@ class FakeD1 {
   }
 
   prepare(sql) {
-    this.healthSql = sql.includes("COUNT(*) FROM entitlement_snapshots") ? sql : this.healthSql;
+    this.healthSql = sql.includes("entitlement_snapshots") ? sql : this.healthSql;
     return {
       bind: (...params) => {
         const statement = { sql, params };
@@ -39,7 +39,7 @@ class FakeD1 {
       const payload = this.reports[params[0]];
       return payload ? { payload: JSON.stringify(payload), generated_at: "2026-08-01T00:00:00Z" } : null;
     }
-    if (sql.includes("COUNT(*) FROM entitlement_snapshots")) {
+    if (sql.includes("MAX(rowid) FROM entitlement_snapshots")) {
       return {
         entitlement_rows: 1,
         agents: 1,
@@ -126,7 +126,12 @@ test("health does not count raw usage rows and the footer does not show them", a
   assert.equal(response.status, 200);
   assert.equal("usage_rows" in body, false);
   assert.equal(db.healthSql.includes("COUNT(*) FROM usage_rows"), false);
+  assert.equal(db.healthSql.includes("COUNT(*) FROM entitlement_snapshots"), false);
+  assert.equal(db.healthSql.includes("MAX(rowid) FROM entitlement_snapshots"), true);
   assert.equal(page.includes("usage_rows"), false);
+  assert.equal(page.includes("document.hidden"), true);
+  assert.equal(page.includes("setInterval(refresh, 60000)"), false);
+  assert.equal(page.includes("5 * 60 * 1000"), true);
 });
 
 test("the plan reported beside a meter is stored, and its absence is not guessed", async () => {

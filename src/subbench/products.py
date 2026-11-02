@@ -24,7 +24,7 @@ from typing import Any, Iterable
 
 from .crosssolve import WINDOW_MINUTES
 from .regression import weighted_quantile
-from .server.confidence import CONFIRMED, LIKELY
+from .server.confidence import CONFIRMED, LIKELY, PROVISIONAL
 
 # Display names for the provider half of a product. The plan half is never listed here;
 # it arrives from the provider and is shown as reported.
@@ -260,7 +260,8 @@ def open_estimates(
     """
     grouped: dict[tuple[str, str | None, str], list[dict[str, Any]]] = {}
     rows = direct_windows(
-        estimates, now=now, within_days=None, tiers=(CONFIRMED, LIKELY), finished=False,
+        estimates, now=now, within_days=None,
+        tiers=(CONFIRMED, LIKELY, PROVISIONAL), finished=False,
     )
     # One open window per account, the one observed most recently. An account has a single
     # current cycle, but a boundary that moves -- a reset applied, or a gap in use -- leaves

@@ -687,8 +687,19 @@ async function refresh() {
   }
 }
 
-refresh();
-setInterval(refresh, 60000);
+// A push lands every half hour. Polling faster, or while the tab is hidden, only spends
+// D1 reads on a page that has not changed.
+const REFRESH_MS = 5 * 60 * 1000;
+
+async function tick() {
+  if (!document.hidden) await refresh();
+}
+
+tick();
+setInterval(tick, REFRESH_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refresh();
+});
 </script>
 </body>
 </html>

@@ -79,6 +79,10 @@ export SUBBENCH_CLAUDE_USAGE_COMMAND="python3 $PWD/packaging/claude-usage.py"
 subbench watch --provider claude --once
 ```
 
+The same command asks Anthropic for the current plan. ccusage does not report one, and
+the login file can lag an upgrade by days. A change of plan on the same account is
+recorded on the next reading, and that reading starts a new series.
+
 A `401` response means that the stored token has expired. Open Claude Code to refresh it.
 
 If you do not set this variable, SubBench collects Claude cost but no Claude quota. It can
@@ -341,8 +345,8 @@ asset binding.
 | `/api/health` | GET | The quota row count, last ingest time and schema version. |
 | `/` | GET | The static page. |
 
-Each report route returns the newest report of that kind. The page reads all of the routes
-every 60 seconds.
+Each report route returns the newest report of that kind. The page reads history and
+health every 5 minutes while the tab is visible.
 
 The page shows four things:
 

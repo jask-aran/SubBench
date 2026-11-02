@@ -400,6 +400,58 @@ def test_no_peer_uses_only_the_absolute_floor():
     assert estimates[0].estimate_usd == pytest.approx(51.25)
 
 
+def test_a_refill_without_a_new_end_date_starts_a_window():
+    """Claude refills the weekly meter without moving resets_at. ChatGPT moves it."""
+    end = "2026-07-30T19:00:00+00:00"
+    spent = [
+        point(step * 10, float(step * 10), f"2026-07-27T{step:02d}:00:00Z", end)
+        for step in range(11)
+    ]
+    # The 100% blip after the refill is the known glitch, not a third window.
+    refilled = [
+        point(0, 100.0, "2026-07-27T12:00:00Z", end),
+        point(100, 100.3, "2026-07-27T12:05:00Z", end),
+        point(4, 104.0, "2026-07-27T12:20:00Z", end),
+        point(40, 140.0, "2026-07-27T15:00:00Z", end),
+        point(80, 180.0, "2026-07-27T18:00:00Z", end),
+    ]
+    estimates = robust_estimates(spent + refilled)
+    assert len(estimates) == 2
+    assert {estimate.reset_key for estimate in estimates} == {end, "2026-07-27T12:00:00+00:00"}
+    assert all(80.0 < estimate.estimate_usd < 120.0 for estimate in estimates)
+    assert all(estimate.coverage_percent >= 70.0 for estimate in estimates)
+
+
+def test_a_brief_ceiling_glitch_does_not_discard_the_window():
+    """Claude has reported 100% for minutes after a weekly reset, then the real meter."""
+    rows = [point(0, 0.0, "2026-07-27T00:00:00Z")]
+    rows.append(point(100, 0.4, "2026-07-27T01:00:00Z"))  # glitch; too cheap to be real spend
+    rows.append(point(3, 3.0, "2026-07-27T01:10:00Z"))
+    for step in range(1, 16):
+        used = 3 + step * 5
+        rows.append(point(used, float(used), f"2026-07-27T{step + 1:02d}:00:00Z"))
+    estimates = robust_estimates(rows)
+    assert len(estimates) == 1
+    assert 80.0 < estimates[0].estimate_usd < 120.0
+    assert estimates[0].interval_count >= 8
+    assert estimates[0].coverage_percent >= 70.0
+
+
+def test_a_ceiling_blip_does_not_discard_the_week_that_later_fills():
+    """A 100% blip and a later real 100% are not one stretch of extra credit."""
+    rows = [
+        point(0, 0.0, "2026-07-27T00:00:00Z"),
+        point(100, 0.4, "2026-07-27T01:00:00Z"),
+        point(3, 3.0, "2026-07-27T01:10:00Z"),
+    ]
+    for step in range(1, 20):
+        used = min(3 + step * 5, 100)
+        rows.append(point(used, float(used), f"2026-07-27T{step + 1:02d}:00:00Z"))
+    estimate = robust_estimates(rows)[0]
+    assert 80.0 < estimate.estimate_usd < 120.0
+    assert estimate.coverage_percent >= 70.0
+
+
 def test_spend_at_the_ceiling_is_excluded():
     """A limit at 100% cannot buy quota, so dollars spent there are not part of its rate."""
     clean = [

@@ -103,6 +103,14 @@ class EstimateProgress:
 # timestamps that fall within a few minutes of each other cannot merge two real windows.
 RESET_CLUSTER_MINUTES = 5.0
 
+# Claude refills a weekly meter without moving resets_at. ChatGPT moves it, so the same
+# event already starts a new series there. A drop this large, landing near empty, is that
+# refill. The 100% blip after a reset is not one: the reading before the blip is already
+# the new meter's level, or there is no reading before it.
+METER_RESET_DROP = 50.0
+METER_RESET_FLOOR = 10.0
+METER_RESET_CEILING = 95.0
+
 
 def _cluster_resets(reset_keys: Iterable[str]) -> dict[str, str]:
     """Map each reset key to the earliest key within the clustering tolerance."""
@@ -148,7 +156,12 @@ def _group_points(points: Iterable[Mapping[str, Any]]) -> dict[SeriesKey, list[d
     groups: dict[SeriesKey, list[dict[str, Any]]] = {}
     for series, reset_key, point in prepared:
         groups.setdefault((*series, clusters[series][reset_key]), []).append(point)
-    return groups
+
+    split: dict[SeriesKey, list[dict[str, Any]]] = {}
+    for key, rows in groups.items():
+        for reset_key, segment in _unlabelled_resets(key[4], rows):
+            split[(*key[:4], reset_key)] = segment
+    return split
 
 
 # Providers report quota as a whole integer percent, so a pair one point apart carries
@@ -287,6 +300,12 @@ def _unobserved_intervals(
     ]
 
     flagged = [False] * max(len(rows) - 1, 0)
+    # Readings below the ceiling up to each index. A pair can sit at 100% on both ends
+    # and still have left it in between: the post-reset blip, then a real week that
+    # fills again. Extra credit is only spend that never left the ceiling.
+    ceiling_below = [0]
+    for value in used:
+        ceiling_below.append(ceiling_below[-1] + (value < QUOTA_CEILING_PERCENT))
     for start in range(len(rows)):
         left_used = used[start]
         left_cost = cost[start]
@@ -315,10 +334,12 @@ def _unobserved_intervals(
                 and quota_delta <= 0
                 and value_delta >= UNMETERED_MIN_VALUE_USD
                 and left_used >= QUOTA_CEILING_PERCENT
+                and used[end] >= QUOTA_CEILING_PERCENT
+                and ceiling_below[end + 1] == ceiling_below[start]
             ):
-                # The limit is spent and work continues on extra credit. A pair spanning
-                # this divides real dollars by quota that could not move, so it reads as a
-                # far richer subscription than the one being measured.
+                # The limit is spent and work continues on extra credit. The whole span
+                # has to stay at the ceiling. A 100% blip and a later real 100% have
+                # both ends there, and treating that pair as extra credit discards the week.
                 unobserved = True
             if unobserved:
                 flagged[start:end] = [True] * (end - start)
@@ -330,8 +351,16 @@ def _unobserved_intervals(
         quota_delta = used[index + 1] - used[index]
         if quota_delta > 0:
             advanced += quota_delta
-        if flagged[index] and quota_delta > 0:
-            unmeasured += quota_delta
+            if flagged[index]:
+                unmeasured += quota_delta
+        elif quota_delta < 0:
+            # A spike that reversed (100% for a few minutes, then the real meter) was
+            # counted as advance on the way up. Take it back, unmeasured first.
+            back = -quota_delta
+            take = min(unmeasured, back)
+            unmeasured -= take
+            advanced -= take
+            advanced = max(0.0, advanced - (back - take))
         counts.append(counts[-1] + (1 if flagged[index] else 0))
     return counts, advanced, unmeasured
 
@@ -362,6 +391,10 @@ def independent_intervals(
             start = index
             continue
         quota_delta = float(rows[index]["used_percent"]) - float(rows[start]["used_percent"])
+        if quota_delta < 0:
+            # Meter reversed after a spike. Do not keep 100% as the baseline for later blocks.
+            start = index
+            continue
         value_delta = float(rows[index]["cost_usd"]) - float(rows[start]["cost_usd"])
         if quota_delta >= min_quota_delta and value_delta > 0:
             intervals.append((quota_delta, value_delta))
@@ -688,6 +721,47 @@ def _quantile(values: list[float], probability: float) -> float:
     upper = min(lower + 1, len(ordered) - 1)
     weight = position - lower
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _unlabelled_resets(
+    reset_key: str, rows: list[dict[str, Any]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Split one reset-key series where the meter emptied without a new end date."""
+    ordered = sorted(rows, key=lambda row: str(row["observed_at"]))
+    used = [float(row["used_percent"]) for row in ordered]
+    cuts = [
+        index for index in range(1, len(ordered))
+        if used[index - 1] - used[index] >= METER_RESET_DROP
+        and used[index] <= METER_RESET_FLOOR
+        and not _is_ceiling_glitch(used, index)
+    ]
+    if not cuts:
+        return [(reset_key, ordered)]
+
+    segments: list[tuple[str, list[dict[str, Any]]]] = []
+    start = 0
+    taken = {reset_key}
+    for cut in cuts:
+        # This cycle ended when the meter emptied. The reported end date still belongs
+        # to the cycle that follows, which is the one the provider is counting.
+        end_key = _reset_key(ordered[cut]["observed_at"])
+        if end_key in taken:
+            end_key = f"{end_key}~{cut}"
+        taken.add(end_key)
+        segments.append((end_key, ordered[start:cut]))
+        start = cut
+    segments.append((reset_key, ordered[start:]))
+    return segments
+
+
+def _is_ceiling_glitch(used: list[float], drop_at: int) -> bool:
+    """A 100% reading that collapses back to a meter that was already near empty."""
+    start = drop_at - 1
+    while start > 0 and used[start - 1] >= METER_RESET_CEILING:
+        start -= 1
+    if used[start] < METER_RESET_CEILING:
+        return False
+    return start == 0 or used[start - 1] <= METER_RESET_FLOOR + 15.0
 
 
 def _reset_key(value: Any) -> str:

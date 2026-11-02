@@ -13,7 +13,7 @@ from .ccusage import CcusageSchemaError, normalise_payload
 from .entitlement import collect_entitlements
 from .incremental import AuthFileDetector, LogChangeDetector
 from .push import build_reports, push_all
-from .store import dropped_periods, save_entitlements, save_import, upsert_account
+from .store import dropped_periods, plan_moves, save_entitlements, save_import, upsert_account
 
 
 @dataclass(frozen=True)
@@ -120,6 +120,7 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
     try:
         entitlements = collect_entitlements(target.provider)
         observed_at = datetime.now(timezone.utc).isoformat()
+        messages.extend(plan_moves(db, entitlements))
         count = save_entitlements(db, entitlements, observed_at)
         messages.append(f"entitlement {count} window(s)")
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:

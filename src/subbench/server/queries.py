@@ -75,7 +75,7 @@ WITH windows AS (
 )
 SELECT n.provider, n.account_id, n.resets_at, n.window, u.model,
        SUM(u.input_tokens + u.output_tokens + u.cache_read_tokens
-           + u.cache_write_tokens + u.reasoning_output_tokens) AS total_tokens
+           + u.cache_write_tokens) AS total_tokens
 FROM newest n JOIN usage_rows u
   ON u.agent_id = n.agent_id AND u.provider = n.provider
  AND u.account_key = n.account_key AND u.last_seen_at = n.last_seen_at

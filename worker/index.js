@@ -252,8 +252,11 @@ async function report(env, kind) {
 }
 
 async function health(env) {
+  // COUNT(*) would read every snapshot, and this route is polled. Snapshots are never
+  // deleted, so the highest rowid is the count and the lookup reads one row. A delete
+  // would make the label drift high; keep a counter then.
   const row = await env.DB.prepare(`
-    SELECT (SELECT COUNT(*) FROM entitlement_snapshots) AS entitlement_rows,
+    SELECT COALESCE((SELECT MAX(rowid) FROM entitlement_snapshots), 0) AS entitlement_rows,
            (SELECT COUNT(*) FROM agents) AS agents,
            (SELECT MAX(last_seen) FROM agents) AS last_ingest_at,
            (SELECT MAX(generated_at) FROM reports) AS last_report_at,

@@ -43,6 +43,7 @@ def test_product_label_without_a_plan_names_the_provider_only():
 
 def test_product_label_does_not_repeat_a_provider_named_plan():
     assert product_label("claude", "claude_pro") == "Claude Pro"
+    assert product_label("claude", "max_5x") == "Claude Max 5X"
 
 
 def test_pooling_combines_accounts_that_hold_the_same_plan():
@@ -230,11 +231,17 @@ def test_a_finished_window_is_never_current():
     assert open_estimates([_window()], now=NOW) == []
 
 
-def test_a_contaminated_window_is_never_current():
+def test_an_open_week_is_shown_while_thin():
+    """A week at 5% is provisional; hiding it makes an active cycle look missing."""
     from subbench.products import open_estimates
 
-    rows = [_window(reset_key=(NOW + timedelta(days=2)).isoformat(), tier="provisional")]
-    assert open_estimates(rows, now=NOW) == []
+    rows = [_window(
+        reset_key=(NOW + timedelta(days=6)).isoformat(), tier="provisional",
+        covered_quota_percent=5.0, estimate_usd=90.0,
+    )]
+    found = open_estimates(rows, now=NOW)
+    assert len(found) == 1
+    assert found[0].covered_quota_percent == 5.0
 
 
 def test_five_hour_windows_are_not_projected_while_open():

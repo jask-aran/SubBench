@@ -65,6 +65,11 @@ VERSIONED_CONSTANTS: tuple[tuple[Any, str], ...] = (
     (regression, "QUOTA_CEILING_PERCENT"),
     (regression, "MARGINAL_QUOTA_SPAN_PERCENT"),
     (regression, "RESET_CLUSTER_MINUTES"),
+    # Claude can refill a meter without moving resets_at. These decide when that is a new
+    # window rather than the post-reset 100% blip.
+    (regression, "METER_RESET_DROP"),
+    (regression, "METER_RESET_FLOOR"),
+    (regression, "METER_RESET_CEILING"),
     (regression, "MAX_COST_AGE_MINUTES"),
     # The weekly series is partly built from converted short windows, so the threshold
     # that decides when a conversion is trustworthy moves the plotted value too.

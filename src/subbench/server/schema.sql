@@ -66,6 +66,10 @@ CREATE INDEX IF NOT EXISTS usage_by_import
     ON usage_rows(agent_id, import_key);
 CREATE INDEX IF NOT EXISTS entitlement_by_series
     ON entitlement_snapshots(agent_id, provider, account_key, window, observed_at);
+-- Health counts rejections on every poll. Without this, that count scans the whole log.
+-- The partial predicate keeps successful ingests from writing the index.
+CREATE INDEX IF NOT EXISTS ingest_log_rejected
+    ON ingest_log(status) WHERE status >= 400;
 
 -- Reports are computed by the agent and stored verbatim. The Worker serves them; it
 -- never derives anything, because a second estimator implementation would drift from the

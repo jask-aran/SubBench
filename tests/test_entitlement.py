@@ -1,3 +1,5 @@
+import json
+
 from subbench.entitlement import _normalise_claude, _normalise_codex
 
 
@@ -39,6 +41,50 @@ def test_normalise_claude_fractional_utilisation():
         "seven_day": {"utilization": 0.34, "resets_at": "2026-08-01T10:00:00Z"},
     })
     assert [(row.window, row.used_percent) for row in rows] == [("five_hour", 12.0), ("weekly", 34.0)]
+
+
+def test_claude_plan_is_the_rate_limit_tier_not_the_subscription_family():
+    rows = _normalise_claude({
+        "five_hour": {"utilization": 0.12, "resets_at": "2026-07-27T10:00:00Z"},
+        "subscriptionType": "max",
+        "rateLimitTier": "default_claude_max_5x",
+    })
+    assert rows[0].plan == "max_5x"
+
+
+def test_organization_tier_wins_when_the_login_tier_lags():
+    rows = _normalise_claude({
+        "five_hour": {"utilization": 0.12, "resets_at": "2026-07-27T10:00:00Z"},
+        "rateLimitTier": "default_claude_max_5x",
+        "organizationRateLimitTier": "default_claude_max_20x",
+    })
+    assert rows[0].plan == "max_20x"
+
+
+def test_a_claude_tier_beats_a_stale_declaration(monkeypatch):
+    from subbench import entitlement as module
+
+    monkeypatch.setattr(module, "collect_claude", lambda: module._normalise_claude({
+        "five_hour": {"utilization": 0.12, "resets_at": "2026-07-27T10:00:00Z"},
+        "rateLimitTier": "default_claude_max_5x",
+    }))
+    monkeypatch.setenv("SUBBENCH_PLAN_CLAUDE", "pro")
+    assert module.collect_entitlements("claude")[0].plan == "max_5x"
+
+
+def test_a_live_profile_tier_overrides_the_login_file():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "claude_usage", Path(__file__).resolve().parents[1] / "packaging" / "claude-usage.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.profile_tier({"organization": {"rate_limit_tier": "default_claude_max_5x"}}) == "default_claude_max_5x"
+    body = module.with_plan('{"five_hour": {"utilization": 0.1}}', live_tier="default_claude_max_20x")
+    assert json.loads(body)["organizationRateLimitTier"] == "default_claude_max_20x"
 
 
 def test_a_declared_plan_fills_in_for_a_provider_that_reports_none(monkeypatch):

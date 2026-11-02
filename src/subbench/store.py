@@ -342,6 +342,33 @@ def save_import(
     return import_id, len(row_list), True
 
 
+def plan_moves(db: sqlite3.Connection, rows: Iterable[EntitlementWindow]) -> list[str]:
+    """Name a plan change on the same account. Call before the new readings are stored.
+
+    The series key already splits on plan, so the readings are not mixed. This is the
+    notice that the split happened. A provider that has not named a plan yet cannot
+    be a change: absence is not a move.
+    """
+    messages: list[str] = []
+    seen: set[tuple[str, str | None, str]] = set()
+    for row in rows:
+        if not row.plan:
+            continue
+        key = (row.provider, row.account_id, row.window)
+        if key in seen:
+            continue
+        seen.add(key)
+        previous = db.execute(
+            """SELECT plan FROM entitlement_snapshots
+               WHERE provider = ? AND account_id IS ? AND window = ? AND plan IS NOT NULL
+               ORDER BY observed_at DESC LIMIT 1""",
+            (row.provider, row.account_id, row.window),
+        ).fetchone()
+        if previous and previous["plan"] != row.plan:
+            messages.append(f"plan changed {previous['plan']} -> {row.plan} ({row.window})")
+    return messages
+
+
 def save_entitlements(db: sqlite3.Connection, rows: Iterable[EntitlementWindow], observed_at: str) -> int:
     values = list(rows)
     with db:
@@ -571,8 +598,11 @@ def model_mix(
         SELECT l.provider, l.account_id, l.window, l.resets_at, u.model,
                -- Per-model cost is not available: ccusage reports cost on the aggregate
                -- row and leaves the model breakdowns null, so only tokens are recorded.
+               -- Reasoning is a subset of output in both providers' ccusage JSON, so it
+               -- is stored but not added. cache_read is Codex's split cache, not a subset
+               -- of input in that JSON.
                SUM(u.input_tokens + u.output_tokens + u.cache_read_tokens
-                   + u.cache_write_tokens + u.reasoning_output_tokens) AS total_tokens
+                   + u.cache_write_tokens) AS total_tokens
         FROM latest l
         JOIN priced p ON p.provider = l.provider AND p.account_id IS l.account_id
                      AND p.window = l.window AND p.resets_at IS l.resets_at
