@@ -3,7 +3,7 @@ import { Site, mount } from "../app/shell";
 import { Section, Inset, Figure, Legend, Skeleton } from "../app/bits";
 import { Plot, basic } from "../app/plot";
 import { valueLines, hoverHTML } from "../app/charts";
-import { loadReports, productColors, poll, type Reports } from "../app/data";
+import { loadReports, productColors, productDashes, PROVIDER_NAME, poll, type Reports } from "../app/data";
 import { Meter, Swatch, Segmented } from "../conduit/ui/controls";
 import { DashRow, DashEmpty, DashMore } from "../conduit/ui/dashboard";
 // @ts-ignore
@@ -23,6 +23,20 @@ function Subscriptions() {
     return summaryCards(h.products || [], h.windows || [], h.products_likely || [], h.products_open || []);
   });
   const colours = createMemo(() => productColors(cards().map((c: any) => ({ name: c.name, provider: c.provider }))));
+  const dashes = createMemo(() => productDashes(cards().map((c: any) => ({ name: c.name, provider: c.provider }))));
+  // One block per provider, its plans side by side, cheapest first, so like sits beside like.
+  const groups = createMemo(() => {
+    const byProvider = new Map<string, any[]>();
+    for (const card of cards()) {
+      const key = card.provider ?? "other";
+      if (!byProvider.has(key)) byProvider.set(key, []);
+      byProvider.get(key)!.push(card);
+    }
+    const weekly = (card: any) => card.limits.find((l: any) => l.window.key === "weekly")?.row?.estimate_usd ?? Infinity;
+    return [...byProvider.entries()]
+      .map(([provider, list]) => ({ provider, name: PROVIDER_NAME[provider] ?? provider, cards: list.sort((a, b) => weekly(a) - weekly(b)) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  });
   const [limitFilter, setLimitFilter] = createSignal<"weekly" | "five_hour" | "all">("weekly");
   const [shown, setShown] = createSignal(20);
   const estimates = createMemo(() => visibleEstimates(history()?.windows || []).slice().reverse()
@@ -35,7 +49,7 @@ function Subscriptions() {
     if (!pts.length) return null;
     const names = [...new Set(pts.map((row: any) => row.product))] as string[];
     const chart = valueLines(names.map((name) => ({
-      name, colour: colours().get(name) ?? "var(--series-1)",
+      name, colour: colours().get(name) ?? "var(--series-1)", dash: dashes().get(name),
       points: pts.filter((row: any) => row.product === name).map((row: any) => ({ x: row.completed_ms, y: row.estimate_usd,
         tip: hoverHTML(name, [["Period", shortDate(row.completed_at)], ["Value", money(row.estimate_usd)], ["Pooled", `${plural(row.window_count, "window")} · ${plural(row.account_count, "account")}`]]) })),
       open: null,
@@ -45,6 +59,8 @@ function Subscriptions() {
   });
   const weekly = lines("weekly");
   const five = lines("five_hour");
+  const [trendWindow, setTrendWindow] = createSignal<"weekly" | "five_hour">("weekly");
+  const activeTrend = () => (trendWindow() === "weekly" ? weekly() : five());
 
   const providers = createMemo(() => [...new Set((reports()?.models?.models || []).map((row: any) => row.provider))] as string[]);
   const ratios = () => reports()?.current?.window_ratios || [];
@@ -53,46 +69,32 @@ function Subscriptions() {
   return <Site page="subscriptions" title="Subscriptions">
 
     <Show when={!reports.loading} fallback={<Skeleton height="10rem" />}>
-      <Show when={cards().length} fallback={<Inset><DashEmpty>{reports()?.error ? `Subscription reports are unavailable: ${reports()!.error}` : "Nothing measured yet"}</DashEmpty></Inset>}>
-        <div class="sb-grid two">
-          <For each={cards()}>{(card: any) =>
-            <Inset>
-              <div class="sb-inset-head"><div><h3 style={{ display: "flex", "align-items": "center", gap: "var(--space-sm)" }}><Swatch colour={colours().get(card.name)} />{card.name}</h3></div></div>
-              <div class="sb-limits">
-                <For each={card.limits}>{(limit: any) =>
-                  <div>
-                    <Figure label={limit.window.label}
-                      value={limit.state === "settled" ? money(limit.row.estimate_usd) : limit.state === "range" ? range(limit.row) : undefined}
-                      meta={limit.state === "settled" ? <>{range(limit.row)} · {plural(limit.row.window_count, "window")} · {plural(limit.row.account_count, "account")}</>
-                        : limit.state === "range" ? "unsettled" : undefined} />
-                    <Show when={limit.live}>{(live: any) =>
-                      <div class="sb-live"><b>in progress {money(live().estimate_usd)}</b> · {range(live())} · {Math.round(live().covered_quota_percent)}% measured</div>}</Show>
-                  </div>}</For>
-              </div>
-            </Inset>}</For>
-        </div>
+      <Show when={cards().length} fallback={<Inset><DashEmpty>{reports()?.error ? `Subscription data unavailable: ${reports()!.error}` : "Nothing measured yet"}</DashEmpty></Inset>}>
+        <For each={groups()}>{(group) =>
+          <section class="sb-provider" aria-label={group.name}>
+            <h2><Swatch colour={colours().get(group.cards[0].name)} />{group.name}</h2>
+            <div class="sb-provider-grid">
+              <For each={group.cards}>{(card: any) => <ProductCard card={card} colour={colours().get(card.name)} dash={dashes().get(card.name)} />}</For>
+            </div>
+            <Show when={providers().includes(group.provider)}>
+              <div style={{ "margin-top": "var(--space-lg)" }}><MixPanel models={reports()?.models?.models || []} provider={group.provider} /></div>
+            </Show>
+          </section>}</For>
       </Show>
     </Show>
 
-    <Section title="Value over time">
-      <div class="sb-grid two">
-        <For each={[{ title: "Weekly limit", data: weekly }, { title: "5-hour limit", data: five }]}>{(panel) =>
-          <Inset title={panel.title}>
-            <Show when={panel.data()} fallback={<Show when={!reports.loading} fallback={<Skeleton height="260px" />}>
-              <div class="sb-chart-empty">No confirmed windows yet</div></Show>}>
-              <Plot plotly={basic} data={() => panel.data()!.chart.traces} layout={() => panel.data()!.chart.layout} label={`${panel.title} value over time`} />
-              <Legend items={panel.data()!.names.map((name) => ({ label: name, colour: colours().get(name) }))} />
-            </Show>
-          </Inset>}</For>
-      </div>
-    </Section>
-
-    <Section title="Model mix">
-      <Show when={providers().length} fallback={<Inset><DashEmpty>No model mix yet</DashEmpty></Inset>}>
-        <div class="sb-grid two">
-          <For each={providers()}>{(provider) => <MixPanel models={reports()?.models?.models || []} provider={provider} />}</For>
+    <Section title="Value over time"
+      tools={<Segmented label="Limit" size="sm" value={trendWindow()} onChange={setTrendWindow}
+        options={[{ value: "weekly", label: "Weekly" }, { value: "five_hour", label: "5-hour" }]} />}>
+      <Inset title={trendWindow() === "weekly" ? "Weekly limit" : "5-hour limit"} aside={<span class="sb-tag" data-tone="quiet">{activeTrend()?.note ?? ""}</span>}>
+        <div class="sb-canvas-chart fixed">
+          <Show when={activeTrend()} fallback={<Show when={!reports.loading} fallback={<Skeleton />}>
+            <div class="sb-chart-empty" style={{ height: "100%" }}>No confirmed windows yet</div></Show>}>
+            <Plot plotly={basic} data={() => activeTrend()!.chart.traces} layout={() => ({ ...activeTrend()!.chart.layout, height: undefined, autosize: true })} label="Value over time" />
+          </Show>
         </div>
-      </Show>
+        <Show when={activeTrend()}><Legend items={activeTrend()!.names.map((name) => ({ label: name, colour: colours().get(name), kind: legendKind(dashes().get(name)) }))} /></Show>
+      </Inset>
     </Section>
 
     <Section title="Checks">
@@ -143,11 +145,31 @@ function Subscriptions() {
   </Site>;
 }
 
+const legendKind = (dash?: string) => (dash === "dash" ? "dash" : dash === "dot" ? "dotted" : "line") as "dash" | "dotted" | "line";
+
+function ProductCard(props: { card: any; colour?: string; dash?: string }) {
+  return <Inset>
+    <div class="sb-inset-head"><div><h3 style={{ display: "flex", "align-items": "center", gap: "var(--space-sm)" }}>
+      <Legend items={[{ label: "", colour: props.colour, kind: legendKind(props.dash) }]} />{props.card.name}</h3></div></div>
+    <div class="sb-limits">
+      <For each={props.card.limits}>{(limit: any) =>
+        <div>
+          <Figure label={limit.window.label}
+            value={limit.state === "settled" ? money(limit.row.estimate_usd) : limit.state === "range" ? range(limit.row) : undefined}
+            meta={limit.state === "settled" ? <>{range(limit.row)} · {plural(limit.row.window_count, "window")} · {plural(limit.row.account_count, "account")}</>
+              : limit.state === "range" ? "unsettled" : undefined} />
+          <Show when={limit.live}>{(live: any) =>
+            <div class="sb-live"><b>in progress {money(live().estimate_usd)}</b> · {range(live())} · {Math.round(live().covered_quota_percent)}% measured</div>}</Show>
+        </div>}</For>
+    </div>
+  </Inset>;
+}
+
 function MixPanel(props: { models: any[]; provider: string }) {
   const totals = createMemo(() => modelTotals(props.models, { provider: props.provider, windows: 6 }));
   const colourOf = createMemo(() => new Map(totals().map((row: any, i: number) => [row.model, MIX_COLOURS[i] ?? "var(--series-other)"])));
   const windows = createMemo(() => mixByWindow(props.models, { provider: props.provider, window: "weekly", limit: 8 }));
-  return <Inset title={props.provider === "codex" ? "ChatGPT · Codex" : props.provider === "claude" ? "Claude · Claude Code" : props.provider}>
+  return <Inset title={props.provider === "codex" ? "Model mix · Codex" : props.provider === "claude" ? "Model mix · Claude Code" : "Model mix"}>
     <div class="sb-rows" style={{ gap: "var(--space-md)" }}>
       <For each={windows()}>{(w: any) =>
         <div style={{ display: "grid", "grid-template-columns": "5.5rem 1fr 4.5rem", "align-items": "center", gap: "var(--space-lg)" }}>

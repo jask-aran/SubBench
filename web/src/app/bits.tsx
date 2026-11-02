@@ -43,11 +43,11 @@ export function Figure(props: { label: string; colour?: string; value?: JSX.Elem
   </div>;
 }
 
-export type LegendItem = { label: string; colour?: string; kind?: "line" | "dot" | "dash" | "ring" };
+export type LegendItem = { label: string; colour?: string; kind?: "line" | "dot" | "dash" | "dotted" | "ring" };
 export function Legend(props: { items: LegendItem[] }) {
   return <div class="sb-legend"><For each={props.items}>{(item) =>
-    <span><i data-dot={item.kind === "dot" ? "" : undefined} data-dash={item.kind === "dash" ? "" : undefined} data-ring={item.kind === "ring" ? "" : undefined}
-      style={{ background: item.kind === "dash" || item.kind === "ring" ? undefined : item.colour, "border-color": item.colour }} />{item.label}</span>}</For></div>;
+    <span><i data-dot={item.kind === "dot" ? "" : undefined} data-dash={item.kind === "dash" ? "" : item.kind === "dotted" ? "dot" : undefined} data-ring={item.kind === "ring" ? "" : undefined}
+      style={{ background: item.kind === "dash" || item.kind === "dotted" || item.kind === "ring" ? undefined : item.colour, "border-color": item.colour }} />{item.label}</span>}</For></div>;
 }
 
 export type BarRow = { key: string; label: string; colour: string; value: number; display: string; sub?: string; tag?: string; title?: string };

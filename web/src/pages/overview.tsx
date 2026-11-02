@@ -1,10 +1,10 @@
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { Site, mount } from "../app/shell";
-import { Section, Inset, Figure, Legend, Bars, Skeleton, link } from "../app/bits";
+import { Inset, Figure, Legend, Bars, Skeleton, link } from "../app/bits";
 import { Plot, basic } from "../app/plot";
 import { frontierScatter, valueLines, hoverHTML } from "../app/charts";
 import { joinedScatter } from "../app/points";
-import { loadFrontier, loadReports, personal, productColors, type Reports } from "../app/data";
+import { loadFrontier, loadReports, personal, productColors, productDashes, type Reports } from "../app/data";
 import { Button, Segmented } from "../conduit/ui/controls";
 import { Select } from "../conduit/menus";
 // @ts-ignore
@@ -23,6 +23,7 @@ function Overview() {
   const [reports] = createResource<Reports>(loadReports);
   const me = createMemo(() => (index() ? personal(index()!, reports() ?? null) : null));
   const colours = createMemo(() => productColors((me()?.products || []).map((p) => ({ name: p.card.name, provider: p.card.provider }))));
+  const dashes = createMemo(() => productDashes((me()?.products || []).map((p) => ({ name: p.card.name, provider: p.card.provider }))));
 
   const [product, setProduct] = createSignal<string | null>(null);
   const chosen = createMemo(() => {
@@ -30,6 +31,7 @@ function Overview() {
     return list.find((p) => p.card.name === product()) ?? list[0] ?? null;
   });
   const [buyMetric, setBuyMetric] = createSignal("deepswe-pass1");
+  const [tab, setTab] = createSignal<"value" | "frontier" | "buys">("value");
 
   const trend = createMemo(() => {
     const h = reports()?.history;
@@ -37,7 +39,7 @@ function Overview() {
     const pts = trendPoints(h.product_series).filter((row: any) => row.window === "weekly");
     const names = [...new Set(pts.map((row: any) => row.product))] as string[];
     return valueLines(names.map((name) => ({
-      name, colour: colours().get(name) ?? "var(--series-1)",
+      name, colour: colours().get(name) ?? "var(--series-1)", dash: dashes().get(name),
       points: pts.filter((row: any) => row.product === name).map((row: any) => ({ x: row.completed_ms, y: row.estimate_usd,
         tip: hoverHTML(name, [["Week of", shortDate(row.completed_at)], ["Weekly value", money(row.estimate_usd)], ["Pooled", `${plural(row.window_count, "window")} · ${plural(row.account_count, "account")}`]]) })),
       open: (() => {
@@ -75,7 +77,7 @@ function Overview() {
     if (!ix) return null;
     const id = MINI_METRICS.find((m) => ix.metrics.has(m)) ?? "aa-intelligence";
     const joined = joinedScatter(ix, id, "cost", { mine: me()?.mine, weeklyValue: chosen()?.headline.value });
-    return frontierScatter(joined.scatter, { xLog: true, xTitle: `Cost per ${joined.metric.label} task (USD)`, yTitle: joined.metric.label, yFormat: "", groups: true, height: innerWidth > 700 ? 460 : 380, gutter: innerWidth > 700 });
+    return frontierScatter(joined.scatter, { xLog: true, xTitle: `Cost per ${joined.metric.label} task (USD)`, yTitle: joined.metric.label, yFormat: "", groups: true, height: Math.max(420, innerHeight * 0.62), fill: true, gutter: innerWidth > 700 });
   });
 
   // The person's top model by tokens, matched to the benchmark bundle when it can be. A model newer than the
@@ -87,7 +89,7 @@ function Overview() {
     return { name: entity?.label ?? top.model, share: top.share, matched: !!entity };
   });
 
-  return <Site page="overview" title="Overview">
+  return <Site page="overview" title="Overview" wide>
 
     <Inset>
       <div class="sb-grid figures">
@@ -104,46 +106,53 @@ function Overview() {
       </div>
     </Inset>
 
-    <Section title="Weekly value"
-      tools={<Button variant="ghost" size="sm" onClick={link("/subscriptions/")}>All limits</Button>}>
-      <Inset>
-        <Show when={trend()} fallback={<Show when={!reports.loading} fallback={<Skeleton height="300px" />}><div class="sb-chart-empty">Subscription reports are unavailable right now.</div></Show>}>
-          <Plot plotly={basic} data={() => trend()!.traces} layout={() => trend()!.layout} label="Weekly subscription value over time" />
-          <Legend items={[...colours().entries()].map(([label, colour]) => ({ label, colour }))} />
-        </Show>
-      </Inset>
-    </Section>
-
-    <Section title="Tasks per weekly limit"
-      tools={<>
-        <Show when={(me()?.products.length ?? 0) > 1}>
-          <Segmented label="Subscription" size="sm" value={chosen()?.card.name ?? ""} onChange={setProduct}
-            options={(me()?.products || []).map((p) => ({ value: p.card.name, label: p.card.name }))} />
-        </Show>
-        <Select aria-label="Benchmark" value={buyMetric()} onChange={(event) => setBuyMetric(event.currentTarget.value)} bare={false}>
-          <For each={buyOptions()}>{(metric: any) => <option value={metric.id}>{metric.label}</option>}</For>
-        </Select>
-      </>}>
-      <div class="sb-grid">
-        <Inset title={chosen() ? `${chosen()!.card.name} · ${money(chosen()!.headline.value)} per week` : "Tasks per weekly limit"}>
-          <Show when={index() && !reports.loading} fallback={<Skeleton height="18rem" />}>
-            <Bars rows={buys()} empty={chosen() ? "No cost data for this benchmark" : "No weekly value yet"} />
+    <div class="sb-section">
+      <div class="sb-viewbar">
+        <Segmented label="View" value={tab()} onChange={setTab}
+          options={[{ value: "value", label: "Weekly value" }, { value: "frontier", label: "Score vs cost" }, { value: "buys", label: "Tasks / week" }]} />
+        <Show when={tab() === "buys"}>
+          <Show when={(me()?.products.length ?? 0) > 1}>
+            <Segmented label="Subscription" size="sm" value={chosen()?.card.name ?? ""} onChange={setProduct}
+              options={(me()?.products || []).map((p) => ({ value: p.card.name, label: p.card.name }))} />
           </Show>
-        </Inset>
-      </div>
-    </Section>
-
-    <Section title="Score vs cost"
-      tools={<Button variant="ghost" size="sm" onClick={link("/frontier/")}>Open explorer</Button>}>
-      <Inset>
-        <Show when={mini()} fallback={<Skeleton height="420px" />}>
-          <Plot plotly={basic} data={() => mini()!.traces} layout={() => mini()!.layout} label="Intelligence Index against cost per task" />
-          <Legend items={[{ label: "Pareto frontier", colour: "var(--foreground)" }, { label: "Your models", colour: "var(--foreground)", kind: "ring" },
-            ...["Anthropic", "OpenAI", "Google", "Alibaba", "Moonshot AI", "DeepSeek", "xAI"].map((f) => ({ label: f, colour: familyColor(f), kind: "dot" as const })),
-            { label: "Other", colour: "var(--series-other)", kind: "dot" }]} />
+          <Select aria-label="Benchmark" value={buyMetric()} onChange={(event) => setBuyMetric(event.currentTarget.value)} bare={false}>
+            <For each={buyOptions()}>{(metric: any) => <option value={metric.id}>{metric.label}</option>}</For>
+          </Select>
         </Show>
-      </Inset>
-    </Section>
+        <span class="grow" />
+        <Button variant="ghost" size="sm" onClick={link(tab() === "value" ? "/subscriptions/" : "/frontier/")}>{tab() === "value" ? "Subscriptions" : "Explorer"}</Button>
+      </div>
+      <section class="sb-canvas-main" aria-label="Chart">
+        <div class="sb-canvas-head">
+          <h2>{tab() === "value" ? "Weekly value" : tab() === "frontier" ? "Intelligence Index vs cost / task" : chosen() ? `${chosen()!.card.name} · ${money(chosen()!.headline.value)} / week` : "Tasks / week"}</h2>
+        </div>
+        <div class="sb-canvas-chart short" style={tab() === "buys" ? { height: "auto", "min-height": "0" } : undefined}>
+          <Show when={tab() === "value"}>
+            <Show when={trend()} fallback={<Show when={!reports.loading} fallback={<Skeleton />}><div class="sb-chart-empty" style={{ height: "100%" }}>Subscription data unavailable</div></Show>}>
+              <Plot plotly={basic} data={() => trend()!.traces} layout={() => ({ ...trend()!.layout, height: undefined, autosize: true })} label="Weekly value over time" />
+            </Show>
+          </Show>
+          <Show when={tab() === "frontier"}>
+            <Show when={mini()} fallback={<Skeleton />}>
+              <Plot plotly={basic} data={() => mini()!.traces} layout={() => mini()!.layout} label="Intelligence Index against cost per task" />
+            </Show>
+          </Show>
+          <Show when={tab() === "buys"}>
+            <Show when={index() && !reports.loading} fallback={<Skeleton height="18rem" />}>
+              <Bars rows={buys()} empty={chosen() ? "No cost data for this benchmark" : "No weekly value yet"} />
+            </Show>
+          </Show>
+        </div>
+        <div class="sb-canvas-foot">
+          <Show when={tab() === "value"}><Legend items={[...colours().entries()].map(([label, colour]) => ({ label, colour, kind: (dashes().get(label) === "dash" ? "dash" : dashes().get(label) === "dot" ? "dotted" : "line") as "dash" | "dotted" | "line" }))} /></Show>
+          <Show when={tab() === "frontier"}>
+            <Legend items={[{ label: "Pareto", colour: "var(--foreground)" }, { label: "Yours", colour: "var(--foreground)", kind: "ring" },
+              ...["Anthropic", "OpenAI", "Google", "Alibaba", "Moonshot AI", "DeepSeek", "xAI"].map((f) => ({ label: f, colour: familyColor(f), kind: "dot" as const })),
+              { label: "Other", colour: "var(--series-other)", kind: "dot" }]} />
+          </Show>
+        </div>
+      </section>
+    </div>
 
   </Site>;
 }

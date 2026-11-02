@@ -14,7 +14,7 @@ const PAGES: Array<{ key: PageKey; href: string; label: string; icon: () => JSX.
   { key: "overview", href: "/", label: "Overview", icon: () => <HouseIcon /> },
   { key: "subscriptions", href: "/subscriptions/", label: "Subscriptions", icon: () => <WalletIcon /> },
   { key: "frontier", href: "/frontier/", label: "Frontier", icon: () => <ChartScatterIcon /> },
-  { key: "surface", href: "/surface/", label: "3D surface", icon: () => <Axis3dIcon /> },
+  { key: "surface", href: "/frontier/?view=3d", label: "3D surface", icon: () => <Axis3dIcon /> },
 ];
 
 const go = (href: string) => (event: MouseEvent) => {
@@ -23,7 +23,7 @@ const go = (href: string) => (event: MouseEvent) => {
 };
 
 /** The frame every page shares: Conduit's sidebar on the frame, the page in an inset pane with its header. */
-export function Site(props: { page: PageKey; title: string; place?: string; actions?: JSX.Element; children: JSX.Element }) {
+export function Site(props: { page: PageKey; title: string; place?: string; actions?: JSX.Element; wide?: boolean; children: JSX.Element }) {
   const [drawer, setDrawer] = createSignal<"open" | "shut">("shut");
   // Narrow, the sidebar is Conduit's phone drawer over the page; wide, it sits on the frame.
   const narrowQuery = matchMedia("(max-width: 760px)");
@@ -57,7 +57,7 @@ export function Site(props: { page: PageKey; title: string; place?: string; acti
         <HeaderCrumb place={props.place ?? "SubBench"} title={props.title} />
       </Header>
       <div class="sb-scroll">
-        <div class="sb-content">
+        <div class="sb-content" classList={{ bleed: !!props.wide }}>
           {props.children}
           <Foot />
         </div>

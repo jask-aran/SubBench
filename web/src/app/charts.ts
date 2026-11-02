@@ -16,7 +16,7 @@ export type ScatterPoint = {
 
 /** A frontier scatter: dim points, the step line of the Pareto set, the set's points outlined, the person's own models
  *  ringed, and direct labels only where they earn it. */
-export function frontierScatter(points: ScatterPoint[], opts: { xLog: boolean; xTitle: string; yTitle: string; yFormat: string; xFormat?: string; groups?: boolean; labels?: boolean; height?: number; step?: boolean; yLog?: boolean; yTickFormat?: string; gutter?: boolean }) {
+export function frontierScatter(points: ScatterPoint[], opts: { xLog: boolean; xTitle: string; yTitle: string; yFormat: string; xFormat?: string; groups?: boolean; labels?: boolean; height?: number; step?: boolean; yLog?: boolean; yTickFormat?: string; gutter?: boolean; fill?: boolean }) {
   const t = theme();
   const traces: any[] = [];
   const surface = token("--background");
@@ -64,8 +64,9 @@ export function frontierScatter(points: ScatterPoint[], opts: { xLog: boolean; x
   const annotations = gutter ? gutter.annotations : opts.labels === false ? [] : labelAnnotations(points.filter((p) => !p.dim && (p.frontier || p.mine || p.pinned)), t, opts.xLog);
   const layout = {
     ...t.layout,
-    height: opts.height,
-    margin: { l: 60, r: gutter ? 168 : 18, t: 10, b: 50 },
+    // fill: the chart takes its container's size (a canvas sized to the window); height then only spaces labels.
+    height: opts.fill ? undefined : opts.height, autosize: true,
+    margin: { l: 60, r: gutter ? 190 : 18, t: 10, b: 50 },
     // A small panel labels decades only; 1-2-5 subdivisions crowd its axis.
     xaxis: { ...t.axis, ...(opts.xLog && (opts.height ?? 500) <= 320 ? { dtick: 1 } : {}), type: opts.xLog ? "log" : "linear", range: [x0, x1],
       title: { ...t.axis.title, text: opts.xTitle + (opts.xLog ? " · log scale" : "") }, tickformat: opts.xFormat },
@@ -93,9 +94,9 @@ function gutterLabels(points: ScatterPoint[], o: { xLog: boolean; x0: number; x1
     if (p.frontier || p.mine || p.pinned) keep.add(g);
     if (!best.has(g) || p.y > best.get(g)!.y) best.set(g, p);
   }
-  const chosen = [...keep].map((g) => best.get(g)!).filter(Boolean).sort((a, b) => b.y - a.y).slice(0, 14);
+  const chosen = [...keep].map((g) => best.get(g)!).filter(Boolean).sort((a, b) => b.y - a.y).slice(0, Math.max(8, Math.floor((o.height - 60) / 26)));
   const plotH = Math.max(120, o.height - 60);
-  const gap = ((o.y1 - o.y0) * 15) / plotH;
+  const gap = ((o.y1 - o.y0) * 17) / plotH;
   const placed: number[] = [];
   for (const p of chosen) placed.push(Math.min(p.y, placed.length ? placed.at(-1)! - gap : p.y, o.y1));
   // Pushed below the floor: shift the run back up from the bottom.
@@ -108,7 +109,7 @@ function gutterLabels(points: ScatterPoint[], o: { xLog: boolean; x0: number; x1
   const annotations = chosen.map((p, i) => ({
     xref: "paper", yref: "y", x: 1.015, y: placed[i], xanchor: "left", yanchor: "middle", showarrow: false,
     text: (p.short || p.label).replace(/\s*\((max|xhigh|high|medium|low|with fallback)\)$/i, "") + (p.mine ? "  ·  yours" : ""),
-    font: { family: o.t.sans, size: 12, color: token(p.colour) },
+    font: { family: o.t.sans, size: 13, color: token(p.colour) },
   }));
   const shapes = chosen.map((p, i) => ({
     type: "path", xref: "paper", yref: "y", layer: "below",
@@ -144,7 +145,7 @@ function labelAnnotations(points: ScatterPoint[], t: ReturnType<typeof theme>, x
 }
 
 /** Value over time: one line per product, the in-progress figure as a hollow point at its end. */
-export function valueLines(series: Array<{ name: string; colour: string; points: Array<{ x: number; y: number; tip: string }>; open?: { x: number; y: number; tip: string } | null }>, opts: { height?: number } = {}) {
+export function valueLines(series: Array<{ name: string; colour: string; dash?: string; points: Array<{ x: number; y: number; tip: string }>; open?: { x: number; y: number; tip: string } | null }>, opts: { height?: number } = {}) {
   const t = theme();
   const surface = token("--background");
   const traces: any[] = [];
@@ -152,7 +153,7 @@ export function valueLines(series: Array<{ name: string; colour: string; points:
     const colour = token(s.colour);
     traces.push({ type: "scatter", mode: "lines+markers", name: s.name, x: s.points.map((p) => new Date(p.x)), y: s.points.map((p) => p.y),
       hovertext: s.points.map((p) => p.tip), hovertemplate: "%{hovertext}<extra></extra>",
-      line: { color: colour, width: 2 }, marker: { color: colour, size: 7, line: { color: surface, width: 1.5 } } });
+      line: { color: colour, width: 2, dash: s.dash ?? "solid" }, marker: { color: colour, size: 7, line: { color: surface, width: 1.5 } } });
     if (s.open) {
       const last = s.points.at(-1);
       traces.push({ type: "scatter", mode: "lines+markers", x: [last ? new Date(last.x) : new Date(s.open.x), new Date(s.open.x)], y: [last?.y ?? s.open.y, s.open.y],

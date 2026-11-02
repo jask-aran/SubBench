@@ -87,16 +87,26 @@ export function personal(index: Index, reports: Reports | null): Personal {
 }
 
 const PROVIDER_FAMILY: Record<string, string> = { codex: "OpenAI", claude: "Anthropic" };
-/** Each product takes its provider's chart colour; a second product of the same provider takes the next free slot,
- *  so two plans never share a line colour. */
+export const PROVIDER_NAME: Record<string, string> = { codex: "OpenAI", claude: "Anthropic" };
+
+/** Products take their provider's colour, so every Anthropic plan reads as Anthropic and every OpenAI plan as
+ *  OpenAI. Plans of one provider are told apart by line style: the first solid, the next dashed, then dotted. */
 export function productColors(names: Array<{ name: string; provider: string | null }>) {
-  const used = new Set<number>();
   const out = new Map<string, string>();
   for (const { name, provider } of names) {
-    let slot = familySlot(PROVIDER_FAMILY[provider ?? ""] ?? provider ?? "");
-    if (!slot || used.has(slot)) slot = [1, 7, 4, 5, 6, 8, 2, 3].find((s) => !used.has(s)) ?? 0;
-    used.add(slot);
+    const slot = familySlot(PROVIDER_FAMILY[provider ?? ""] ?? provider ?? "");
     out.set(name, slot ? `var(--series-${slot})` : "var(--series-other)");
+  }
+  return out;
+}
+
+export function productDashes(names: Array<{ name: string; provider: string | null }>) {
+  const seen = new Map<string, number>();
+  const out = new Map<string, "solid" | "dash" | "dot">();
+  for (const { name, provider } of [...names].sort((a, b) => a.name.localeCompare(b.name))) {
+    const n = seen.get(provider ?? "") ?? 0;
+    seen.set(provider ?? "", n + 1);
+    out.set(name, (["solid", "dash", "dot"] as const)[Math.min(n, 2)]);
   }
   return out;
 }

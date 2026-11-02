@@ -354,10 +354,10 @@ minutes while the tab is visible.
 
 | Page | Contents |
 |---|---|
-| `/` Overview | The weekly value of each product, its trend, and what one weekly limit buys on the benchmark frontier. |
-| `/subscriptions/` | Each product's two limits, the value over time, the model mix, the consistency checks and the completed windows. |
-| `/frontier/` | Capability against cost, time or tokens for models and coding agents, the Pareto set and an efficiency solver. |
-| `/surface/` | Cost, time and score in three dimensions, with the attainment surface and a budget probe. |
+| `/` Overview | The weekly value of each product, then one large chart with three views: weekly value, score against cost, and tasks per weekly limit. |
+| `/subscriptions/` | One block per provider (its plans side by side, then its model mix), the value over time, the consistency checks and the completed windows. |
+| `/frontier/` | The explorer: one chart the size of the window with five views (cost, time, tokens, cost × time, 3D), for models and coding agents. The side panel holds the solver or the budget, and the Pareto set. |
+| `/surface/` | Redirects to the explorer's 3D view. |
 
 The rules for what the pages show are unchanged. A figure appears only for a completed,
 confirmed window. A window that passed every check except the width of its interval shows
