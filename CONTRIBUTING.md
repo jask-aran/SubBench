@@ -107,7 +107,10 @@ serve the old page. The deploy reports success.
 | `src/subbench/weights.py` | The non-negative least-squares fit for the per-model weights. |
 | `src/subbench/push.py` | The batches, the cursor and the computed reports. |
 | `worker/index.js` | The Cloudflare Worker. Validation and storage only. |
-| `src/subbench/server/static/index.html` | The page. |
+| `src/subbench/frontier.py` | `subbench frontier`: weekly value against benchmark task cost. |
+| `web/` | The site: Vite, SolidJS, Conduit components v2 and Plotly. Refer to the README, section 4. |
+| `scripts/dev-server.mjs` | Preview of the built site with demo, saved or live reports. |
+| `LLM-Pareto/` | The benchmark scrapers and the bundle export. Refer to its README. |
 
 `regression.py` and `crosssolve.py` hold the parts that are easy to get wrong. Read the
 docstrings before you change either one. Each docstring gives the reason for the design,

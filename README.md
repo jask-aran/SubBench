@@ -329,10 +329,11 @@ operational decision and does not delete existing local or D1 rows.
 
 ---
 
-## 4. The Worker and the page
+## 4. The Worker and the site
 
 The Worker is JavaScript. It runs on Cloudflare Workers with a D1 database and a static
-asset binding.
+asset binding. The site is a Vite build of `web/`, which Wrangler runs before
+`wrangler deploy` and `wrangler dev`.
 
 | Route | Method | Function |
 |---|---|---|
@@ -343,29 +344,65 @@ asset binding.
 | `/api/weights` | GET | The per-model quota weights, if a fit exists. |
 | `/api/series` | GET | The settled series, the replay series and the ratios. |
 | `/api/health` | GET | The quota row count, last ingest time and schema version. |
-| `/` | GET | The static page. |
+| `/data/frontier.json` | GET | The benchmark bundle from LLM-Pareto. A static file. |
+| everything else | GET | The site. |
 
-Each report route returns the newest report of that kind. The page reads history and
-health every 5 minutes while the tab is visible.
+Each report route returns the newest report of that kind. The pages read health every 5
+minutes while the tab is visible.
 
-The page shows four things:
+### The pages
 
-- **An interval plot.** There is one row for each series. The bar is the 80% slope range,
-  the diamond is the estimate, and the form of the diamond is the confidence tier. A
-  separate meter shows the coverage. Without that meter, an estimate with no spread would
-  look like the cleanest row on the page.
-- **Two charts of value against time**, one for the weekly entitlement and one for the
-  five-hour entitlement. A directly measured series is a solid line. A series that comes
-  from a shorter window is a dashed line, because it is an independent measurement of the
-  same allowance. An open window is a hollow point: it still accumulates evidence, so
-  movement there is convergence and not change.
-- **The divergences**, or a statement that every independent measurement agrees.
-- **Two tables**: the reset windows, and the model mix.
+| Page | Contents |
+|---|---|
+| `/` Overview | The weekly value of each product, its trend, and what one weekly limit buys on the benchmark frontier. |
+| `/subscriptions/` | Each product's two limits, the value over time, the model mix, the consistency checks and the completed windows. |
+| `/frontier/` | Capability against cost, time or tokens for models and coding agents, the Pareto set and an efficiency solver. |
+| `/surface/` | Cost, time and score in three dimensions, with the attainment surface and a budget probe. |
 
-The footer gives the age of the data and the estimator version. If a refresh fails, the
-footer says so. A stale number must never look current.
+The rules for what the pages show are unchanged. A figure appears only for a completed,
+confirmed window. A window that passed every check except the width of its interval shows
+a range only. A product that is measured but has nothing settled still gets a card. A
+stale report or an unreachable API is said in the sidebar and the footer.
 
-To deploy:
+**What one week buys.** The overview divides the measured weekly value of a product by the
+measured cost of one benchmark task. The result is a throughput and not a promise: a real
+workload uses different tokens for each task than a benchmark does. `subbench frontier`
+prints the same table in the terminal.
+
+**The attainment surface.** For a cost budget *c* and a time budget *t*, the surface height
+is the best score of any model whose cost per task is at most *c* and whose time per task
+is at most *t*. The surface is a staircase by construction. A point is on the 3D Pareto set
+when no other point is cheaper, faster and better at once. A point can be on that set and
+look dominated in a two-axis chart, because it wins on the axis that the chart hides.
+
+### The code
+
+| Path | Contents |
+|---|---|
+| `web/src/lib/` | The display rules and the frontier arithmetic. Plain modules; `node --test` covers them. |
+| `web/src/pages/` | One SolidJS module for each page. |
+| `web/src/app/` | The shell, the data loading and the Plotly charts. |
+| `web/src/conduit/` | Conduit components v2, copied from the Conduit repository. AGPL-3.0; refer to its README. |
+| `web/public/data/frontier.json` | The benchmark bundle. `LLM-Pareto/export-web-data.py` writes it. |
+
+The chrome uses Conduit's tokens only. The chart series use one validated categorical
+palette, because Conduit's category palette fails the colour-vision checks as scatter
+series. Plotly loads for each page on demand: the basic bundle for the 2D pages and the
+gl3d bundle for the surface.
+
+### Local preview
+
+```bash
+npm install
+npm run dev                                           # live reload, demo reports
+SUBBENCH_API=https://subbench.jask-aran.com npm run dev   # live reload, live reports
+npm run build && npm run preview                      # the built site, demo reports
+```
+
+The demo reports are synthetic. Every page then shows a "Demo data" note, so a screenshot
+of the development server cannot pass for a measurement.
+
+### Deploy
 
 ```bash
 wrangler d1 create subbench
@@ -374,8 +411,9 @@ wrangler secret put SUBBENCH_INGEST_TOKEN
 wrangler deploy
 ```
 
-> Delete the `.wrangler` directory before you deploy a changed static page. The asset cache
-> can report "No updated asset files to upload" and continue to serve the old page.
+`wrangler deploy` builds the site first. The workflow `update-frontier.yml` refreshes the
+benchmark bundle each day and commits it. The site shows the new bundle after the next
+deploy.
 
 ---
 
@@ -414,6 +452,8 @@ have systemd enabled.
 
 ```bash
 subbench status                          # what each product is worth, and is collection healthy
+subbench frontier                        # what one weekly limit buys on the benchmark frontier
+subbench frontier --metric list          # the benchmark lenses in the bundle
 subbench values                          # every window measurement
 subbench values --tier confirmed         # only the settled ones
 subbench values --product Claude         # one product

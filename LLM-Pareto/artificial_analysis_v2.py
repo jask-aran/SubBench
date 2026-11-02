@@ -132,7 +132,7 @@ FIELD_GROUPS = {
         "performance_timeseries",
     ),
     "evaluations": (
-        "intelligence_index", "intelligence_evaluations", "benchmark_details",
+        "intelligence_index", "intelligence_evaluations", "index_evaluations", "benchmark_details",
         "coding_index",
     ),
     "coding": (

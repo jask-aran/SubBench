@@ -74,7 +74,7 @@ function Frontier() {
     const unit = RESOURCES[resource()]?.unit;
     return frontierScatter(pts, {
       xLog: log() && !!RESOURCES[resource()]?.log, xTitle: RESOURCES[resource()]?.label ?? resource(), yTitle: j.metric.label,
-      yFormat: j.metric.format === "percent" ? ".0%" : "", xFormat: unit === "currency" ? "$.3~g" : undefined, groups: tiers() && mode() === "model", height: 540, gutter: true,
+      yFormat: j.metric.format === "percent" ? ".0%" : "", xFormat: unit === "currency" ? "$.3~g" : undefined, groups: tiers() && mode() === "model", height: innerWidth > 700 ? 540 : 440, gutter: innerWidth > 700,
     });
   });
 

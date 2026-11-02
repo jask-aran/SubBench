@@ -137,6 +137,13 @@ def build_parser() -> argparse.ArgumentParser:
     data_prune.add_argument("--days", type=float, default=90.0, help="Keep imports newer than this (default: 90)")
     data_prune.add_argument("--yes", action="store_true", help="Required: pruned periods can no longer be re-estimated")
 
+    frontier = subcommands.add_parser("frontier", help="What one weekly limit buys on the benchmark frontier")
+    frontier.add_argument("--metric", default="deepswe-pass1",
+                          help="Benchmark lens id from the bundle (default: deepswe-pass1); --metric list shows them")
+    frontier.add_argument("--product", default=None, help="Match part of a product name")
+    frontier.add_argument("--bundle", default=None, help="Path or URL of frontier.json (default: repository copy, then the site)")
+    frontier.add_argument("--json", action="store_true", dest="as_json")
+
     detail = subcommands.add_parser("detail", help="Estimator internals")
     detail_commands = detail.add_subparsers(dest="detail_command", required=True)
     detail_models = detail_commands.add_parser("models", help="The model mix behind each reset window")
@@ -193,6 +200,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not drawn:
             print("No completed, confirmed window to chart yet. `subbench values` shows what is still gathering.")
         return 0
+    if args.command == "frontier":
+        return _print_frontier(db, args)
     if args.command == "doctor":
         providers = ("claude", "codex") if args.provider == "all" else (args.provider,)
         checks = run_doctor(db, args.database, providers)
@@ -457,6 +466,52 @@ def _measurements(db, *, refresh: bool) -> tuple[dict[str, Any], str | None]:
         if stored is not None:
             return stored[1], stored[0]
     return value_report(db), None
+
+
+def _print_frontier(db, args) -> int:
+    from .frontier import buys, load_bundle
+
+    try:
+        bundle = load_bundle(args.bundle)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    metrics = {metric["id"]: metric for metric in bundle["metrics"] if metric["entity_type"] == "model"}
+    if args.metric == "list" or args.metric not in metrics:
+        if args.metric != "list":
+            print(f"Unknown metric {args.metric!r}. Choose one of:", file=sys.stderr)
+        for metric in metrics.values():
+            print(f"  {metric['id']:32} {metric['label']} ({metric['count']} models)")
+        return 0 if args.metric == "list" else 2
+    report, _generated = _measurements(db, refresh=False)
+    weekly = {}
+    for row in report.get("products", []):
+        if row["window"] == "weekly":
+            weekly[row["product"]] = (row["estimate_usd"], "settled")
+    for row in report.get("products_open", []):
+        if row["window"] == "weekly":
+            weekly.setdefault(row["product"], (row["estimate_usd"], "in progress"))
+    if args.product:
+        weekly = {name: value for name, value in weekly.items() if args.product.lower() in name.lower()}
+    if not weekly:
+        print("No weekly value measured yet. `subbench values` shows what is still gathering.")
+        return 0
+    used = sorted({str(row["model"]) for row in model_mix(db) if row["model"]})
+    metric = metrics[args.metric]
+    result = {name: buys(bundle, args.metric, value, used) for name, (value, _state) in weekly.items()}
+    if args.as_json:
+        print(json.dumps({name: [row.__dict__ for row in rows] for name, rows in result.items()}, indent=2))
+        return 0
+    fmt = (lambda v: f"{v * 100:.1f}%") if metric["format"] == "percent" else (lambda v: f"{v:.1f}")
+    for name, rows in result.items():
+        value, state = weekly[name]
+        print(f"\n{name}: ${value:,.2f} per weekly limit ({state}) on {metric['label']}")
+        print(f"  {'model':40} {'score':>7} {'$/task':>9} {'tasks/week':>11}")
+        for row in rows[:20]:
+            mark = "  yours" if row.yours else ""
+            print(f"  {row.label[:40]:40} {fmt(row.score):>7} {row.cost_per_task:>9.3f} {row.tasks:>11,.0f}{mark}")
+    print("\nA throughput, not a promise: real workloads spend different tokens per task than a benchmark.")
+    return 0
 
 
 def _print_status(db, database: Path, *, as_json: bool, refresh: bool) -> int:

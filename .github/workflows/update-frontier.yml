@@ -1,0 +1,62 @@
+name: Update frontier data
+
+# Daily refresh of the benchmark bundle the site serves (web/public/data/frontier.json):
+# Artificial Analysis (models and coding agents), DeepSWE and FrontierCode. It commits the
+# refreshed data; the site picks it up on its next `wrangler deploy`.
+#
+# The scraper's --check runs first. A failed check means Artificial Analysis changed its
+# pages: the job stops before writing anything, so a broken scrape never replaces good data.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-frontier
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: LLM-Pareto
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Check the Artificial Analysis pages still parse
+        run: python artificial_analysis_v2.py --check --compact | tee check.json
+
+      - name: Collect Artificial Analysis
+        run: python archive.py collect
+
+      - name: Refresh DeepSWE and FrontierCode
+        run: bash update.sh
+
+      - name: Build the site bundle
+        run: python export-web-data.py
+
+      - name: Commit if anything changed
+        working-directory: .
+        run: |
+          rm -f LLM-Pareto/check.json
+          git add LLM-Pareto/leaderboard.json LLM-Pareto/frontiercode-data.json \
+                  LLM-Pareto/frontier-data.json web/public/data/frontier.json \
+                  LLM-Pareto/data/archive.sqlite3
+          git add -f LLM-Pareto/data/json
+          if git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Refresh frontier data [skip ci]"
+          git push

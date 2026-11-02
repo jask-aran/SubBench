@@ -12,24 +12,59 @@ in SubBench does not run from that nested location.
 
 ## Web explorer
 
-[`index.html`](./index.html) is the unified static explorer. Model mode combines
-Artificial Analysis indexes and individual benchmarks with DeepSWE Pass@1/Pass@4.
-Coding-agent mode keeps harness–model configurations as their own entity type.
-Both modes share filtering, family colours, resource axes, the Pareto frontier,
-the efficiency solver, and quick comparison.
+The explorer is now part of the SubBench site, at `/frontier/` and `/surface/`
+(source in `../web/`). The standalone `index.html`, `app.js` and the AA explorer
+page were retired with that move; the original repository keeps them.
 
 ### Data refresh
 
 | Dataset | Script | Auto-update |
 |---------|--------|-------------|
-| `leaderboard.json` | `./update.sh` | GitHub Actions (daily) |
-| `data/` | `uv run archive.py collect` | Manual |
-| `frontier-data.json` | `uv run export-web-data.py` | Manual after collection |
+| `data/` | `uv run archive.py collect` | `update-frontier.yml` (daily) |
+| `leaderboard.json`, `frontiercode-data.json` | `./update.sh` | `update-frontier.yml` (daily) |
+| `frontier-data.json` and `../web/public/data/frontier.json` | `uv run export-web-data.py` | `update-frontier.yml` (daily) |
 
-The app only fetches `frontier-data.json`; it makes no runtime request to either
-source. AA benchmark observations retain only benchmark-specific resource data.
-Where no such cost or time is published, the UI switches to a capability ranking
-instead of borrowing a composite index value.
+The workflow lives at the SubBench root (`.github/workflows/update-frontier.yml`).
+It runs `artificial_analysis_v2.py --check` first and stops before writing if
+the check reports an error, so a broken scrape never replaces good data.
+
+The site only fetches the bundle; it makes no runtime request to any source.
+
+## Checking the scraper against the live site
+
+Artificial Analysis changes its pages without notice. Run this before trusting
+a collection:
+
+```bash
+uv run artificial_analysis_v2.py --check
+```
+
+It runs the catalogue, the details of the newest models and the coding agents,
+and reports each as `ok`, `warning` or `error`. An error means the extraction
+broke (a source gone, nothing parsed). A warning is a gap in what AA has
+published so far, such as a model listed before its latency runs or an agent on
+an unpriced model; collections keep those values as null.
+
+### What changed on the site (2026-11)
+
+- The per-model **Coding Index is retired**; `/models/capabilities/coding`
+  redirects to the coding-agent leaderboard. Model coding fields are now null.
+  Coding is measured per harness-model configuration.
+- Each model record lists the **Intelligence Index evaluations** with their own
+  score, cost, time and output tokens. They are collected as
+  `index_evaluations`, and the export makes each one a lens with matched
+  resources, which the 3D surface can draw.
+- A model page with `?models=a,b,c` **no longer embeds every requested model**,
+  so details are read one page per model, skipping models an earlier page
+  already carried.
+- The catalogue reads **`/leaderboards/models`**, which lists every indexed
+  model, instead of one model's page.
+- Coding-agent records **dropped `hostModelSlug`**. The host model is derived
+  from the display name and creators. The index suite changed to FrontierCode
+  v1.1, SWE-Atlas-QnA and Terminal-Bench v4; the export takes the components
+  from the data.
+- The **evaluation reference model is optional**. Without one, the evaluation
+  fields are every field any collected model reports.
 
 ## Running the CLI with uv
 
@@ -69,14 +104,14 @@ Every successful response contains `schema_version`, `status`, and a UTC `collec
 One model returns `data.model`:
 
 ```bash
-uv run artificial_analysis_v2.py gpt-5-6-sol
+uv run artificial_analysis_v2.py gpt-6-1-sol
 ```
 
 Multiple comma-separated or space-separated slugs return `data.models` in requested order:
 
 ```bash
 uv run artificial_analysis_v2.py \
-  gpt-5-6-terra-low,gpt-5-6-sol-high gpt-5-6-sol-xhigh
+  gpt-6-1-terra-low,gpt-6-1-sol-high claude-opus-5-5
 ```
 
 Duplicate slugs are removed. The request fails rather than returning a partial collection when a required record is unavailable for any requested model.
@@ -93,7 +128,8 @@ The default is a compact comparison record close to the original cost-per-task o
 - `output_speed_tokens_per_second`
 - `end_to_end_response_time`
 - `time_to_first_answer_token`
-- `coding_index`
+- `coding_index` (null since the per-model Coding Index was retired)
+- `index_evaluations` (with `--verbose` or `--fields evaluations`)
 - `coding_cost_per_task` and `coding_cost_per_task_breakdown`
 - `coding_time_per_task`
 - `model_metadata.release_date`
@@ -105,7 +141,7 @@ The response metadata also includes requested and returned counts, source URLs, 
 `--verbose` returns every normalized field plus the canonical source records:
 
 ```bash
-uv run artificial_analysis_v2.py gpt-5-6-sol --verbose
+uv run artificial_analysis_v2.py gpt-6-1-sol --verbose
 ```
 
 This adds:
@@ -149,8 +185,8 @@ Eligibility modes are:
 - `all`: every canonical dated model allowed by the deprecation filter;
 - `active`: non-deprecated models, the default;
 - `general`: models with complete general cost data;
-- `coding`: models with complete Coding Index cost data;
-- `full`: models with complete general and Coding Index cost data.
+- `coding`: models with per-model Coding Index cost data (none since the index was retired);
+- `full`: models with complete general cost data (it also required the Coding Index before it was retired).
 
 Filter by release date or include historical models:
 
@@ -257,7 +293,8 @@ timestamps, counts, sources and collection metadata also remain present.
 | `--since YYYY-MM-DD` | Include catalogue entries released on or after the date. |
 | `--coding-agents`, `--list-coding-agents` | Return all Coding Agent Index configurations. |
 | `--coding-agent VALUE` | Select a configuration by ID or exact display label; repeatable. |
-| `--evaluation-reference-model SLUG` | Change the model whose non-null evaluations define the detailed-model evaluation schema. Defaults to `gpt-5-6-sol`. |
+| `--evaluation-reference-model SLUG` | Narrow the evaluation fields to one model's non-null evaluations. By default they are the union over the collected models; a reference the site no longer carries falls back to that union. |
+| `--check` | Exercise every mode against the live site and report what is missing. |
 | `--fields PATHS` | Return explicit dotted fields or named groups; repeatable. |
 | `--verbose` | Return all normalized and canonical fields. |
 | `--compact` | Emit JSON without indentation. |
@@ -342,13 +379,8 @@ uv run archive.py reset --yes
 
 ## Preview the web app
 
-```bash
-cd ~/LLM-Pareto
-python3 -m http.server 8899 --bind 0.0.0.0
-```
-
-Open http://127.0.0.1:8899/ (or http://localhost:8899/).
-Do not use `file://`; the browser must fetch `frontier-data.json` over HTTP.
+From the SubBench root: `npm install`, then `npm run dev`. Refer to the SubBench
+README, section 4.
 
 ## DeepSWE leaderboard
 
@@ -358,5 +390,5 @@ Do not use `file://`; the browser must fetch `frontier-data.json` over HTTP.
 ./update.sh
 ```
 
-The daily workflow refreshes this snapshot at 06:00 UTC. Run
+The daily SubBench workflow refreshes this snapshot. Run
 `uv run export-web-data.py` afterwards to fold it into the browser bundle.

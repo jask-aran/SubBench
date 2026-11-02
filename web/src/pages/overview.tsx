@@ -75,7 +75,7 @@ function Overview() {
     if (!ix) return null;
     const id = MINI_METRICS.find((m) => ix.metrics.has(m)) ?? "aa-intelligence";
     const joined = joinedScatter(ix, id, "cost", { mine: me()?.mine, weeklyValue: chosen()?.headline.value });
-    return frontierScatter(joined.scatter, { xLog: true, xTitle: `Cost per ${joined.metric.label} task (USD)`, yTitle: joined.metric.label, yFormat: "", groups: true, height: 460, gutter: true });
+    return frontierScatter(joined.scatter, { xLog: true, xTitle: `Cost per ${joined.metric.label} task (USD)`, yTitle: joined.metric.label, yFormat: "", groups: true, height: innerWidth > 700 ? 460 : 380, gutter: innerWidth > 700 });
   });
 
   // The person's top model by tokens, matched to the benchmark bundle when it can be. A model newer than the
