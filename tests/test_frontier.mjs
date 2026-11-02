@@ -87,5 +87,8 @@ test("the shipped bundle loads, and its headline lenses can be charted and drawn
   const index = indexBundle(bundle);
   assert.ok(points(index, "aa-intelligence").length > 20);
   assert.ok(availableResources(points(index, "aa-intelligence")).includes("cost"));
-  assert.ok(surfaceMetrics(index).some((m) => m.id === "aa-coding"));
+  // Every Intelligence Index evaluation carries its own cost and time, so each one can be a surface.
+  const surfaces = surfaceMetrics(index).map((m) => m.id);
+  assert.ok(surfaces.includes("aa-intelligence"));
+  assert.ok(surfaces.filter((id) => id.startsWith("aa-eval-")).length >= 5);
 });

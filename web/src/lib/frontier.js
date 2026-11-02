@@ -27,10 +27,10 @@ const FAMILY_SLOTS = new Map([
   ["Anthropic", 2], ["Claude Code", 2],
   ["OpenAI", 3], ["Codex", 3],
   ["Google", 1], ["Gemini CLI", 1],
-  ["Alibaba", 4], ["Opencode", 4],
+  ["Alibaba", 4], ["Opencode", 4], ["Antigravity CLI", 1], ["Antigravity SDK v0.1.12", 1],
   ["Moonshot AI", 5], ["Kimi", 5], ["Kimi Code CLI", 5],
-  ["Mistral", 6], ["Z AI", 6], ["Zhipu AI", 6],
-  ["DeepSeek", 7], ["Cursor CLI", 7],
+  ["Mistral", 6], ["Mistral Vibe", 6], ["Z AI", 6], ["Zhipu AI", 6],
+  ["DeepSeek", 7], ["DeepSeek Harness", 7], ["Cursor CLI", 7],
   ["xAI", 8], ["SpaceXAI", 8], ["Grok Build", 8],
 ]);
 

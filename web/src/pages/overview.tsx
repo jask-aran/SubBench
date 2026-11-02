@@ -14,7 +14,9 @@ import { trendPoints, modelTotals } from "../lib/value.js";
 // @ts-ignore
 import { familyColor, tasksPerEntitlement, matchModel } from "../lib/frontier.js";
 
-const BUY_METRICS = ["deepswe-pass1", "aa-coding", "aa-intelligence", "frontiercode-score", "terminal-bench-v2-1"];
+const BUY_METRICS = ["deepswe-pass1", "aa-eval-terminalbench-4-0", "aa-eval-frontiercode-2-0", "aa-intelligence", "frontiercode-score"];
+// The chart lens: the retired per-model Coding Index where an older bundle still has it, else the Intelligence Index.
+const MINI_METRICS = ["aa-intelligence", "aa-coding"];
 
 function Overview() {
   const [index] = createResource(loadFrontier);
@@ -71,8 +73,9 @@ function Overview() {
   const mini = createMemo(() => {
     const ix = index();
     if (!ix) return null;
-    const joined = joinedScatter(ix, "aa-coding", "cost", { mine: me()?.mine, weeklyValue: chosen()?.headline.value });
-    return frontierScatter(joined.scatter, { xLog: true, xTitle: "Cost per Coding Index task (USD)", yTitle: "Coding Index", yFormat: "", groups: true, height: 460, gutter: true });
+    const id = MINI_METRICS.find((m) => ix.metrics.has(m)) ?? "aa-intelligence";
+    const joined = joinedScatter(ix, id, "cost", { mine: me()?.mine, weeklyValue: chosen()?.headline.value });
+    return frontierScatter(joined.scatter, { xLog: true, xTitle: `Cost per ${joined.metric.label} task (USD)`, yTitle: joined.metric.label, yFormat: "", groups: true, height: 460, gutter: true });
   });
 
   // The person's top model by tokens, matched to the benchmark bundle when it can be. A model newer than the
@@ -144,11 +147,11 @@ function Overview() {
       </div>
     </Section>
 
-    <Section title="Your models on the frontier" note="Coding Index against cost per task. The stepped line is the Pareto frontier: nothing sits above and to the left of it. Ringed points are the models in your own usage."
+    <Section title="Your models on the frontier" note="Intelligence Index against cost per task. The stepped line is the Pareto frontier: nothing sits above and to the left of it. Ringed points are the models in your own usage."
       tools={<Button variant="ghost" size="sm" onClick={link("/frontier/")}>Open explorer</Button>}>
       <Inset>
         <Show when={mini()} fallback={<Skeleton height="420px" />}>
-          <Plot plotly={basic} data={() => mini()!.traces} layout={() => mini()!.layout} label="Coding Index against cost per task" />
+          <Plot plotly={basic} data={() => mini()!.traces} layout={() => mini()!.layout} label="Intelligence Index against cost per task" />
           <Legend items={[{ label: "Pareto frontier", colour: "var(--foreground)" }, { label: "Your models", colour: "var(--foreground)", kind: "ring" },
             ...["Anthropic", "OpenAI", "Google", "Alibaba", "Moonshot AI", "DeepSeek", "xAI"].map((f) => ({ label: f, colour: familyColor(f), kind: "dot" as const })),
             { label: "Other", colour: "var(--series-other)", kind: "dot" }]} />

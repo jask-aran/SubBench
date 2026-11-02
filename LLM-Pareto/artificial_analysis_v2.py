@@ -2,6 +2,23 @@
 """Produce archived comparison data for one or more models.
 
 Uses only the Python standard library.
+
+Artificial Analysis publishes no free per-task cost data through its API, so this reads the
+data its pages embed for their charts (Next.js flight payloads). Those pages change without
+notice. Everything here is therefore written to degrade rather than fail: a source that has
+gone away leaves its fields null, and `--check` exercises every mode against the live site
+and says exactly what is missing. Run it before trusting a collection.
+
+Site changes this version follows (checked 2026-11):
+
+* The per-model Coding Index is retired; /models/capabilities/coding now redirects to the
+  coding-agent leaderboard. Coding is measured per harness-model configuration.
+* The Intelligence Index evaluations are listed per model in
+  `intelligenceIndexEvaluations`, each with its own score, cost, time and output tokens.
+* A model page with `?models=a,b,c` no longer embeds every requested model, so details are
+  read one page per model, skipping models an earlier page already carried.
+* Coding-agent records no longer carry `hostModelSlug`; the host model is its display name
+  and creators.
 """
 
 from __future__ import annotations
@@ -20,7 +37,26 @@ from typing import Any, Iterable
 
 
 BASE = "https://artificialanalysis.ai"
-EVALUATION_REFERENCE_MODEL = "gpt-5-6-sol"
+# None: the evaluation field set is every field reported by any collected model. A named
+# reference model narrows it to that model's fields, as earlier versions always did; a
+# reference that has disappeared from the site falls back to the union instead of failing.
+EVALUATION_REFERENCE_MODEL: str | None = None
+CATALOGUE_URL = f"{BASE}/leaderboards/models"
+AGENTS_URL = f"{BASE}/agents/coding-agents"
+
+# Labels for the evaluations inside the Intelligence Index, by the slug AA uses. A slug not
+# listed here is still collected, under a label made from the slug.
+INDEX_EVALUATION_LABELS = {
+    "aa-briefcase": "AA Briefcase",
+    "automationbench-aa": "AutomationBench",
+    "terminalbench-4-0": "Terminal-Bench 4.0",
+    "terminal-bench-science": "Terminal-Bench Science",
+    "frontiercode-2-0": "FrontierCode 2.0",
+    "omniscience": "AA Omniscience",
+    "gdp-pdf": "GDP-PDF",
+    "hle-diamond": "HLE Diamond",
+    "critpt-v2-hard": "CritPt v2 Hard",
+}
 
 # Evaluation fields present in Artificial Analysis' canonical model records.
 # The output schema is the subset with a non-null value on the reference model.
@@ -43,6 +79,15 @@ EVALUATION_FIELDS = {
     "mmmuPro": "mmmu_pro",
     "livecodebench": "livecodebench",
     "aime25": "aime_2025",
+    # Fields of the 2026-11 Intelligence Index.
+    "terminalBench40": "terminal_bench_4_0",
+    "terminalBenchScience": "terminal_bench_science",
+    "frontierCode": "frontiercode",
+    "frontierCode20": "frontiercode_2_0",
+    "hleDiamond": "hle_diamond",
+    "critptAgenticHard": "critpt_agentic_hard",
+    "automationBenchPartialScore": "automationbench_partial",
+    "healthbench": "healthbench",
 }
 
 DEFAULT_MODEL_FIELDS = (
@@ -197,6 +242,12 @@ def extract_embedded_objects(page: str) -> list[dict[str, Any]]:
                 continue
             if isinstance(value, dict):
                 objects.append(value)
+        # Leaderboard rows carry no "id" first; find them by a field every model row has.
+        if '"intelligenceIndexCostPerTask"' in payload:
+            objects.extend(
+                value for value in _objects_around_marker(payload, '"intelligenceIndexCostPerTask"')
+                if "slug" in value and "id" not in value
+            )
     return objects
 
 
@@ -217,11 +268,30 @@ def _canonical_coding_record(record: dict[str, Any]) -> bool:
 
 
 def _canonical_agent_record(record: dict[str, Any]) -> bool:
+    # hostModelSlug was dropped from these records in 2026; the host model is now named by
+    # display.model and modelCreators, so it is not required.
     required = {
-        "id", "agentName", "provider", "hostModelSlug", "display",
-        "displayLabel", "evals", "indexScore", "mean", "percentiles", "versions",
+        "id", "agentName", "provider", "display",
+        "displayLabel", "evals", "indexScore", "mean",
     }
     return required.issubset(record)
+
+
+def _leaderboard_model_record(record: dict[str, Any]) -> bool:
+    return {"slug", "name", "intelligenceIndex", "intelligenceIndexCostPerTask"}.issubset(record)
+
+
+def _host_model_slug(record: dict[str, Any]) -> str | None:
+    """The host model's slug, given by the record or derived from its display name."""
+    if record.get("hostModelSlug"):
+        return record["hostModelSlug"]
+    model = ((record.get("display") or {}).get("model") or "").strip()
+    if not model:
+        return None
+    # "Claude Sonnet 5.5 (Max, Default Fallback)" -> "claude-sonnet-5-5"
+    base = re.sub(r"\s*\(.*\)\s*$", "", model)
+    slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
+    return slug or None
 
 
 def _deduplicate_typed_records(
@@ -371,15 +441,93 @@ def _canonical_model(records: Iterable[dict[str, Any]], slug: str) -> dict[str, 
     return None
 
 
-def evaluation_schema(page: str, reference_slug: str = EVALUATION_REFERENCE_MODEL) -> dict[str, str]:
-    reference = _canonical_model(extract_records(page, reference_slug), reference_slug)
-    if reference is None:
-        raise ExtractionError(f"Evaluation reference model {reference_slug!r} was not present")
+def evaluation_schema(
+    page_or_records: str | dict[str, dict[str, Any]],
+    reference_slug: str | None = EVALUATION_REFERENCE_MODEL,
+) -> dict[str, str]:
+    """The evaluation fields to report: the reference model's, or every model's.
+
+    A reference model that the site no longer carries used to fail the whole collection; it
+    now falls back to the union over the records at hand.
+    """
+    if isinstance(page_or_records, str):
+        records = _deduplicate_typed_records(
+            extract_embedded_objects(page_or_records), _canonical_model_record, "slug"
+        )
+    else:
+        records = page_or_records
+    reference = records.get(reference_slug) if reference_slug else None
+    pool = [reference] if reference else list(records.values())
     return {
         source: output
         for source, output in EVALUATION_FIELDS.items()
-        if reference.get(source) is not None
+        if any(record.get(source) is not None for record in pool)
     }
+
+
+def index_evaluations(model: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Each evaluation of the Intelligence Index with its own score and resources."""
+    if not model:
+        return []
+    weighted = {
+        item.get("slug"): item.get("weightedCostPerTask")
+        for item in ((model.get("intelligenceIndexCostPerTask") or {}).get("evaluations") or [])
+    }
+    rows = []
+    for item in model.get("intelligenceIndexEvaluations") or []:
+        slug = item.get("slug")
+        if not slug:
+            continue
+        rows.append({
+            "slug": slug,
+            "label": INDEX_EVALUATION_LABELS.get(slug) or slug.replace("-", " ").title(),
+            "score": item.get("score"),
+            "cost_per_task": item.get("costPerTask"),
+            "time_per_task": item.get("timePerTask"),
+            "output_tokens_per_task": item.get("outputTokensPerTask"),
+            "weighted_cost_per_task": weighted.get(slug),
+        })
+    return rows
+
+
+def collect_model_records(
+    slugs: list[str],
+    timeout: float = 30.0,
+    *,
+    workers: int = 4,
+    fetcher: Any = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Canonical model records for the slugs, one page per model not yet seen.
+
+    Each model page embeds its own record and a couple of dozen chart defaults, so models
+    already carried by an earlier page are not fetched again. Returns the records and the
+    page URL each one came from.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    fetch_page = fetcher or (lambda url: fetch(url, timeout))
+    records: dict[str, dict[str, Any]] = {}
+    sources: dict[str, str] = {}
+    pending = list(dict.fromkeys(slugs))
+    while pending:
+        wave = pending[:workers]
+        pending = pending[workers:]
+        urls = {slug: f"{BASE}/models/{slug}" for slug in wave}
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            pages = dict(zip(wave, pool.map(lambda slug: fetch_page(urls[slug]), wave)))
+        for slug, page in pages.items():
+            found = _deduplicate_typed_records(
+                extract_embedded_objects(page), _canonical_model_record, "slug"
+            )
+            for key, record in found.items():
+                previous = records.get(key)
+                if previous is None or sum(v is not None for v in record.values()) > sum(
+                    v is not None for v in previous.values()
+                ):
+                    records[key] = record
+                    sources[key] = urls[slug]
+        pending = [slug for slug in pending if slug not in records]
+    return records, sources
 
 
 def extract_single_model(
@@ -389,23 +537,37 @@ def extract_single_model(
     general_page: str | None = None,
     coding_page: str | None = None,
     evaluation_fields: dict[str, str] | None = None,
-    evaluation_reference_model: str = EVALUATION_REFERENCE_MODEL,
+    evaluation_reference_model: str | None = EVALUATION_REFERENCE_MODEL,
     collected_at: str | None = None,
+    general_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """One model's normalised record.
+
+    general_record: the model's canonical record when the caller already has it (from
+    collect_model_records); its page is then not fetched again. coding_page: a page with the
+    retired per-model Coding Index, for archived pages only; without it the coding fields
+    are null.
+    """
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
         raise ExtractionError(f"Invalid model slug: {slug!r}")
 
-    general_url = f"{BASE}/models/{slug}"
-    coding_url = (
-        f"{BASE}/models/capabilities/coding"
-        f"?cost-per-task=index-vs-cost-per-task&models={slug}"
-    )
-    general_html = general_page or fetch(general_url, timeout)
-    coding_html = coding_page or fetch(coding_url, timeout)
-    general = extract_records(general_html, slug)
-    coding = extract_records(coding_html, slug)
+    if general_record is not None:
+        general = [general_record]
+        general_html = None
+    else:
+        general_html = general_page or fetch(f"{BASE}/models/{slug}", timeout)
+        general = extract_records(general_html, slug)
+    coding: list[dict[str, Any]] = []
+    if coding_page:
+        try:
+            coding = extract_records(coding_page, slug)
+        except ExtractionError:
+            coding = []
     if evaluation_fields is None:
-        evaluation_fields = evaluation_schema(general_html, evaluation_reference_model)
+        evaluation_fields = evaluation_schema(
+            general_html if general_html is not None else {slug: general_record or {}},
+            evaluation_reference_model,
+        )
 
     general_cost = _find_record(general, "answer", "reasoning", "cacheWrite", "cacheHit", "input")
     general_tokens = _find_record(general, "answer", "reasoning")
@@ -429,19 +591,17 @@ def extract_single_model(
         if general_model.get("intelligenceIndexTimePerTask") is not None:
             general_time_minutes = general_model["intelligenceIndexTimePerTask"] / 60
 
-    coding_model = _find_record(coding, "slug", "headlineValue", "costPerTask", "timePerTaskSeconds")
-    if coding_model is None:
-        raise ExtractionError("Coding dataset record was not present")
-    coding_cost = _required(coding_model.get("costPerTask"), "coding costPerTask")
+    # The per-model Coding Index is retired; an archived coding page still supplies it.
+    coding_model = _find_record(coding, "slug", "headlineValue", "costPerTask", "timePerTaskSeconds") or {}
+    coding_cost = coding_model.get("costPerTask") or {}
     coding_tokens = coding_model.get("outputTokensPerTask") or {}
-    coding_total_cost = coding_model.get("evalCost") or {}
+    coding_total_cost = coding_model.get("evalCost") or None
     intelligence_cost_per_task = (general_model or {}).get("intelligenceIndexCostPerTask") or {}
 
     if general_cost is None or general_tokens is None:
         raise ExtractionError("General cost or token breakdown was not present")
 
-    input_cost = general_cost["input"] + general_cost["cacheWrite"] + general_cost["cacheHit"]
-    coding_input_cost = _required(coding_cost.get("input"), "coding input")
+    input_cost = sum(general_cost.get(key) or 0 for key in ("input", "cacheWrite", "cacheHit"))
 
     # Prefer the canonical model record where available, while retaining the
     # small JSON-LD chart records as stable fallbacks.
@@ -538,6 +698,8 @@ def extract_single_model(
             output: general_model.get(source) if general_model else None
             for source, output in evaluation_fields.items()
         },
+        # Every evaluation inside the index, each with its own score, cost, time and tokens.
+        "index_evaluations": index_evaluations(general_model),
         "evaluation_reference_model": evaluation_reference_model,
         "benchmark_details": {
             "omniscience_breakdown": (
@@ -557,14 +719,14 @@ def extract_single_model(
                 general_model.get("microevalsEnabled") if general_model else None
             ),
         },
-        "coding_index": _required(coding_model.get("headlineValue"), "coding_index"),
-        "coding_cost_per_task": _required(coding_cost.get("total"), "coding_cost_per_task"),
+        "coding_index": coding_model.get("headlineValue"),
+        "coding_cost_per_task": coding_cost.get("total"),
         "coding_cost_per_task_breakdown": {
-            "input_tokens": coding_input_cost,
-            "output_tokens": _required(coding_cost.get("answer"), "coding answer cost"),
-            "reasoning_tokens": _required(coding_cost.get("reasoning"), "coding reasoning cost"),
-            "cache_write": _required(coding_cost.get("cacheWrite"), "coding cache write cost"),
-            "cache_hit": _required(coding_cost.get("cacheRead"), "coding cache hit cost"),
+            "input_tokens": coding_cost.get("input"),
+            "output_tokens": coding_cost.get("answer"),
+            "reasoning_tokens": coding_cost.get("reasoning"),
+            "cache_write": coding_cost.get("cacheWrite"),
+            "cache_hit": coding_cost.get("cacheRead"),
         },
         "coding_time_per_task": coding_model.get("timePerTaskSeconds"),
         "coding_output_tokens_per_task": {
@@ -635,7 +797,7 @@ def extract_single_model(
                 general_model.get("pricePer1k1mpImages") if general_model else None
             ),
         },
-        "source_record": {"general": general_model, "coding": coding_model},
+        "source_record": {"general": general_model, "coding": coding_model or None},
     }
     return {"status": "success", "data": {"model": model}}
 
@@ -654,27 +816,32 @@ def build_model_catalog(
     since: str | None = None,
     fields: list[str] | None = None,
     verbose: bool = False,
+    *,
+    page: str | None = None,
 ) -> dict[str, Any]:
+    """The models with an Intelligence Index, from the models leaderboard.
+
+    The leaderboard is the page meant to list every indexed model, so the catalogue no
+    longer depends on one model's page happening to embed the others. Its rows carry no
+    release date; a full model record seen on the same page supplies one where present.
+    """
     collected_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    general_url = f"{BASE}/models/{EVALUATION_REFERENCE_MODEL}"
-    coding_url = (
-        f"{BASE}/models/capabilities/coding"
-        f"?cost-per-task=index-vs-cost-per-task&models={EVALUATION_REFERENCE_MODEL}"
-    )
-    general = _deduplicate_typed_records(
-        extract_embedded_objects(fetch(general_url, timeout)),
-        _canonical_model_record,
-        "slug",
-    )
-    coding = _deduplicate_typed_records(
-        extract_embedded_objects(fetch(coding_url, timeout)),
-        _canonical_coding_record,
-        "slug",
-    )
+    general_url = CATALOGUE_URL
+    objects = extract_embedded_objects(page if page is not None else fetch(general_url, timeout))
+    rows = _deduplicate_typed_records(objects, _leaderboard_model_record, "slug")
+    full = _deduplicate_typed_records(objects, _canonical_model_record, "slug")
+    if not rows and not full:
+        raise ExtractionError(f"No model rows found on {general_url}; the page layout has changed")
+    general = {slug: {**rows.get(slug, {}), **full.get(slug, {})} for slug in {*rows, *full}}
+    coding: dict[str, dict[str, Any]] = {}
+    coding_url = None
     catalogue: list[dict[str, Any]] = []
     for slug, record in general.items():
         coding_record = coding.get(slug) or {}
-        general_cost = (((record.get("intelligenceIndexCostPerTask") or {}).get("cost") or {}).get("total"))
+        # A leaderboard row gives the cost per task as a number; a full record as a breakdown.
+        cost_field = record.get("intelligenceIndexCostPerTask")
+        general_cost = cost_field if isinstance(cost_field, (int, float)) else (
+            ((cost_field or {}).get("cost") or {}).get("total"))
         coding_cost = ((coding_record.get("costPerTask") or {}).get("total"))
         item = {
             "slug": slug,
@@ -683,7 +850,10 @@ def build_model_catalog(
             "release_date": record.get("releaseDate"),
             "deprecated": bool(record.get("deprecated")),
             "deprecated_to": record.get("deprecatedTo"),
-            "creator": record.get("creator"),
+            "creator": record.get("creator") or (
+                {"name": record["modelCreatorName"]} if record.get("modelCreatorName") else None
+            ),
+            "intelligence_index": record.get("intelligenceIndex"),
             "is_reasoning": record.get("isReasoning"),
             "is_open_weights": record.get("isOpenWeights"),
             "has_intelligence_index": record.get("intelligenceIndex") is not None,
@@ -691,6 +861,7 @@ def build_model_catalog(
             "has_coding_index": (
                 record.get("codingIndex") is not None or coding_record.get("headlineValue") is not None
             ),
+            # The per-model Coding Index is retired, so this is false for every current model.
             "has_coding_cost_data": coding_cost is not None,
             "source_record": {"general": record, "coding": coding_record or None},
         }
@@ -703,13 +874,15 @@ def build_model_catalog(
             "active": not item["deprecated"] or include_deprecated,
             "general": item["has_general_cost_data"],
             "coding": item["has_coding_cost_data"],
-            "full": item["has_general_cost_data"] and item["has_coding_cost_data"],
+            # "full" once meant general and coding data. With the Coding Index retired, a model
+            # with general cost data is as complete as the site makes it.
+            "full": item["has_general_cost_data"],
         }.get(eligibility)
         if eligible is None:
             raise ExtractionError(f"Unknown eligibility mode {eligibility!r}")
         if eligible:
             catalogue.append(item)
-    catalogue.sort(key=lambda item: (item.get("release_date") or "", item["slug"]), reverse=True)
+    catalogue.sort(key=lambda item: (item.get("release_date") or "", item.get("intelligence_index") or 0, item["slug"]), reverse=True)
     selected_fields = with_identity_fields(
         fields or DEFAULT_CATALOG_FIELDS,
         ("slug",),
@@ -753,7 +926,12 @@ def _normalize_agent(record: dict[str, Any], collected_at: str) -> dict[str, Any
         "entity_type": "coding_agent_configuration",
         "agent_name": record.get("agentName"),
         "provider": record.get("provider"),
-        "host_model_slug": record.get("hostModelSlug"),
+        "host_model_slug": _host_model_slug(record),
+        "host_model_name": (record.get("display") or {}).get("model"),
+        "model_creators": [
+            creator.get("name") for creator in record.get("modelCreators") or [] if isinstance(creator, dict)
+        ],
+        "agent_creator": record.get("agentCreator"),
         "display": record.get("display"),
         "display_label": record.get("displayLabel"),
         "variant_of": record.get("variantOf"),
@@ -782,11 +960,13 @@ def extract_coding_agents(
     timeout: float = 30.0,
     fields: list[str] | None = None,
     verbose: bool = False,
+    *,
+    page: str | None = None,
 ) -> dict[str, Any]:
     collected_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    url = f"{BASE}/agents/coding-agents"
+    url = AGENTS_URL
     records = _deduplicate_typed_records(
-        extract_embedded_objects(fetch(url, timeout)),
+        extract_embedded_objects(page if page is not None else fetch(url, timeout)),
         _canonical_agent_record,
         "id",
     )
@@ -830,9 +1010,12 @@ def extract_coding_agents(
 def extract_models(
     slugs: list[str],
     timeout: float = 30.0,
-    evaluation_reference_model: str = EVALUATION_REFERENCE_MODEL,
+    evaluation_reference_model: str | None = EVALUATION_REFERENCE_MODEL,
     fields: list[str] | None = None,
     verbose: bool = False,
+    *,
+    workers: int = 4,
+    fetcher: Any = None,
 ) -> dict[str, Any]:
     if not slugs:
         raise ExtractionError("At least one model slug is required")
@@ -841,30 +1024,24 @@ def extract_models(
             raise ExtractionError(f"Invalid model slug: {slug!r}")
 
     collected_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    general_page_slugs = list(dict.fromkeys((*slugs, evaluation_reference_model)))
-    encoded_general_models = urllib.parse.quote(",".join(general_page_slugs), safe="")
-    encoded_models = urllib.parse.quote(",".join(slugs), safe="")
-    general_url = (
-        f"{BASE}/models/{slugs[0]}"
-        f"?cost=intelligence-vs-cost-per-task&models={encoded_general_models}"
-    )
-    coding_url = (
-        f"{BASE}/models/capabilities/coding"
-        f"?cost-per-task=index-vs-cost-per-task&models={encoded_models}"
-    )
-    general_page = fetch(general_url, timeout)
-    coding_page = fetch(coding_url, timeout)
-    evaluation_fields = evaluation_schema(general_page, evaluation_reference_model)
+    wanted = list(dict.fromkeys((*slugs, *([evaluation_reference_model] if evaluation_reference_model else []))))
+    records, sources = collect_model_records(wanted, timeout, workers=workers, fetcher=fetcher)
+    evaluation_fields = evaluation_schema({slug: records[slug] for slug in slugs if slug in records} | (
+        {evaluation_reference_model: records[evaluation_reference_model]}
+        if evaluation_reference_model in records else {}
+    ), evaluation_reference_model)
 
     models: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     for slug in slugs:
+        if slug not in records:
+            errors.append({"slug": slug, "error": "no model record on its page"})
+            continue
         try:
             response = extract_single_model(
                 slug,
                 timeout,
-                general_page=general_page,
-                coding_page=coding_page,
+                general_record=records[slug],
                 evaluation_fields=evaluation_fields,
                 evaluation_reference_model=evaluation_reference_model,
                 collected_at=collected_at,
@@ -877,6 +1054,8 @@ def extract_models(
         raise ExtractionError(
             "Incomplete model records: " + json.dumps(errors, ensure_ascii=False)
         )
+    general_url = sources.get(slugs[0])
+    coding_url = None
 
     selected_fields = with_identity_fields(
         fields or DEFAULT_MODEL_FIELDS,
@@ -904,6 +1083,63 @@ def extract_models(
         "collected_at": collected_at,
         "data": data,
     }
+
+
+def check(timeout: float = 30.0, sample: int = 3) -> dict[str, Any]:
+    """Exercise every mode against the live site and report what each one returned.
+
+    The pages this reads change without notice, so a collection is only as good as the last
+    time this passed. Each check names what it expected; nothing here is cached.
+    """
+    # An error means the extraction itself is broken (a source gone, nothing parsed). A
+    # warning is a gap in what AA has published so far (a model listed before its latency
+    # runs, an agent on an unpriced model), which a collection keeps as null.
+    report: dict[str, Any] = {"status": "success", "checks": []}
+
+    def record(name: str, ok: bool, detail: str, warning: bool = False) -> None:
+        level = "ok" if ok else "warning" if warning else "error"
+        report["checks"].append({"check": name, "result": level, "detail": detail})
+        if level == "error":
+            report["status"] = "error"
+        elif level == "warning" and report["status"] == "success":
+            report["status"] = "warning"
+
+    try:
+        catalogue = build_model_catalog(timeout, "general", verbose=True)["data"]["models"]
+        record("catalogue", len(catalogue) >= 20, f"{len(catalogue)} models with general cost data")
+    except ExtractionError as exc:
+        catalogue = []
+        record("catalogue", False, str(exc))
+
+    if catalogue:
+        slugs = [item["slug"] for item in catalogue[:sample]]
+        try:
+            models = extract_models(slugs, timeout, verbose=True)["data"]
+            models = models.get("models") or [models["model"]]
+            for model in models:
+                missing = [key for key in ("cost_per_task", "time_per_task", "intelligence_index", "output_tokens_per_task")
+                           if model.get(key) is None]
+                evals = model.get("index_evaluations") or []
+                with_resources = sum(1 for e in evals if e.get("cost_per_task") is not None and e.get("time_per_task") is not None)
+                broken = model.get("intelligence_index") is None or model.get("cost_per_task") is None or not evals
+                record(f"model {model['slug']}", not missing and with_resources > 0,
+                       f"{len(evals)} index evaluations, {with_resources} with cost and time"
+                       + (f"; not yet published: {', '.join(missing)}" if missing else ""),
+                       warning=not broken)
+        except ExtractionError as exc:
+            record("model details", False, str(exc))
+
+    try:
+        agents = extract_coding_agents(timeout=timeout, verbose=True)["data"]["coding_agents"]
+        components = sorted({key for agent in agents for key in (agent.get("benchmark_scores") or {})})
+        unpriced = [a["display_label"] for a in agents if a.get("cost_per_task") is None]
+        record("coding agents", len(agents) >= 5 and not unpriced,
+               f"{len(agents)} configurations; components {', '.join(components) or 'none'}"
+               + (f"; unpriced: {', '.join(unpriced)}" if unpriced else ""),
+               warning=len(agents) >= 5 and len(unpriced) <= len(agents) // 4)
+    except ExtractionError as exc:
+        record("coding agents", False, str(exc))
+    return report
 
 
 def main() -> int:
@@ -943,7 +1179,13 @@ def main() -> int:
     )
     parser.add_argument("--verbose", action="store_true", help="Return every available field")
     parser.add_argument("--compact", action="store_true", help="Emit compact JSON")
+    parser.add_argument("--check", action="store_true",
+                        help="Exercise every mode against the live site and report what is missing")
     args = parser.parse_args()
+    if args.check:
+        result = check(args.timeout)
+        print(json.dumps(result, indent=None if args.compact else 2, ensure_ascii=False))
+        return 1 if result["status"] == "error" else 0
     if args.verbose and args.fields:
         parser.error("--verbose and --fields are mutually exclusive")
     modes = int(bool(args.slugs)) + int(args.list_models) + int(bool(args.coding_agents or args.coding_agent))

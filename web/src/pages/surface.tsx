@@ -31,7 +31,7 @@ function Surface() {
   const me = createMemo(() => (index() ? personal(index()!, reports() ?? null) : null));
   const weekly = () => me()?.products[0]?.headline.value ?? null;
 
-  const [metric, setMetric] = createSignal(params.get("lens") || "aa-coding");
+  const [metric, setMetric] = createSignal(params.get("lens") || "aa-intelligence");
   const [view, setView] = createSignal<View>("iso");
   const [showSurface, setShowSurface] = createSignal(true);
   const [labels, setLabels] = createSignal(true);

@@ -284,10 +284,9 @@ def collect(args: argparse.Namespace) -> tuple[list[Path], dict[str, Any]]:
                         "active": not model.get("deprecated"),
                         "general": bool(model.get("has_general_cost_data")),
                         "coding": bool(model.get("has_coding_cost_data")),
-                        "full": bool(
-                            model.get("has_general_cost_data")
-                            and model.get("has_coding_cost_data")
-                        ),
+                        # The per-model Coding Index is retired; general cost data is
+                        # everything a current model can have.
+                        "full": bool(model.get("has_general_cost_data")),
                     }[args.eligibility]
                     if model.get("deprecated") and not args.include_deprecated:
                         skipped.append({"slug": model["slug"], "reason": "deprecated"})
@@ -295,10 +294,7 @@ def collect(args: argparse.Namespace) -> tuple[list[Path], dict[str, Any]]:
                         skipped.append({"slug": model["slug"], "reason": "ineligible"})
                     elif args.since and (not release_date or release_date < args.since):
                         skipped.append({"slug": model["slug"], "reason": "before_since"})
-                    elif not (
-                        model.get("has_general_cost_data")
-                        and model.get("has_coding_cost_data")
-                    ):
+                    elif not model.get("has_general_cost_data"):
                         skipped.append({"slug": model["slug"], "reason": "incomplete_detail_data"})
                     else:
                         selected_slugs.append(model["slug"])
@@ -500,10 +496,7 @@ def query_cache(args: argparse.Namespace) -> dict[str, Any]:
                     "active": not record.get("deprecated") or args.include_deprecated,
                     "general": bool(record.get("has_general_cost_data")),
                     "coding": bool(record.get("has_coding_cost_data")),
-                    "full": bool(
-                        record.get("has_general_cost_data")
-                        and record.get("has_coding_cost_data")
-                    ),
+                    "full": bool(record.get("has_general_cost_data")),
                 }[args.eligibility]
                 if eligible:
                     filtered.append(record)

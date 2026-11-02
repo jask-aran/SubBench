@@ -25,4 +25,4 @@ packages = ["src/subbench"]
 "src/subbench/server/schema.sql" = "subbench/server/schema.sql"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "LLM-Pareto/tests"]

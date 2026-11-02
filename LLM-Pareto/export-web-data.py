@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections import defaultdict
 from contextlib import closing
@@ -20,9 +21,7 @@ OUTPUT_PATH = Path("frontier-data.json")
 # The combined SubBench site serves the same bundle from its static assets. Resolved from
 # this file rather than the working directory, so the copy lands in one place however the
 # script is invoked.
-SITE_OUTPUT_PATH = (
-    Path(__file__).resolve().parent.parent / "src" / "subbench" / "server" / "static" / "data" / "frontier.json"
-)
+SITE_OUTPUT_PATH = Path(__file__).resolve().parent.parent / "web" / "public" / "data" / "frontier.json"
 
 BENCHMARKS = {
     "aa_long_context_reasoning": (
@@ -216,6 +215,42 @@ def compact_resources(model: dict[str, Any], coding: bool = False) -> dict[str, 
     return {key: value for key, value in resources.items() if value is not None}
 
 
+# Coding Agent Index components, by the key AA reports. A key not listed is still exported,
+# under a label made from it, so a new component appears without a code change.
+AGENT_COMPONENT_LABELS = {
+    "deep-swe": "DeepSWE",
+    "terminal-bench-v2": "Terminal-Bench v2",
+    "terminal-bench-v4": "Terminal-Bench v4",
+    "swe-atlas-qna": "SWE-Atlas-QnA",
+    "frontiercode-v1.1-main": "FrontierCode v1.1",
+}
+# Metric ids of components this bundle published before, kept so links to them still work.
+LEGACY_AGENT_METRICS = {
+    "deep-swe": "agent-deepswe",
+    "terminal-bench-v2": "agent-terminal-bench-v2",
+    "swe-atlas-qna": "agent-swe-atlas-qna",
+}
+
+
+def agent_metric_id(key: str) -> str:
+    return LEGACY_AGENT_METRICS.get(key) or "agent-" + re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-")
+
+
+def display_name(slug: str) -> str:
+    """A readable name for a leaderboard's model slug: "gpt-5-6-luna" -> "GPT-5.6 Luna"."""
+    words = re.sub(r"(?<=\d)-(?=\d)", ".", slug).split("-")
+    upper = {"gpt", "glm", "oss", "ai", "v4", "v3", "k3", "k2"}
+    out = []
+    for word in words:
+        if word.lower() in upper:
+            out.append(word.upper())
+        elif out and out[-1] in {"GPT", "GLM"} and word[:1].isdigit():
+            out[-1] = f"{out[-1]}-{word}"
+        else:
+            out.append(word[:1].upper() + word[1:])
+    return " ".join(out)
+
+
 def deep_effort_slug(model: str, effort: str) -> str:
     if effort in {"max", "default"}:
         return model
@@ -344,6 +379,7 @@ def main() -> None:
             }
         )
 
+    index_evaluation_meta: dict[str, dict[str, Any]] = {}
     for model in models:
         slug = model["slug"]
         metadata = model.get("model_metadata") or {}
@@ -415,6 +451,30 @@ def main() -> None:
             )
             metric_counts[metric_id] += 1
 
+        # The Intelligence Index's own evaluations, each with the cost, time and tokens AA
+        # measured on that benchmark (published per evaluation since 2026-11). These are
+        # matched resources, so every one of them can be charted, and drawn as a surface.
+        for item in model.get("index_evaluations") or []:
+            if item.get("score") is None or not item.get("slug"):
+                continue
+            metric_id = "aa-eval-" + item["slug"]
+            index_evaluation_meta.setdefault(metric_id, {"label": item.get("label") or item["slug"], "scores": []})
+            index_evaluation_meta[metric_id]["scores"].append(item["score"])
+            resources = {
+                "cost": item.get("cost_per_task"),
+                "time": item.get("time_per_task"),
+                "output_tokens": item.get("output_tokens_per_task"),
+                "weighted_cost": item.get("weighted_cost_per_task"),
+            }
+            observations.append(
+                observation(
+                    "model", slug, metric_id, item["score"],
+                    {key: value for key, value in resources.items() if value is not None},
+                    "Artificial Analysis", "matched",
+                )
+            )
+            metric_counts[metric_id] += 1
+
     deepswe_rows = json.loads(DEEPSWE_PATH.read_text(encoding="utf-8"))
     for row in deepswe_rows:
         slug = deep_effort_slug(row["model"], row["effort"])
@@ -422,7 +482,7 @@ def main() -> None:
             family = infer_family(row["model"])
             entities["model"][slug] = {
                 "id": slug,
-                "label": f"{row['model']} ({row['effort']})",
+                "label": f"{display_name(row['model'])} ({row['effort']})",
                 "slug": slug,
                 "family": family,
                 "provider": None,
@@ -544,11 +604,22 @@ def main() -> None:
         }
         for metric_id, label, group, description in agent_metrics
     )
-    agent_benchmark_keys = {
-        "agent-deepswe": "deep-swe",
-        "agent-terminal-bench-v2": "terminal-bench-v2",
-        "agent-swe-atlas-qna": "swe-atlas-qna",
-    }
+    # Components come from the records: the index changed its suite in 2026 (DeepSWE and
+    # Terminal-Bench v2 out; FrontierCode v1.1 and Terminal-Bench v4 in).
+    component_keys = sorted({key for agent in agents for key in (agent.get("benchmark_scores") or {}) if key})
+    known = {metric["id"] for metric in metrics}
+    for key in component_keys:
+        metric_id = agent_metric_id(key)
+        if metric_id in known:
+            continue
+        label = AGENT_COMPONENT_LABELS.get(key) or key.replace("-", " ").title()
+        metrics.append({
+            "id": metric_id, "label": label, "short_label": label, "group": "Benchmarks",
+            "entity_type": "agent", "format": "percent", "composite": False,
+            "description": f"{label} component of the Coding Agent Index.",
+        })
+        known.add(metric_id)
+    agent_benchmark_keys = {agent_metric_id(key): key for key in component_keys}
     for agent in agents:
         agent_id = agent["id"]
         display = agent.get("display") or {}
@@ -604,6 +675,20 @@ def main() -> None:
                 )
             )
             metric_counts[metric_id] += 1
+
+    for metric_id, meta in index_evaluation_meta.items():
+        scores = meta["scores"]
+        metrics.append({
+            "id": metric_id,
+            "label": meta["label"],
+            "short_label": meta["label"],
+            "group": "AA index evaluations",
+            "entity_type": "model",
+            # Most evaluations are a share of tasks; an Elo-style one (Briefcase) is not.
+            "format": "percent" if all(0 <= score <= 1 for score in scores) else "score100",
+            "composite": False,
+            "description": f"{meta['label']}, one of the Intelligence Index evaluations, with the cost and time Artificial Analysis measured on it.",
+        })
 
     metrics = [
         {**metric, "count": metric_counts.get(metric["id"], 0)}
@@ -662,7 +747,7 @@ def main() -> None:
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
     OUTPUT_PATH.write_text(encoded, encoding="utf-8")
     if SITE_OUTPUT_PATH.parent.parent.is_dir():
-        SITE_OUTPUT_PATH.parent.mkdir(exist_ok=True)
+        SITE_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
         SITE_OUTPUT_PATH.write_text(encoded, encoding="utf-8")
         print(f"Wrote {SITE_OUTPUT_PATH}")
     print(
