@@ -1,8 +1,32 @@
 {
-  "name": "subbench-worker",
+  "name": "subbench-site",
   "private": true,
-  "description": "Wrangler tooling for the SubBench dashboard Worker. The Worker itself is Python.",
+  "type": "module",
+  "description": "The SubBench site (Vite + SolidJS, Conduit components v2, Plotly charts) and the Wrangler tooling for its Worker.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite --config web/vite.config.ts",
+    "build": "vite build --config web/vite.config.ts",
+    "preview": "node scripts/dev-server.mjs",
+    "typecheck": "tsc --noEmit -p web",
+    "test": "node --test tests/*.mjs"
+  },
+  "dependencies": {
+    "@fontsource-variable/geist": "5.2.9",
+    "@kobalte/core": "0.13.12",
+    "clsx": "2.1.1",
+    "lucide-solid": "1.25.0",
+    "plotly.js-basic-dist-min": "4.1.2",
+    "plotly.js-gl3d-dist-min": "4.1.2",
+    "solid-js": "1.9.14"
+  },
   "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "5.9.3",
+    "vite": "6.4.4",
+    "vite-plugin-solid": "2.11.13",
     "wrangler": "^4.116.0"
   }
 }

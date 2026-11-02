@@ -1,172 +1,64 @@
-// The dashboard is static HTML with no build step, so its logic is otherwise only
-// exercised by opening a browser. These tests run the page script against a small DOM
-// stub and assert on the structure it builds.
+// The site's display rules live in plain modules (web/src/lib) that the Solid pages render, so the rules are tested
+// here directly under Node with no browser and no build. Each test is a rule the page must keep, carried over from
+// the single-page dashboard this site replaced.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import vm from "node:vm";
 
-const PAGE = new URL("../src/subbench/server/static/index.html", import.meta.url);
-
-class Node {
-  constructor(tag) {
-    this.tag = tag;
-    this.children = [];
-    this.attributes = {};
-    this.style = {};
-    this.classList = { add: (name) => { this.className = [this.className, name].filter(Boolean).join(" "); } };
-    this.className = "";
-    this.textContent = "";
-  }
-
-  append(...nodes) {
-    for (const node of nodes) this.children.push(node);
-  }
-
-  setAttribute(name, value) {
-    this.attributes[name] = value;
-  }
-
-  // Enough of the table API for renderTable.
-  insertRow() {
-    const row = new Node("tr");
-    row.insertCell = () => {
-      const cell = new Node("td");
-      row.append(cell);
-      return cell;
-    };
-    this.append(row);
-    return row;
-  }
-
-  // Every node of a given tag anywhere below this one.
-  find(tag) {
-    return this.children.flatMap((child) =>
-      (child.tag === tag ? [child] : []).concat(child.find ? child.find(tag) : []));
-  }
-
-  get text() {
-    return [this.textContent, ...this.children.map((child) => child.text || "")].join(" ");
-  }
-}
-
-function harness() {
-  const hosts = {
-    summary: new Node("div"),
-    charts: new Node("div"),
-    estimates: new Node("table"),
-    meta: new Node("div"),
-    footer: new Node("footer"),
-  };
-  const document = {
-    getElementById: (id) => hosts[id],
-    createElement: (tag) => new Node(tag),
-    createElementNS: (_ns, tag) => new Node(tag),
-    createTextNode: (value) => Object.assign(new Node("#text"), { textContent: value }),
-  };
-
-  let source = readFileSync(PAGE, "utf8").match(/<script>([\s\S]*)<\/script>/)[1];
-  // The page refreshes itself on load and on a timer. Neither belongs in a unit test.
-  source = source.replace(/\nrefresh\(\);\n\s*setInterval\([^)]*\);\s*$/, "\n");
-  source += "\nglobalThis.page = { renderSummary, renderCharts, renderTable, visibleEstimates, trendPoints };";
-
-  const context = vm.createContext({ document, setInterval() {}, fetch() {}, console });
-  vm.runInContext(source, context);
-  return { page: context.page, hosts };
-}
+import { visibleEstimates, trendPoints, summaryCards, headline, modelTotals, mixByWindow, freshness, settled, STALE_AFTER_MS }
+  from "../web/src/lib/value.js";
+import { money, range, ago } from "../web/src/lib/format.js";
 
 const DAY = 86400000;
 const past = (days) => new Date(Date.now() - days * DAY).toISOString();
 
 function windowRow(overrides = {}) {
   return {
-    provider: "codex",
-    plan: "plus",
-    product: "ChatGPT Plus",
-    account_id: "acct-A",
-    window: "weekly",
-    reset_key: past(3),
-    estimate_usd: 100,
-    covered_quota_percent: 60,
-    tier: "confirmed",
-    ...overrides,
+    provider: "codex", plan: "plus", product: "ChatGPT Plus", account_id: "acct-A", window: "weekly",
+    reset_key: past(3), estimate_usd: 100, covered_quota_percent: 60, tier: "confirmed", ...overrides,
   };
 }
 
 function trendRow(overrides = {}) {
   return {
-    product: "ChatGPT Plus",
-    provider: "codex",
-    plan: "plus",
-    window: "weekly",
+    product: "ChatGPT Plus", provider: "codex", plan: "plus", window: "weekly",
     period_start: new Date(Date.now() - 7 * DAY).toISOString().slice(0, 10),
-    estimate_usd: 100,
-    window_count: 2,
-    account_count: 2,
-    ...overrides,
+    estimate_usd: 100, window_count: 2, account_count: 2, ...overrides,
   };
 }
 
-test("one line per product, whatever the accounts behind it", () => {
-  const { page, hosts } = harness();
-  const points = page.trendPoints([
-    trendRow({ period_start: "2026-08-03", estimate_usd: 105, window_count: 2, account_count: 2 }),
-    trendRow({ period_start: "2026-08-10", estimate_usd: 152, window_count: 3, account_count: 2 }),
-    trendRow({ product: "Claude", provider: "claude", plan: null, period_start: "2026-08-10",
-               estimate_usd: 300, window_count: 1, account_count: 1 }),
+const limit = (card, key) => card.limits.find((item) => item.window.key === key);
+
+test("one series per product, whatever the accounts behind it", () => {
+  const points = trendPoints([
+    trendRow({ period_start: "2026-08-03", estimate_usd: 105 }),
+    trendRow({ period_start: "2026-08-10", estimate_usd: 152, window_count: 3 }),
+    trendRow({ product: "Claude", provider: "claude", plan: null, period_start: "2026-08-10", estimate_usd: 300 }),
   ]);
-  page.renderCharts(points);
-
-  const weekly = hosts.charts.children[0];
-  // ChatGPT Plus has two periods and draws a line; Claude has one period and draws none.
-  assert.equal(weekly.find("path").length, 1);
-  assert.equal(weekly.find("circle").length, 3);
-
-  const legend = weekly.children.find((child) => child.className === "legend");
-  assert.deepEqual(legend.children.map((item) => item.text.trim()), ["ChatGPT Plus", "Claude"]);
+  assert.deepEqual([...new Set(points.map((p) => p.product))].sort(), ["ChatGPT Plus", "Claude"]);
+  assert.deepEqual(points.map((p) => p.completed_ms), [...points.map((p) => p.completed_ms)].sort((a, b) => a - b));
 });
 
-test("the chart counts the windows pooled into its points", () => {
-  const { page, hosts } = harness();
-  page.renderCharts(page.trendPoints([
-    trendRow({ period_start: "2026-08-03", window_count: 2 }),
-    trendRow({ period_start: "2026-08-10", window_count: 3 }),
-  ]));
-  assert.match(hosts.charts.children[0].text, /5 confirmed windows over 2 points/);
-});
-
-test("a trend point names the accounts it pooled, not one source account", () => {
-  const { page, hosts } = harness();
-  page.renderCharts(page.trendPoints([
-    trendRow({ period_start: "2026-08-03" }),
-    trendRow({ period_start: "2026-08-10" }),
-  ]));
-  assert.match(hosts.charts.children[0].text, /2 windows · 2 accounts/);
+test("a trend point without a value or a date is dropped", () => {
+  assert.equal(trendPoints([trendRow({ estimate_usd: 0 }), trendRow({ period_start: "not a date" })]).length, 0);
 });
 
 test("the headline value is the pooled product figure, not one account's window", () => {
-  const { page, hosts } = harness();
-  page.renderSummary(
-    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 128, window_count: 2, account_count: 2 }],
-    [windowRow({ account_id: "acct-A", estimate_usd: 105 }),
-     windowRow({ account_id: "acct-B", estimate_usd: 152 })],
+  const [card] = summaryCards(
+    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 128, lower_usd: 120, upper_usd: 140, window_count: 2, account_count: 2 }],
+    [windowRow({ account_id: "acct-A", estimate_usd: 105 }), windowRow({ account_id: "acct-B", estimate_usd: 152 })],
   );
-  const text = hosts.summary.text;
-  assert.match(text, /\$128\b/);
-  assert.match(text, /2 windows · 2 accounts/);
-  assert.doesNotMatch(text, /\$152\b/);
+  assert.equal(limit(card, "weekly").state, "settled");
+  assert.equal(limit(card, "weekly").row.estimate_usd, 128);
+  assert.equal(headline(card).value, 128);
 });
 
 test("product names come from the payload, so a new plan names itself", () => {
-  const { page, hosts } = harness();
-  const rows = page.visibleEstimates([windowRow({ plan: "pro", product: "ChatGPT Pro" })]);
-  page.renderTable(rows);
-  assert.match(hosts.estimates.text, /ChatGPT Pro/);
+  const rows = visibleEstimates([windowRow({ plan: "pro", product: "ChatGPT Pro" })]);
+  assert.equal(rows[0].product, "ChatGPT Pro");
 });
 
-test("open, unconfirmed and converted windows are all excluded", () => {
-  const { page } = harness();
-  const rows = page.visibleEstimates([
+test("open, unconfirmed, converted and empty windows are all excluded", () => {
+  const rows = visibleEstimates([
     windowRow({ reset_key: past(-2) }),
     windowRow({ tier: "likely" }),
     windowRow({ tier: "provisional" }),
@@ -178,52 +70,95 @@ test("open, unconfirmed and converted windows are all excluded", () => {
 
 // A product that vanishes is indistinguishable from one nobody is watching.
 test("a measured product with nothing confirmed still gets a card", () => {
-  const { page, hosts } = harness();
-  page.renderSummary([], [windowRow({ product: "Claude Pro", tier: "provisional" })]);
-  assert.match(hosts.summary.text, /Claude Pro/);
-  assert.match(hosts.summary.text, /Not enough evidence yet/);
+  const cards = summaryCards([], [windowRow({ product: "Claude Pro", tier: "provisional" })]);
+  assert.deepEqual(cards.map((c) => c.name), ["Claude Pro"]);
+  assert.equal(limit(cards[0], "weekly").state, "empty");
+  assert.equal(headline(cards[0]), null);
 });
 
 test("a product with a figure for one limit and not the other shows both", () => {
-  const { page, hosts } = harness();
-  page.renderSummary(
+  const [card] = summaryCards(
     [{ product: "Claude Pro", window: "five_hour", estimate_usd: 31, window_count: 1, account_count: 1 }],
     [windowRow({ product: "Claude Pro", window: "weekly", tier: "provisional" })],
   );
-  assert.match(hosts.summary.text, /\$31/);
-  assert.match(hosts.summary.text, /Not enough evidence yet/);
+  assert.equal(limit(card, "five_hour").state, "settled");
+  assert.equal(limit(card, "weekly").state, "empty");
 });
 
-test("a settled figure shows the range it is settled to", () => {
-  const { page, hosts } = harness();
-  page.renderSummary(
-    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 152,
-       lower_usd: 136, upper_usd: 160, window_count: 3, account_count: 2 }],
+test("a settled figure carries the range it is settled to", () => {
+  const [card] = summaryCards(
+    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 152, lower_usd: 136, upper_usd: 160, window_count: 3, account_count: 2 }],
     [windowRow()],
   );
-  assert.match(hosts.summary.text, /\$152/);
-  assert.match(hosts.summary.text, /\$136–\$160/);
+  assert.equal(money(limit(card, "weekly").row.estimate_usd), "$152");
+  assert.equal(range(limit(card, "weekly").row), "$136–$160");
 });
 
-test("a likely window shows a range and no invented figure", () => {
-  const { page, hosts } = harness();
-  page.renderSummary([], [windowRow({ product: "Claude Pro", window: "five_hour" })],
-    [{ product: "Claude Pro", window: "five_hour", estimate_usd: 31.85,
-       lower_usd: 21.5, upper_usd: 44.56, window_count: 2, account_count: 1 }]);
-  assert.match(hosts.summary.text, /\$21\.50–\$44\.56/);
-  assert.match(hosts.summary.text, /range only, not yet settled/);
-  assert.doesNotMatch(hosts.summary.text, /\$31\.85/);
+test("a likely window is a range with no invented figure", () => {
+  const [card] = summaryCards([], [windowRow({ product: "Claude Pro", window: "five_hour" })],
+    [{ product: "Claude Pro", window: "five_hour", estimate_usd: 31.85, lower_usd: 21.5, upper_usd: 44.56, window_count: 2, account_count: 1 }]);
+  const five = limit(card, "five_hour");
+  assert.equal(five.state, "range");
+  assert.equal(range(five.row), "$21.50–$44.56");
 });
 
 test("the in progress figure appears beside a settled one", () => {
-  const { page, hosts } = harness();
-  page.renderSummary(
-    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 152,
-       lower_usd: 136, upper_usd: 160, window_count: 3, account_count: 2 }],
+  const [card] = summaryCards(
+    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 152, lower_usd: 136, upper_usd: 160, window_count: 3, account_count: 2 }],
     [windowRow()], [],
-    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 93,
-       lower_usd: 81, upper_usd: 106, window_count: 2, account_count: 2,
-       covered_quota_percent: 41.4 }]);
-  assert.match(hosts.summary.text, /in progress \$93/);
-  assert.match(hosts.summary.text, /41% measured/);
+    [{ product: "ChatGPT Plus", window: "weekly", estimate_usd: 93, lower_usd: 81, upper_usd: 106, window_count: 2, account_count: 2, covered_quota_percent: 41.4 }]);
+  const weekly = limit(card, "weekly");
+  assert.equal(weekly.state, "settled");
+  assert.equal(weekly.live.estimate_usd, 93);
+});
+
+test("the headline falls back to the in progress weekly figure, never to a 5-hour one", () => {
+  const [card] = summaryCards(
+    [{ product: "Claude Pro", window: "five_hour", estimate_usd: 31, window_count: 1, account_count: 1 }],
+    [windowRow({ product: "Claude Pro" })], [],
+    [{ product: "Claude Pro", window: "weekly", estimate_usd: 250, lower_usd: 200, upper_usd: 300, window_count: 1, account_count: 1, covered_quota_percent: 30 }]);
+  assert.deepEqual([headline(card).kind, headline(card).value], ["live", 250]);
+});
+
+test("model totals count weekly windows only, so contained 5-hour tokens are not counted twice", () => {
+  const rows = [
+    { provider: "claude", window: "weekly", resets_at: "2026-08-08T00:00:00Z", model: "claude-opus-5", total_tokens: 900 },
+    { provider: "claude", window: "weekly", resets_at: "2026-08-08T00:00:00Z", model: "claude-sonnet-5", total_tokens: 100 },
+    { provider: "claude", window: "five_hour", resets_at: "2026-08-07T05:00:00Z", model: "claude-opus-5", total_tokens: 500 },
+  ];
+  const totals = modelTotals(rows);
+  assert.equal(totals[0].model, "claude-opus-5");
+  assert.equal(totals[0].tokens, 900);
+  assert.equal(Math.round(totals[0].share * 100), 90);
+});
+
+test("the mix chart gives each window its parts, newest last", () => {
+  const rows = [
+    { provider: "codex", window: "weekly", resets_at: "2026-08-15", model: "a", total_tokens: 3 },
+    { provider: "codex", window: "weekly", resets_at: "2026-08-08", model: "a", total_tokens: 1 },
+    { provider: "codex", window: "weekly", resets_at: "2026-08-08", model: "b", total_tokens: 3 },
+  ];
+  const mix = mixByWindow(rows, { provider: "codex" });
+  assert.deepEqual(mix.map((w) => w.resets_at), ["2026-08-08", "2026-08-15"]);
+  assert.deepEqual(mix[0].parts.map((p) => p.model), ["b", "a"]);
+});
+
+test("a stale report never looks current, and demo data says so", () => {
+  const now = Date.now();
+  assert.equal(freshness({ last_report_at: new Date(now - 10 * 60000).toISOString() }, now).state, "live");
+  assert.equal(freshness({ last_report_at: new Date(now - STALE_AFTER_MS - 60000).toISOString() }, now).state, "stale");
+  assert.equal(freshness({ last_report_at: null }, now).state, "stale");
+  assert.equal(freshness({ demo: true, last_report_at: new Date(now).toISOString() }, now).state, "demo");
+  assert.equal(freshness(null, now).state, "down");
+});
+
+test("a reset in the future or a converted key is not settled", () => {
+  assert.equal(settled(past(-1)), false);
+  assert.equal(settled(past(1) + "~via~five_hour"), false);
+  assert.equal(settled(past(1)), true);
+});
+
+test("money groups thousands and keeps cents under 100", () => {
+  assert.deepEqual([money(1559.4), money(128), money(48.08), money(Number.NaN)], ["$1,559", "$128", "$48.08", "—"]);
+  assert.equal(ago(null), "never");
 });

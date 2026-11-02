@@ -121,7 +121,8 @@ test("health does not count raw usage rows and the footer does not show them", a
   const db = new FakeD1();
   const response = await worker.fetch(request("/api/health"), env(db));
   const body = await response.json();
-  const page = readFileSync(new URL("../src/subbench/server/static/index.html", import.meta.url), "utf8");
+  // The site's polling lives in one module that every page uses.
+  const page = readFileSync(new URL("../web/src/app/data.ts", import.meta.url), "utf8");
 
   assert.equal(response.status, 200);
   assert.equal("usage_rows" in body, false);

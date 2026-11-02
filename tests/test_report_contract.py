@@ -7,7 +7,7 @@ contract is asserted instead.
 from subbench.push import build_reports
 from subbench.store import connect
 
-# Exactly what src/subbench/server/static/index.html reads from a history window row.
+# Exactly what the site (web/src/lib/value.js and the Subscriptions page) reads from a history window row.
 PAGE_FIELDS = {
     "provider",
     "account_id",
@@ -17,6 +17,8 @@ PAGE_FIELDS = {
     "reset_key",
     "estimate_usd",
     "tier",
+    "coverage_percent",
+    "covered_quota_percent",
 }
 
 # Exactly what the page reads from a pooled product row.
@@ -120,7 +122,7 @@ def test_no_source_file_contains_a_null_byte():
     root = Path(__file__).resolve().parent.parent
     suspect = [
         path
-        for folder in ("src", "tests", "worker")
+        for folder in ("src", "tests", "worker", "web/src", "scripts")
         for path in (root / folder).rglob("*")
         if path.is_file() and path.suffix in {".py", ".js", ".mjs", ".html", ".sql", ".json"}
         and b"\x00" in path.read_bytes()

@@ -17,6 +17,12 @@ DATABASE_NAME = "archive.sqlite3"
 DEEPSWE_PATH = Path("leaderboard.json")
 FRONTIERCODE_PATH = Path("frontiercode-data.json")
 OUTPUT_PATH = Path("frontier-data.json")
+# The combined SubBench site serves the same bundle from its static assets. Resolved from
+# this file rather than the working directory, so the copy lands in one place however the
+# script is invoked.
+SITE_OUTPUT_PATH = (
+    Path(__file__).resolve().parent.parent / "src" / "subbench" / "server" / "static" / "data" / "frontier.json"
+)
 
 BENCHMARKS = {
     "aa_long_context_reasoning": (
@@ -653,10 +659,12 @@ def main() -> None:
             "observations": len(observations),
         },
     }
-    OUTPUT_PATH.write_text(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    OUTPUT_PATH.write_text(encoded, encoding="utf-8")
+    if SITE_OUTPUT_PATH.parent.parent.is_dir():
+        SITE_OUTPUT_PATH.parent.mkdir(exist_ok=True)
+        SITE_OUTPUT_PATH.write_text(encoded, encoding="utf-8")
+        print(f"Wrote {SITE_OUTPUT_PATH}")
     print(
         f"Wrote {OUTPUT_PATH} with {payload['counts']['models']} models, "
         f"{payload['counts']['agents']} agent configurations, "

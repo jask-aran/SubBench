@@ -18,8 +18,12 @@
     { "pattern": "subbench.jask-aran.com", "custom_domain": true }
   ],
 
+  // The site is a Vite build (web/). Wrangler runs it before `wrangler deploy` and `wrangler dev`, so the uploaded
+  // assets are always the current source and never a stale build or a cached copy.
+  "build": { "command": "npm run build" },
+
   "assets": {
-    "directory": "src/subbench/server/static",
+    "directory": "dist/site",
     "binding": "ASSETS",
     "not_found_handling": "404-page"
   },
