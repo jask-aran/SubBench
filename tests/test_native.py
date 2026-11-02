@@ -302,3 +302,16 @@ def test_a_closed_hour_keeps_the_account_that_spent_it(home, tmp_path):
     assert save_hourly(db, provider="codex", account_id="acct-B", buckets=reader.hourly(), now="t3") == 1
     accounts = {(row["hour"][11:13], row["account_id"]) for row in hourly(db)}
     assert accounts == {("09", "acct-A"), ("10", "acct-B")}
+
+
+def test_an_unwritable_database_is_a_message_not_a_traceback(tmp_path, monkeypatch, capsys):
+    import sqlite3
+
+    from subbench import cli
+
+    def refuse(path):
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+    monkeypatch.setattr(cli, "connect", refuse)
+    assert cli.main(["--database", str(tmp_path / "db.sqlite3"), "doctor"]) == 2
+    assert "needs write access" in capsys.readouterr().err

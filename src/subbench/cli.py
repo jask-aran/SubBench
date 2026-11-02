@@ -228,7 +228,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _config(args)
     if args.command == "privacy" and args.privacy_command not in ("preview", "migration"):
         return privacy.run(None, args)
-    db = connect(args.database)
+    try:
+        db = connect(args.database)
+    except sqlite3.OperationalError as error:
+        # Opening also brings the schema up to date, which needs write access.
+        print(f"cannot open {args.database} for writing: {error}. SubBench needs write access to its "
+              f"database directory, {args.database.parent}.", file=sys.stderr)
+        return 2
     if args.command == "privacy":
         return privacy.run(db, args)
 
