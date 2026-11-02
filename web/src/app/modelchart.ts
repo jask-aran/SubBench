@@ -225,45 +225,49 @@ export function option3d(o: {
 
 export { mix };
 
-// ---------------------------------------------------------------- plans matrix
+// ---------------------------------------------------------------- plans
 
-/* How much work each plan gets done: models down the side, measured plans across, each cell the benchmark tasks one
-   weekly limit buys (the plan's weekly API-equivalent value over the model's cost per task). A plan only covers its
-   own provider's models, so other cells stay empty rather than inventing a figure. */
-export function optionMatrix(o: {
-  rows: Array<{ key: string; label: string; score: string; colour: string }>;
-  plans: Array<{ name: string; value: number }>;
-  cells: Array<[number, number, number]>; // [plan index, row index, tasks per week]
-  size: Size;
-}) {
+/* How much work each plan gets done on one benchmark: x is tasks per week (the plan's weekly API-equivalent value over
+   a model's cost per task), y the model's score. Each plan's best trade-offs (more tasks and a higher score than any
+   alternative on the same plan) are joined into that plan's curve, named at its end; everything else is a faint dot.
+   A plan only covers its provider's models, so each curve holds only those. */
+export type PlanSeries = { name: string; colour: string; dash: boolean; points: Array<{ key: string; label: string; short: string; tasks: number; score: number; hover: string; best: boolean }> };
+
+export function optionPlans(o: { plans: PlanSeries[]; score: Axis; labels: boolean; size: Size }) {
   const p = palette();
-  const values = o.cells.map((c) => c[2]).filter((v) => v > 0);
-  const lo = Math.log10(Math.max(1e-9, Math.min(...values))), hi = Math.log10(Math.max(...values));
-  const rowH = Math.max(18, Math.min(30, (o.size.height - 90) / Math.max(1, o.rows.length)));
+  const series: any[] = [];
+  for (const plan of o.plans) {
+    const colour = token(plan.colour);
+    const best = plan.points.filter((q) => q.best).sort((a, b) => a.tasks - b.tasks);
+    series.push({
+      type: "scatter", name: plan.name, z: 2, symbolSize: 7, silent: false,
+      data: plan.points.filter((q) => !q.best).map((q) => ({ name: q.key, value: [q.tasks, q.score], hover: q.hover })),
+      itemStyle: { color: alpha(colour, 0.35), borderWidth: 0 },
+    });
+    series.push({
+      type: "line", name: plan.name, z: 3, symbol: "circle", symbolSize: 9, smooth: false,
+      data: best.map((q) => ({ name: q.key, value: [q.tasks, q.score], hover: q.hover,
+        label: { show: o.labels, formatter: tidy(q.short), position: "top", color: p.ink, fontFamily: p.sans, fontSize: 11, distance: 6 } })),
+      lineStyle: { color: colour, width: 2.2, type: plan.dash ? "dashed" : "solid" },
+      itemStyle: { color: colour, borderColor: p.card, borderWidth: 1.5 },
+      labelLayout: { hideOverlap: true, moveOverlap: "shiftY" },
+      endLabel: { show: true, formatter: plan.name, color: colour, fontFamily: p.sans, fontSize: 13, fontWeight: 600, distance: 10 },
+      emphasis: { focus: "series" },
+    });
+  }
+  const axis = (a: Axis, name: string, log: boolean) => ({
+    type: log ? "log" : "value", name, nameLocation: "middle", nameGap: name.startsWith("Tasks") ? 32 : 46, scale: !log,
+    nameTextStyle: { color: p.muted, fontFamily: p.sans, fontSize: 12 },
+    axisLabel: { color: p.muted, fontFamily: p.data, fontSize: 11, formatter: fmtFor(a), hideOverlap: true },
+    axisLine: { show: false }, axisTick: { show: false }, splitLine: { lineStyle: { color: p.grid } },
+  });
   return {
-    backgroundColor: "transparent", textStyle: { fontFamily: p.sans }, animation: false,
-    grid: { left: 250, right: 24, top: 44, bottom: 64, height: rowH * o.rows.length },
-    tooltip: { ...tooltip(p), formatter: (q: any) => {
-      const [x, y, v] = q.data.value;
-      return `<b>${o.rows[y].label}</b><br>${o.plans[x].name}  <b>${integer(10 ** v)}</b> tasks / week<br>` +
-        `<span style="font-size:11px">score ${o.rows[y].score} · $${Math.round(o.plans[x].value).toLocaleString()} per week</span>`;
-    } },
-    xAxis: { type: "category", position: "top", data: o.plans.map((plan) => plan.name), splitArea: { show: false },
-      axisLabel: { color: p.ink, fontFamily: p.sans, fontSize: 13, fontWeight: 600 }, axisLine: { show: false }, axisTick: { show: false } },
-    yAxis: { type: "category", inverse: true, data: o.rows.map((r) => r.key),
-      axisLabel: { fontFamily: p.sans, fontSize: 12, color: p.ink, width: 230, overflow: "truncate",
-        formatter: (key: string) => { const r = o.rows.find((row) => row.key === key)!; return `{s|${r.score}}  ${r.label}`; },
-        rich: { s: { fontFamily: p.data, fontSize: 11, color: p.muted, width: 34, align: "right" } } },
-      axisLine: { show: false }, axisTick: { show: false } },
-    visualMap: { type: "continuous", min: lo, max: hi, dimension: 2, orient: "horizontal", left: 250, bottom: 8, itemWidth: 10, itemHeight: 220,
-      inRange: { color: p.ramp }, text: ["more work", "tasks / week"], textStyle: { color: p.muted, fontFamily: p.sans, fontSize: 11 },
-      formatter: (v: number) => integer(10 ** v), calculable: false },
-    series: [{
-      type: "heatmap", data: o.cells.map(([x, y, v]) => ({ value: [x, y, Math.log10(v)] })),
-      itemStyle: { borderColor: p.card, borderWidth: 2, borderRadius: 4 },
-      label: { show: true, fontFamily: p.data, fontSize: 12, color: p.ink, textBorderColor: p.card, textBorderWidth: 3,
-        formatter: (q: any) => integer(10 ** q.data.value[2]) },
-      emphasis: { itemStyle: { borderColor: p.ink, borderWidth: 1.5 } },
-    }],
+    backgroundColor: "transparent", textStyle: { fontFamily: p.sans }, animationDuration: 250,
+    grid: { left: 64, right: 130, top: 20, bottom: 52 },
+    tooltip: tooltip(p),
+    xAxis: axis({ title: "Tasks / week", log: true, unit: "integer", higherBetter: true }, "Tasks per weekly limit · log", true),
+    yAxis: axis(o.score, o.score.title, false),
+    dataZoom: [{ type: "inside", xAxisIndex: 0, filterMode: "none" }, { type: "inside", yAxisIndex: 0, filterMode: "none" }],
+    series,
   };
 }

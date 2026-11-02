@@ -5,7 +5,7 @@ import { Picker, ToggleMenu, type PickGroup } from "../app/picker";
 import { ArrowLeftRightIcon, XIcon, SlidersHorizontalIcon } from "lucide-solid";
 import { hoverHTML } from "../app/charts";
 import { EChart } from "../app/echart";
-import { option2d, option3d, optionMatrix, type Row } from "../app/modelchart";
+import { option2d, option3d, optionPlans, type Row, type PlanSeries } from "../app/modelchart";
 import { RESOURCE_FORMAT } from "../app/points";
 import { loadFrontier, loadReports, personal } from "../app/data";
 import { Segmented, Input, Swatch, Slider } from "../conduit/ui/controls";
@@ -207,22 +207,27 @@ function Models() {
       named: named.has(key(row.p)) || !!me()?.mine.has(row.p.entity.id),
     }));
   });
-  // The plans matrix: the benchmark's models with a cost per task that some measured plan covers, best score first.
-  const matrix = createMemo(() => {
-    const list = base().filter((p: any) => !hidden().has(familyGroup(p.entity.family)) && p.observation.resources?.cost > 0
-      && plansFor(p.entity).length && (!needle() || `${p.entity.label} ${p.entity.id}`.toLowerCase().includes(needle())))
-      .sort((a: any, b: any) => b.observation.score - a.observation.score).slice(0, 30);
-    const cells: Array<[number, number, number]> = [];
-    list.forEach((p: any, y: number) => plans().forEach((plan, x) => {
-      if (plan.provider === providerOf(p.entity)) cells.push([x, y, plan.value / p.observation.resources.cost]);
-    }));
-    return {
-      rows: list.map((p: any) => ({ key: key(p), label: label(p), score: fmtScore(p.observation.score, meta()?.format, true), colour: familyColor(p.entity.family) })),
-      plans: plans().map((plan) => ({ name: plan.name, value: plan.value })), cells,
-    };
+  // Plans: every measured plan's tasks per week on the chosen benchmark, with each plan's best trade-offs as its curve.
+  const planSeries = createMemo<PlanSeries[]>(() => {
+    const seen = new Map<string, number>();
+    return plans().map((plan) => {
+      const n = seen.get(plan.provider) ?? 0;
+      seen.set(plan.provider, n + 1);
+      const points = base().filter((p: any) => providerOf(p.entity) === plan.provider && p.observation.resources?.cost > 0
+          && !hidden().has(familyGroup(p.entity.family)) && (!needle() || `${p.entity.label} ${p.entity.id}`.toLowerCase().includes(needle())))
+        .map((p: any) => {
+          const tasks = plan.value / p.observation.resources.cost;
+          return { key: key(p), label: label(p), short: p.entity.label, tasks, score: p.observation.score,
+            hover: hoverHTML(label(p), [["Plan", plan.name], ["Tasks / week", integer(tasks)], [meta()?.label ?? "Score", fmtScore(p.observation.score, meta()?.format)],
+              ["Cost / task", price(p.observation.resources.cost)]]), best: false };
+        });
+      const keep = new Set(paretoN(points, [(q: any) => q.tasks, (q: any) => q.score], [true, true]).map((q: any) => q.key));
+      for (const q of points) q.best = keep.has(q.key);
+      return { name: plan.name, colour: familyColor(provider(plan.provider)), dash: n > 0, points };
+    }).filter((s) => s.points.length);
   });
   const chartOption = (size: { width: number; height: number }) => {
-    if (view() === "plans") return optionMatrix({ ...matrix(), size });
+    if (view() === "plans") return optionPlans({ plans: planSeries(), score: axisMeta("score"), labels: labels(), size });
     const r = rows();
     if (flat()) {
       const [x, y, z] = axes();
@@ -324,20 +329,20 @@ function Models() {
     <div class="sb-canvas" data-rail={rail() ? "on" : "off"}>
       <section class="sb-canvas-main" aria-label="Chart">
         <div class="sb-canvas-head">
-          <h2>{view() === "plans" ? `${meta()?.label ?? ""} tasks per week, by plan`
+          <h2>{view() === "plans" ? `${meta()?.label ?? ""} vs tasks per week, by plan`
             : `${title(yAxis())} vs ${title(xAxis())}${is3d() ? (orbit() ? ` vs ${title(zAxis())}` : ` · colour: ${title(zAxis())}`) : ""}`}</h2>
           <div class="sb-chart-legend">
             <Show when={view() === "plans"} fallback={<>
             <span><i data-best="" />best trade-off</span>
             <Show when={me()?.mine.size}><span><i data-ring="" />in measured usage</span></Show>
             <span>{items().length} shown · {is3d() && orbit() ? "drag to orbit" : "scroll to zoom"}</span></>}>
-              <span>{matrix().rows.length} models · plan value ÷ cost per task</span>
+              <span>tasks / week = plan value ÷ cost per task · each line a plan's best trade-offs</span>
             </Show>
           </div>
         </div>
         <div class="sb-canvas-chart">
           <Show when={index()} fallback={<Skeleton />}>
-            <Show when={view() === "plans" ? matrix().cells.length > 0 : items().length >= 2} fallback={<div class="sb-chart-empty" style={{ height: "100%" }}>No models have all of these axes</div>}>
+            <Show when={view() === "plans" ? planSeries().length > 0 : items().length >= 2} fallback={<div class="sb-chart-empty" style={{ height: "100%" }}>No models have all of these axes</div>}>
               <EChart option={chartOption} onClick={onClick} label="Models chart" />
             </Show>
           </Show>
@@ -356,7 +361,15 @@ function Models() {
                 </div>}</For>
             </Inset>
           </Show>
-          <Show when={is3d() && orbit()}>
+          <Show when={view() === "plans"}>
+            <For each={planSeries()}>{(series) =>
+              <Inset title={series.name} tight aside={<span class="sb-tag" data-tone="quiet">{series.points.filter((q) => q.best).length}</span>}>
+                <div class="sb-rows"><For each={series.points.filter((q) => q.best).sort((a, b) => b.score - a.score)}>{(q) =>
+                  <DashRow primary={q.label} trailing={`${fmtScore(q.score, meta()?.format, true)} · ${integer(q.tasks)}/wk`}
+                    lead={<Swatch colour={series.colour} />} />}</For></div>
+              </Inset>}</For>
+          </Show>
+          <Show when={is3d() && orbit() && view() === "chart"}>
             <Inset title="Camera" tight>
               <Segmented label="Camera" size="sm" value={camera()} onChange={setCamera}
                 options={[{ value: "iso", label: "3D" }, { value: "front", label: "Front" }, { value: "side", label: "Side" }, { value: "top", label: "Top" }]} />
