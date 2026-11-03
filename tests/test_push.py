@@ -1,3 +1,4 @@
+import json
 import urllib.error
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from subbench.push import (
     push_once,
     push_state,
 )
+from subbench.products import pool_input
 from subbench.store import connect
 
 URL = "https://example.invalid/ingest"
@@ -96,7 +98,12 @@ def test_default_push_sends_measurements_and_reports_without_raw_usage(tmp_path:
     assert payload["schema_version"] == 1
     assert payload["agent_id"] == push_state(db, URL).agent_id
     assert payload["usage"] == []
-    assert set(payload["reports"]) == {"current", "history", "models", "weights", "series"}
+    # Reports travel as JSON text, with the window fields pooling reads beside them: the
+    # Worker stores the text as it is, and never builds a report's objects (CPU per push).
+    assert "reports" not in payload
+    assert set(payload["report_text"]) == {"current", "history", "models", "weights", "series", "pool_input"}
+    history = json.loads(payload["report_text"]["history"])
+    assert json.loads(payload["report_text"]["pool_input"]) == pool_input(history)
 
 
 def test_raw_usage_requires_explicit_opt_in(tmp_path: Path, monkeypatch) -> None:

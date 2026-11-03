@@ -395,6 +395,49 @@ test("ingest stores the compact pool input and logs no accepted push", async () 
   assert.equal(db.bound.some((statement) => statement.sql.includes("INSERT INTO ingest_log")), false);
 });
 
+const textIngest = (reportText) => request("/ingest", {
+  method: "POST",
+  headers: { authorization: "Bearer token", "content-type": "application/json" },
+  body: JSON.stringify({ schema_version: 1, agent_id: "agent-1", entitlements: [], usage: [], report_text: reportText }),
+});
+
+test("report text is stored verbatim and pool input as sent", async () => {
+  const db = new FakeD1();
+  const history = JSON.stringify({ windows: [historyWindow("acct-one", 50)] });
+  const poolText = JSON.stringify({ windows: [historyWindow("acct-one", 50)] });
+  const response = await worker.fetch(textIngest({ history, models: "{\"models\":[]}", pool_input: poolText }), env(db));
+  assert.equal(response.status, 200);
+  const reports = db.bound.filter((statement) => statement.sql.includes("INSERT INTO reports"));
+  const byKind = Object.fromEntries(reports.map((statement) => [statement.params[1], statement.params[3]]));
+  assert.equal(byKind.history, history);
+  assert.equal(byKind.models, "{\"models\":[]}");
+  assert.equal(byKind.pool_input, poolText);
+  assert.equal(db.state.dirty, 1);
+});
+
+test("report text without pool input gets one made from its history", async () => {
+  const db = new FakeD1();
+  const window = { ...historyWindow("acct-one", 50), extra_field: "x" };
+  await worker.fetch(textIngest({ history: JSON.stringify({ windows: [window] }) }), env(db));
+  assert.equal("extra_field" in db.agentReports.get("agent-1").windows[0], false);
+});
+
+test("an unhashed account id inside report text is hashed before it is stored", async () => {
+  const db = new FakeD1();
+  const raw = "00000000-1111-4222-8333-444444444444";
+  await worker.fetch(textIngest({ history: JSON.stringify({ windows: [historyWindow(raw, 50)] }) }), env(db));
+  const stored = JSON.stringify(db.bound.map((statement) => statement.params));
+  assert.equal(stored.includes(raw), false);
+  assert.equal(stored.includes(await pseudonym(raw)), true);
+});
+
+test("report text must be strings of known kinds", async () => {
+  for (const reportText of [{ secrets: "{}" }, { history: { windows: [] } }, { history: "not json" }]) {
+    const response = await worker.fetch(textIngest(reportText), env(new FakeD1()));
+    assert.equal(response.status, 400);
+  }
+});
+
 test("a rejected history ingest does not mark the pool dirty", async () => {
   const db = new FakeD1();
   const response = await worker.fetch(request("/ingest", {

@@ -144,6 +144,8 @@ def build_payload(
     entitlements: list[dict[str, Any]],
     usage: list[dict[str, Any]],
     reports: dict[str, Any] | None = None,
+    *,
+    as_text: bool = False,
 ) -> dict[str, Any]:
     payload = {
         "agent_id": agent_id,
@@ -157,7 +159,20 @@ def build_payload(
     # leaves the machine carries a provider's own account id.
     from .privacy import pseudonymise
 
-    return pseudonymise(payload)
+    payload = pseudonymise(payload)
+    if as_text and "reports" in payload:
+        # Sent as JSON text, the Worker stores each report as it is instead of building
+        # 700 KB of objects and serialising them again, which was most of a push's CPU.
+        # pool_input is the part of history that pooling reads, made here so the Worker
+        # does not have to parse history to make it.
+        from .products import pool_input
+
+        reports = payload.pop("reports")
+        text = {kind: json.dumps(report, separators=(",", ":")) for kind, report in reports.items()}
+        if "history" in reports:
+            text["pool_input"] = json.dumps(pool_input(reports["history"]), separators=(",", ":"))
+        payload["report_text"] = text
+    return payload
 
 
 def value_report(db: sqlite3.Connection, *, points: list[dict[str, Any]] | None = None,
@@ -360,7 +375,7 @@ def push_once(
     # Reports go with the first batch of a push so the dashboard is never showing
     # numbers derived from evidence the server has not finished receiving.
     payload = build_payload(state.agent_id, entitlements, usage,
-                            reports=reports if reports is not None else build_reports(db))
+                            reports=reports if reports is not None else build_reports(db), as_text=True)
     try:
         sender(url, token, payload, timeout)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as error:

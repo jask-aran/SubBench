@@ -41,7 +41,9 @@ export async function pseudonym(accountId) {
   return "acct-" + [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
 }
 
-const UNHASHED_ACCOUNT = /"account_id"\s*:\s*"(?!acct-)/;
+// Also matches the escaped form inside report_text, where a report is a JSON string.
+const UNHASHED_ACCOUNT = /\\?"account_id\\?"\s*:\s*\\?"(?!acct-)/;
+const TEXT_KINDS = new Set([...REPORT_KINDS, "pool_input"]);
 
 export async function pseudonymise(value, cache = new Map()) {
   if (Array.isArray(value)) {
@@ -214,12 +216,21 @@ function parse(payload) {
   for (const kind of Object.keys(reports)) {
     if (!REPORT_KINDS.has(kind)) throw new Invalid(400, `unknown report kind: ${kind}`);
   }
+  const reportText = payload.report_text ?? {};
+  if (typeof reportText !== "object" || reportText === null || Array.isArray(reportText)) {
+    throw new Invalid(400, "report_text must be an object");
+  }
+  for (const [kind, value] of Object.entries(reportText)) {
+    if (!TEXT_KINDS.has(kind)) throw new Invalid(400, `unknown report kind: ${kind}`);
+    if (typeof value !== "string") throw new Invalid(400, `report_text.${kind} must be a JSON string`);
+  }
 
   return {
     agentId,
     entitlements: entitlements.map((row) => entitlementRow(row, agentId)),
     usage: usage.map((row) => usageRow(row, agentId)),
     reports,
+    reportText,
     cursor: {
       entitlement_cursor: entitlements.length ? entitlements[entitlements.length - 1].observed_at : null,
       usage_cursor: usage.length ? usage[usage.length - 1].last_seen_at : null,
@@ -245,7 +256,19 @@ async function ingest(request, env) {
   // A collector from 0.3.0 on hashes every account id itself. Walking a 700 KB payload to
   // find none cost over half of an ingest's CPU, so walk only when the raw text holds an
   // account id without the hash prefix.
-  if (UNHASHED_ACCOUNT.test(body)) payload = await pseudonymise(payload);
+  if (UNHASHED_ACCOUNT.test(body)) {
+    payload = await pseudonymise(payload);
+    if (payload?.report_text && typeof payload.report_text === "object") {
+      for (const [kind, value] of Object.entries(payload.report_text)) {
+        if (typeof value !== "string") continue;
+        try {
+          payload.report_text[kind] = JSON.stringify(await pseudonymise(JSON.parse(value)));
+        } catch {
+          return json({ error: `report_text.${kind} must be JSON` }, 400);
+        }
+      }
+    }
+  }
   let batch;
   try {
     batch = parse(payload);
@@ -261,13 +284,29 @@ async function ingest(request, env) {
   const statements = [env.DB.prepare(AGENT_UPSERT).bind(batch.agentId, now, now)];
   for (const row of batch.entitlements) statements.push(env.DB.prepare(ENTITLEMENT_UPSERT).bind(...row));
   for (const row of batch.usage) statements.push(env.DB.prepare(USAGE_UPSERT).bind(...row));
+  // Reports sent as text are stored as they are: parsing and serialising 700 KB of report
+  // objects was most of a push's CPU time. Older collectors still send objects.
+  const texts = { ...batch.reportText };
   for (const [kind, report] of Object.entries(batch.reports)) {
-    statements.push(env.DB.prepare(REPORT_UPSERT).bind(batch.agentId, kind, now, JSON.stringify(report)));
+    if (!Object.hasOwn(texts, kind)) texts[kind] = JSON.stringify(report);
   }
-  if (Object.hasOwn(batch.reports, "history")) {
+  const hasHistory = Object.hasOwn(texts, "history");
+  if (hasHistory && !Object.hasOwn(texts, "pool_input")) {
     // The fields pooling reads, stored beside the full report so a pass parses only these.
-    statements.push(env.DB.prepare(REPORT_UPSERT).bind(
-      batch.agentId, "pool_input", now, JSON.stringify(poolInput(batch.reports.history))));
+    let history = batch.reports.history;
+    if (history === undefined) {
+      try {
+        history = JSON.parse(texts.history);
+      } catch {
+        return json({ error: "report_text.history must be JSON" }, 400);
+      }
+    }
+    texts.pool_input = JSON.stringify(poolInput(history));
+  }
+  for (const [kind, text] of Object.entries(texts)) {
+    statements.push(env.DB.prepare(REPORT_UPSERT).bind(batch.agentId, kind, now, text));
+  }
+  if (hasHistory) {
     statements.push(env.DB.prepare(
       "INSERT INTO pool_state (id, dirty) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET dirty = 1, revision = revision + 1"
     ));
