@@ -92,6 +92,7 @@ def collect_claude() -> list[EntitlementWindow]:
     wait = _CLAUDE_METER.get("next", 0.0) - now
     if wait > 0:
         reason = "rate-limit backoff" if _CLAUDE_METER.get("backoff") else "spacing"
+        _CLAUDE_METER["deferred"] = 1.0
         raise MeterDeferred(f"Claude meter next read in {wait:.0f} s ({reason})")
     try:
         rows = _read_claude()
@@ -99,10 +100,22 @@ def collect_claude() -> list[EntitlementWindow]:
         if getattr(error, "status", None) == 429:
             backoff = min(max(_CLAUDE_METER.get("backoff", 0.0) * 2, CLAUDE_BACKOFF_FIRST_SECONDS),
                           CLAUDE_BACKOFF_MAX_SECONDS)
-            _CLAUDE_METER.update(backoff=backoff, next=now + backoff)
+            _CLAUDE_METER.update(backoff=backoff, next=now + backoff, deferred=1.0)
         raise
-    _CLAUDE_METER.update(backoff=0.0, next=now + CLAUDE_METER_MIN_SECONDS)
+    _CLAUDE_METER.update(backoff=0.0, next=now + CLAUDE_METER_MIN_SECONDS, deferred=0.0)
     return rows
+
+
+def meter_retry_in(provider: str) -> float | None:
+    """Seconds until a meter read that was deferred or refused may be tried again, or None.
+
+    A reading is taken when the logs change. When the agent goes idle right after a
+    deferred read, the next change can be hours away and in another window, and the end
+    of that stretch of use would never be read. The watcher collects again at this time.
+    """
+    if provider != "claude" or not _CLAUDE_METER.get("deferred"):
+        return None
+    return max(_CLAUDE_METER.get("next", 0.0) - time.monotonic(), 0.0)
 
 
 def _read_claude() -> list[EntitlementWindow]:

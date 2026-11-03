@@ -11,7 +11,7 @@ from typing import Any, Callable, Sequence
 
 from . import account
 from .ccusage import CcusageSchemaError, compare_daily_tokens, normalise_payload
-from .entitlement import MeterDeferred, collect_entitlements
+from .entitlement import MeterDeferred, collect_entitlements, meter_retry_in
 from .incremental import AuthFileDetector, LogChangeDetector
 from .logs import LogReader, raw as logs_raw
 from .push import build_reports, push_all
@@ -329,6 +329,10 @@ def watch(
                 last_collected[provider] = now
                 pending_since.pop(provider, None)
                 pending_debounce.pop(provider, None)
+                retry = meter_retry_in(provider)
+                if retry is not None:
+                    pending_since[provider] = now
+                    pending_debounce[provider] = retry
 
         last_refreshed = refresh_if_due(db, last_refreshed=last_refreshed, now=now, emit=emit)
 

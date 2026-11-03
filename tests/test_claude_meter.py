@@ -79,3 +79,40 @@ def test_a_deferred_read_is_reported_but_not_as_unavailable(login, monkeypatch, 
     watcher.collect_target(db, target=watcher.WatchTarget("claude"), runner="native")
     ok, message = watcher.collect_target(db, target=watcher.WatchTarget("claude"), runner="native")
     assert ok and "entitlement deferred" in message and "unavailable" not in message
+
+
+def test_a_deferred_read_is_retried_when_the_wait_ends(monkeypatch):
+    # Without a retry, a deferred reading waited for the next log change, which can be in
+    # the next window when the agent goes idle; the end of a burst of use was lost.
+    from subbench import watcher
+
+    clock = {"now": 5000.0}
+    monkeypatch.setattr(watcher.time, "monotonic", lambda: clock["now"])
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock["now"] += seconds
+        if len(sleeps) >= 4:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(watcher.time, "sleep", fake_sleep)
+    monkeypatch.setattr(watcher, "refresh_if_due", lambda db, **kw: kw["now"])
+    monkeypatch.setattr(watcher.LogChangeDetector, "scan", lambda self: False)
+    monkeypatch.setattr(watcher.AuthFileDetector, "scan", lambda self: False)
+    collected = []
+
+    def collect(db, *, target, runner):
+        collected.append(clock["now"])
+        if len(collected) == 1:
+            entitlement._CLAUDE_METER.update(next=clock["now"] + 3, deferred=1.0)
+        else:
+            entitlement._CLAUDE_METER.update(deferred=0.0)
+        return True, "claude: ok"
+
+    monkeypatch.setattr(watcher, "collect_target", collect)
+    watcher.watch(object(), targets=[watcher.WatchTarget("claude")], runner="native", interval_seconds=2,
+                  reconcile_seconds=4000, emit=lambda message: None, debounce_seconds=60)
+    # The first pass collects (reconcile due at start), is deferred for 3 s, and the loop
+    # collects again once those 3 s have passed, with no log change.
+    assert len(collected) == 2 and collected[1] - collected[0] >= 3
