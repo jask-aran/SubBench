@@ -12,6 +12,7 @@ future multi-machine aggregation.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import os
 import sqlite3
 import urllib.error
@@ -161,18 +162,29 @@ def build_payload(
 
     payload = pseudonymise(payload)
     if as_text and "reports" in payload:
-        # Sent as JSON text, the Worker stores each report as it is instead of building
-        # 700 KB of objects and serialising them again, which was most of a push's CPU.
         # pool_input is the part of history that pooling reads, made here so the Worker
-        # does not have to parse history to make it.
+        # does not have to open history to make it.
         from .products import pool_input
 
         reports = payload.pop("reports")
-        text = {kind: json.dumps(report, separators=(",", ":")) for kind, report in reports.items()}
+        # Gzipped, a push is a sixth of the bytes, and on Cloudflare a Worker's CPU time
+        # grows with the bytes it moves. The Worker stores the gzip as it is and serves it
+        # with Content-Encoding: gzip, so neither a push nor a page view parses a report.
+        # The report's own time goes inside, because the Worker no longer adds it.
+        stamp = datetime.now(timezone.utc).isoformat()
+        texts = {kind: _gzip_text({**report, "generated_at": stamp}) for kind, report in reports.items()}
         if "history" in reports:
-            text["pool_input"] = json.dumps(pool_input(reports["history"]), separators=(",", ":"))
-        payload["report_text"] = text
+            texts["pool_input"] = _gzip_text(pool_input(reports["history"]))
+        payload["report_gz"] = texts
     return payload
+
+
+def _gzip_text(value: Any) -> str:
+    import base64
+    import gzip
+
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(gzip.compress(raw, compresslevel=6, mtime=0)).decode("ascii")
 
 
 def value_report(db: sqlite3.Connection, *, points: list[dict[str, Any]] | None = None,

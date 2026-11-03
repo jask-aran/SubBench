@@ -44,6 +44,9 @@ export async function pseudonym(accountId) {
 // Also matches the escaped form inside report_text, where a report is a JSON string.
 const UNHASHED_ACCOUNT = /\\?"account_id\\?"\s*:\s*\\?"(?!acct-)/;
 const TEXT_KINDS = new Set([...REPORT_KINDS, "pool_input"]);
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+// A stored report that is gzip, kept as base64 text after this prefix.
+const GZ = "gz:";
 
 export async function pseudonymise(value, cache = new Map()) {
   if (Array.isArray(value)) {
@@ -224,6 +227,17 @@ function parse(payload) {
     if (!TEXT_KINDS.has(kind)) throw new Invalid(400, `unknown report kind: ${kind}`);
     if (typeof value !== "string") throw new Invalid(400, `report_text.${kind} must be a JSON string`);
   }
+  const reportGz = payload.report_gz ?? {};
+  if (typeof reportGz !== "object" || reportGz === null || Array.isArray(reportGz)) {
+    throw new Invalid(400, "report_gz must be an object");
+  }
+  for (const [kind, value] of Object.entries(reportGz)) {
+    if (!TEXT_KINDS.has(kind)) throw new Invalid(400, `unknown report kind: ${kind}`);
+    // Checked as base64 only; the gzip itself is never opened here (see report()).
+    if (typeof value !== "string" || !value || !BASE64.test(value)) {
+      throw new Invalid(400, `report_gz.${kind} must be base64 gzip`);
+    }
+  }
 
   return {
     agentId,
@@ -231,6 +245,7 @@ function parse(payload) {
     usage: usage.map((row) => usageRow(row, agentId)),
     reports,
     reportText,
+    reportGz,
     cursor: {
       entitlement_cursor: entitlements.length ? entitlements[entitlements.length - 1].observed_at : null,
       usage_cursor: usage.length ? usage[usage.length - 1].last_seen_at : null,
@@ -286,7 +301,12 @@ async function ingest(request, env) {
   for (const row of batch.usage) statements.push(env.DB.prepare(USAGE_UPSERT).bind(...row));
   // Reports sent as text are stored as they are: parsing and serialising 700 KB of report
   // objects was most of a push's CPU time. Older collectors still send objects.
-  const texts = { ...batch.reportText };
+  // Gzipped reports (report_gz) come from collectors that hash every account id
+  // themselves; the Worker stores them unopened, which is what keeps a push cheap.
+  const texts = Object.fromEntries(Object.entries(batch.reportGz).map(([kind, value]) => [kind, GZ + value]));
+  for (const [kind, value] of Object.entries(batch.reportText)) {
+    if (!Object.hasOwn(texts, kind)) texts[kind] = value;
+  }
   for (const [kind, report] of Object.entries(batch.reports)) {
     if (!Object.hasOwn(texts, kind)) texts[kind] = JSON.stringify(report);
   }
@@ -296,9 +316,9 @@ async function ingest(request, env) {
     let history = batch.reports.history;
     if (history === undefined) {
       try {
-        history = JSON.parse(texts.history);
+        history = JSON.parse(await storedText(texts.history));
       } catch {
-        return json({ error: "report_text.history must be JSON" }, 400);
+        return json({ error: "history must be JSON" }, 400);
       }
     }
     texts.pool_input = JSON.stringify(poolInput(history));
@@ -333,7 +353,7 @@ async function report(env, kind) {
       const pooled = await env.DB.prepare(
         "SELECT payload, generated_at FROM pooled_reports WHERE kind = ?"
       ).bind(kind).first();
-      if (pooled) return json({ ...JSON.parse(pooled.payload), generated_at: pooled.generated_at });
+      if (pooled) return served(pooled.payload, pooled.generated_at);
     } catch (error) {
       if (!/no such table: (?:main\.)?pooled_reports\b/i.test(String(error.message))) throw error;
     }
@@ -342,7 +362,37 @@ async function report(env, kind) {
     "SELECT payload, generated_at FROM reports WHERE kind = ? ORDER BY generated_at DESC LIMIT 1"
   ).bind(kind).first();
   if (!row) return json({ [kind]: [], generated_at: null });
-  return json({ ...JSON.parse(row.payload), generated_at: row.generated_at });
+  return served(row.payload, row.generated_at);
+}
+
+function fromBase64(text) {
+  if (typeof Uint8Array.fromBase64 === "function") return Uint8Array.fromBase64(text);
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+// The JSON text of a stored report, opening it if it is gzip. Only pooling and an
+// ingest without pool_input need the text; serving never does.
+async function storedText(payload) {
+  if (!payload.startsWith(GZ)) return payload;
+  const stream = new Blob([fromBase64(payload.slice(GZ.length))]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Response(stream).text();
+}
+
+// A stored report as the response. Gzip goes out as it is, for the browser to open, so a
+// page view parses nothing; parsing and serialising a 340 KB report took 7 ms of CPU.
+// A text report gets its generated_at spliced in rather than parsed and rebuilt.
+function served(payload, generatedAt) {
+  const headers = { "content-type": "application/json; charset=utf-8" };
+  if (payload.startsWith(GZ)) {
+    return new Response(fromBase64(payload.slice(GZ.length)),
+      { headers: { ...headers, "content-encoding": "gzip" }, encodeBody: "manual" });
+  }
+  const body = payload.trimEnd();
+  const rest = body.length > 2 ? "," : "";
+  return new Response(`${body.slice(0, -1)}${rest}"generated_at":${JSON.stringify(generatedAt)}}`, { headers });
 }
 
 export async function poolIfDirty(env) {
@@ -359,6 +409,7 @@ export async function poolIfDirty(env) {
     ORDER BY agents.last_seen DESC LIMIT ?
   `).bind(cutoff, limit).all();
   const generatedAt = now.toISOString();
+  const inputs = results.length < 2 ? [] : await Promise.all(results.map(async (row) => JSON.parse(await storedText(row.payload))));
   const statement = results.length < 2
     ? env.DB.prepare(`
         DELETE FROM pooled_reports WHERE kind = ?
@@ -371,7 +422,7 @@ export async function poolIfDirty(env) {
         ON CONFLICT (kind) DO UPDATE SET
           generated_at = excluded.generated_at, payload = excluded.payload
       `).bind("history", generatedAt,
-        JSON.stringify(poolHistory(results.map((row) => JSON.parse(row.payload)), now)), state.revision);
+        JSON.stringify(poolHistory(inputs, now)), state.revision);
   await env.DB.batch([
     statement,
     // A new history push changes revision, even within the same millisecond.

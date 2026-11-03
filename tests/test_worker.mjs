@@ -20,6 +20,7 @@ class FakeD1 {
     this.reports = {};
     this.agents = new Map();
     this.agentReports = new Map();
+    this.rawReports = {};
     this.pooled = null;
     this.state = null;
     this.missingPoolTable = false;
@@ -52,7 +53,10 @@ class FakeD1 {
         .filter(([id, lastSeen]) => lastSeen >= params[0] && this.agentReports.has(id))
         .sort((a, b) => a[1] > b[1] ? -1 : a[1] < b[1] ? 1 : 0)
         .slice(0, params[1])
-        .map(([id]) => ({ payload: JSON.stringify(this.agentReports.get(id)) })) };
+        .map(([id]) => {
+          const stored = this.agentReports.get(id);
+          return { payload: typeof stored === "string" ? stored : JSON.stringify(stored) };
+        }) };
     }
     throw new Error(`Unexpected query: ${sql}`);
   }
@@ -66,8 +70,9 @@ class FakeD1 {
       return this.pooled;
     }
     if (sql.includes("SELECT payload, generated_at")) {
-      const payload = this.reports[params[0]];
-      return payload ? { payload: JSON.stringify(payload), generated_at: "2026-08-01T00:00:00Z" } : null;
+      const raw = this.rawReports[params[0]]
+        ?? (this.reports[params[0]] === undefined ? undefined : JSON.stringify(this.reports[params[0]]));
+      return raw === undefined ? null : { payload: raw, generated_at: "2026-08-01T00:00:00Z" };
     }
     if (sql.includes("MAX(rowid) FROM entitlement_snapshots")) {
       return {
@@ -84,8 +89,9 @@ class FakeD1 {
   async run(sql, params) {
     this.executed.push({ sql, params });
     if (sql.includes("INSERT INTO reports")) {
-      this.reports[params[1]] = JSON.parse(params[3]);
-      if (params[1] === "pool_input") this.agentReports.set(params[0], JSON.parse(params[3]));
+      this.rawReports[params[1]] = params[3];
+      if (!String(params[3]).startsWith("gz:")) this.reports[params[1]] = JSON.parse(params[3]);
+      if (params[1] === "pool_input") this.agentReports.set(params[0], params[3]);
     } else if (sql.includes("INSERT INTO agents")) {
       this.agents.set(params[0], params[2]);
     } else if (sql.includes("INSERT INTO pool_state")) {
@@ -389,7 +395,7 @@ test("ingest stores the compact pool input and logs no accepted push", async () 
       reports: { history: { windows: [window] } } }),
   }), env(db));
   assert.equal(response.status, 200);
-  const stored = db.agentReports.get("agent-1");
+  const stored = JSON.parse(db.agentReports.get("agent-1"));
   assert.equal(stored.windows.length, 1);
   assert.equal("extra_field" in stored.windows[0], false);
   assert.equal(db.bound.some((statement) => statement.sql.includes("INSERT INTO ingest_log")), false);
@@ -419,7 +425,7 @@ test("report text without pool input gets one made from its history", async () =
   const db = new FakeD1();
   const window = { ...historyWindow("acct-one", 50), extra_field: "x" };
   await worker.fetch(textIngest({ history: JSON.stringify({ windows: [window] }) }), env(db));
-  assert.equal("extra_field" in db.agentReports.get("agent-1").windows[0], false);
+  assert.equal("extra_field" in JSON.parse(db.agentReports.get("agent-1")).windows[0], false);
 });
 
 test("an unhashed account id inside report text is hashed before it is stored", async () => {
@@ -434,6 +440,49 @@ test("an unhashed account id inside report text is hashed before it is stored", 
 test("report text must be strings of known kinds", async () => {
   for (const reportText of [{ secrets: "{}" }, { history: { windows: [] } }, { history: "not json" }]) {
     const response = await worker.fetch(textIngest(reportText), env(new FakeD1()));
+    assert.equal(response.status, 400);
+  }
+});
+
+import { gzipSync, gunzipSync } from "node:zlib";
+const gz = (value) => gzipSync(Buffer.from(JSON.stringify(value))).toString("base64");
+const gzIngest = (reportGz) => request("/ingest", {
+  method: "POST",
+  headers: { authorization: "Bearer token", "content-type": "application/json" },
+  body: JSON.stringify({ schema_version: 1, agent_id: "agent-1", entitlements: [], usage: [], report_gz: reportGz }),
+});
+
+test("gzipped reports are stored as sent and served as gzip", async () => {
+  const db = new FakeD1();
+  const history = { windows: [historyWindow("acct-one", 50)], generated_at: "2026-11-03T00:00:00+00:00" };
+  const response = await worker.fetch(gzIngest({ history: gz(history), pool_input: gz({ windows: history.windows }) }), env(db));
+  assert.equal(response.status, 200);
+  assert.equal(db.reports.history, undefined);
+  assert.equal(db.rawReports.history, "gz:" + gz(history));
+  assert.equal(db.state.dirty, 1);
+  const served = await worker.fetch(request("/api/history"), env(db));
+  assert.equal(served.headers.get("content-encoding"), "gzip");
+  assert.deepEqual(JSON.parse(gunzipSync(Buffer.from(await served.arrayBuffer()))), history);
+});
+
+test("pooling opens gzipped pool input", async () => {
+  const db = new FakeD1();
+  for (const [agent, account] of [["a", "acct-a"], ["b", "acct-b"]]) {
+    const windows = [historyWindow(account, 100)];
+    await worker.fetch(request("/ingest", {
+      method: "POST",
+      headers: { authorization: "Bearer token", "content-type": "application/json" },
+      body: JSON.stringify({ schema_version: 1, agent_id: agent, entitlements: [], usage: [],
+        report_gz: { history: gz({ windows }), pool_input: gz({ windows }) } }),
+    }), env(db));
+  }
+  await poolIfDirty(env(db));
+  assert.equal(JSON.parse(db.pooled.payload).products[0].account_count, 2);
+});
+
+test("report gzip must be base64 strings of known kinds", async () => {
+  for (const reportGz of [{ secrets: gz({}) }, { history: { windows: [] } }, { history: "not base64!" }]) {
+    const response = await worker.fetch(gzIngest(reportGz), env(new FakeD1()));
     assert.equal(response.status, 400);
   }
 });
