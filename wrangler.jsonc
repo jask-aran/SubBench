@@ -31,7 +31,7 @@
 
   // Prune usage rows once a window is long settled. Entitlement snapshots are never
   // pruned: they are small, and an unsampled moment cannot be recovered.
-  "triggers": { "crons": ["0 4 * * *"] },
+  "triggers": { "crons": ["0 4 * * *", "*/10 * * * *"] },
 
   "vars": { "USAGE_RETENTION_DAYS": "90" },
 

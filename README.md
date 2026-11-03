@@ -419,6 +419,12 @@ clustering and the staleness limit stay in `subbench/regression.py`. A second
 implementation would move away from the first one silently, and nothing could then show
 which copy was correct.
 
+Estimation runs only on the collector. With several collectors, the server merges their
+windows and pools their finished estimates with weighted medians, at most once per
+10 minutes. With one collector, the site serves its report verbatim.
+`worker/pooling.js` must reproduce `tests/pooling/golden`. Regenerate those cases with
+`tests/pooling/generate.py` only after a deliberate change to `subbench.products.pool_history`.
+
 The server validates the batch. Validation is different from derivation, and it is the
 reason for the server. The Worker rejects a batch with a quota outside 0-100, with a
 negative token count, with a cost that is not a decimal, or with a schema version that it

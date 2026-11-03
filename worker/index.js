@@ -1,17 +1,19 @@
 /**
  * SubBench dashboard Worker.
  *
- * Stores pushed evidence and serves the reports the agent computed. It deliberately
- * contains no estimator logic: quota-span weighting, unobserved-usage exclusion,
- * reset-boundary clustering and the staleness bound all live in subbench/regression.py,
- * and a second implementation here would drift from it silently with no way to tell which
- * copy was right.
+ * Stores pushed evidence and serves the reports the collectors computed. Estimation stays
+ * on the collector: quota-span weighting, unobserved-usage exclusion, reset-boundary
+ * clustering and the staleness bound live in subbench/regression.py, and a second
+ * implementation here would drift from it silently. With several collectors, the Worker
+ * only merges their windows and pools their finished estimates (worker/pooling.js), at
+ * most once per 10 minutes.
  *
  * Validation is a different thing and does live here. Checking that a percentage is a
  * percentage and a token count is not negative duplicates no derivation, and it is the
  * only thing standing between a malformed push and every estimate derived from that
  * window afterwards.
  */
+import { poolHistory } from "./pooling.js";
 
 const SCHEMA_VERSION = 1;
 const MAX_USAGE_ROWS = 5000;
@@ -255,6 +257,11 @@ async function ingest(request, env) {
   for (const [kind, report] of Object.entries(batch.reports)) {
     statements.push(env.DB.prepare(REPORT_UPSERT).bind(batch.agentId, kind, now, JSON.stringify(report)));
   }
+  if (Object.hasOwn(batch.reports, "history")) {
+    statements.push(env.DB.prepare(
+      "INSERT INTO pool_state (id, dirty) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET dirty = 1, revision = revision + 1"
+    ));
+  }
   // One batch. A partial write would leave quota advancing against spend that was never
   // stored, which the estimator reads as unobserved usage and discards.
   await env.DB.batch(statements);
@@ -273,14 +280,57 @@ async function ingest(request, env) {
 }
 
 async function report(env, kind) {
-  // Newest agent wins. Pooling several agents means recomputing over combined pairs,
-  // which cannot be reconstructed from per-agent reports, so it needs derivation here
-  // rather than a different query.
+  if (kind === "history") {
+    try {
+      const pooled = await env.DB.prepare(
+        "SELECT payload, generated_at FROM pooled_reports WHERE kind = ?"
+      ).bind(kind).first();
+      if (pooled) return json({ ...JSON.parse(pooled.payload), generated_at: pooled.generated_at });
+    } catch (error) {
+      if (!/no such table: (?:main\.)?pooled_reports\b/i.test(String(error.message))) throw error;
+    }
+  }
   const row = await env.DB.prepare(
     "SELECT payload, generated_at FROM reports WHERE kind = ? ORDER BY generated_at DESC LIMIT 1"
   ).bind(kind).first();
   if (!row) return json({ [kind]: [], generated_at: null });
   return json({ ...JSON.parse(row.payload), generated_at: row.generated_at });
+}
+
+export async function poolIfDirty(env) {
+  const state = await env.DB.prepare("SELECT dirty, revision FROM pool_state WHERE id = 1").first();
+  if (!state?.dirty) return;
+  const now = new Date();
+  const cutoff = new Date(+now - 35 * 86400000).toISOString();
+  // POOL_MAX_AGENTS bounds one pooling pass, independent of the push rate.
+  const configured = Number(env.POOL_MAX_AGENTS ?? 500);
+  const limit = Number.isInteger(configured) && configured > 0 ? configured : 500;
+  const { results } = await env.DB.prepare(`
+    SELECT reports.payload FROM reports JOIN agents ON agents.agent_id = reports.agent_id
+    WHERE reports.kind = 'history' AND agents.last_seen >= ?
+    ORDER BY agents.last_seen DESC LIMIT ?
+  `).bind(cutoff, limit).all();
+  const generatedAt = now.toISOString();
+  const statement = results.length < 2
+    ? env.DB.prepare(`
+        DELETE FROM pooled_reports WHERE kind = ?
+        AND EXISTS (SELECT 1 FROM pool_state WHERE id = 1 AND dirty = 1 AND revision = ?)
+      `).bind("history", state.revision)
+    : env.DB.prepare(`
+        INSERT INTO pooled_reports (kind, generated_at, payload)
+        SELECT ?, ?, ? WHERE EXISTS
+          (SELECT 1 FROM pool_state WHERE id = 1 AND dirty = 1 AND revision = ?)
+        ON CONFLICT (kind) DO UPDATE SET
+          generated_at = excluded.generated_at, payload = excluded.payload
+      `).bind("history", generatedAt,
+        JSON.stringify(poolHistory(results.map((row) => JSON.parse(row.payload)), now)), state.revision);
+  await env.DB.batch([
+    statement,
+    // A new history push changes revision, even within the same millisecond.
+    env.DB.prepare(`
+      UPDATE pool_state SET dirty = 0, pooled_at = ? WHERE id = 1 AND dirty = 1 AND revision = ?
+    `).bind(generatedAt, state.revision),
+  ]);
 }
 
 async function health(env) {
@@ -319,6 +369,8 @@ export default {
   },
 
   async scheduled(event, env) {
+    if (event.cron === "*/10 * * * *") return poolIfDirty(env);
+    if (event.cron !== "0 4 * * *") return;
     // Usage rows are prunable once their window is long settled; entitlement snapshots
     // never are, because an unsampled moment cannot be recovered.
     const days = Number(env.USAGE_RETENTION_DAYS ?? 90);

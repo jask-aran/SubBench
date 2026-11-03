@@ -82,3 +82,17 @@ CREATE TABLE IF NOT EXISTS reports (
     payload      TEXT NOT NULL,   -- JSON, exactly as the agent computed it
     PRIMARY KEY (agent_id, kind)
 );
+
+-- Store pooled estimates so reads and pushes do not repeat the pooling pass.
+CREATE TABLE IF NOT EXISTS pooled_reports (
+    kind         TEXT PRIMARY KEY,
+    generated_at TEXT NOT NULL,
+    payload      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pool_state (
+    id        INTEGER PRIMARY KEY CHECK (id = 1),
+    dirty     INTEGER NOT NULL DEFAULT 0,
+    revision  INTEGER NOT NULL DEFAULT 0,
+    pooled_at TEXT
+);

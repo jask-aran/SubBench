@@ -36,10 +36,15 @@ not show the rule, so a new contributor cannot find it without this file.
 ### 1. All estimator logic stays in Python
 
 Quota-span weighting, the exclusion of unobserved usage, the reset clustering, the
-staleness limit and the confidence tiers stay in `src/subbench/`. The Cloudflare Worker in
-`worker/index.js` must contain none of them.
+staleness limit and the confidence tiers for estimation stay in `src/subbench/`.
+Estimation runs only on the collector.
 
-The Worker validates a batch and serves a stored report. That is all.
+The Worker validates a batch and serves a stored report. With several collectors, the
+server only merges their windows and pools their finished estimates with weighted
+medians, at most once per 10 minutes. With one collector, the site serves its report
+verbatim. `worker/pooling.js` must reproduce `tests/pooling/golden`. Regenerate those
+cases with `tests/pooling/generate.py` only after a deliberate change to
+`subbench.products.pool_history`.
 
 A second implementation of the estimator would move away from the first one silently. Two
 different numbers would then appear, and nothing could show which one was correct.

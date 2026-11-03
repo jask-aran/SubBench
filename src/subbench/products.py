@@ -340,3 +340,48 @@ def product_estimates(
             latest_completed_at=max(str(row["reset_key"]) for row in rows),
         ))
     return sorted(pooled, key=lambda row: (row.product, row.window))
+
+
+def _richer(row: dict[str, Any], seen: dict[str, Any]) -> bool:
+    covered = float(row.get("covered_quota_percent") or 0.0)
+    seen_covered = float(seen.get("covered_quota_percent") or 0.0)
+    if covered != seen_covered:
+        return covered > seen_covered
+    return str(row.get("latest_observed_at") or "") > str(seen.get("latest_observed_at") or "")
+
+
+def merge_agent_windows(reports: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The windows of several collectors' history reports, one per account and window.
+
+    Two collectors on one account measure the same window, each from the spend on its own
+    machine. Merging that spend is a re-estimate, which the server never does. So the
+    window that watched the most quota stands for the account, and the other is dropped
+    rather than counted as a second account.
+    """
+    best: dict[tuple, dict[str, Any]] = {}
+    for report in reports:
+        for row in report.get("windows") or []:
+            key = (row.get("provider"), row.get("account_id"), row.get("plan"), row.get("window"),
+                   str(row.get("reset_key")))
+            seen = best.get(key)
+            if seen is None or _richer(row, seen):
+                best[key] = row
+    return list(best.values())
+
+
+def pool_history(reports: list[dict[str, Any]], *, now: datetime) -> dict[str, Any]:
+    """The history report the server serves when more than one collector reports.
+
+    The reference for worker/pooling.js. Pooling only selects and takes weighted medians
+    of the collectors' finished estimates, so it is cheap enough to run on the server; no
+    estimate is computed there. tests/pooling/golden holds cases both must reproduce.
+    """
+    windows = merge_agent_windows(reports)
+    return {
+        "windows": windows,
+        "products": [row.as_dict() for row in product_estimates(windows, now=now)],
+        "products_likely": [row.as_dict() for row in product_estimates(windows, now=now, tiers=(LIKELY,))],
+        "products_open": [row.as_dict() for row in open_estimates(windows, now=now)],
+        "product_series": [row.as_dict() for row in product_series(windows, now=now)],
+        "agent_count": len(reports),
+    }
