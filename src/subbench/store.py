@@ -165,7 +165,9 @@ CREATE INDEX IF NOT EXISTS imports_seen_lookup
 
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
+    # Another process (the collector, or a command) can hold the write lock while it re-prices
+    # readings, for longer than the default 5 s wait. Failing then cost a whole push cycle.
+    db = sqlite3.connect(path, timeout=60.0)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
     db.executescript(SCHEMA)
