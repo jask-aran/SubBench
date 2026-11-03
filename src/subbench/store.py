@@ -627,14 +627,31 @@ def model_mix(
         where.append("p.account_id IS ?")
         params.append(account_id)
     where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+    # Only the newest reading of each window matters here. Pricing all of them again
+    # through PRICED_WINDOWS_SQL took 8.6 s of a 9.8 s derive on 36k readings; the
+    # priced_points cache already holds them, so only ~600 newest readings need their
+    # import looked up. SQLite takes a bare column (duration_minutes) from the MAX row.
+    refresh_priced_points(db)
     return list(db.execute(
-        f"""{PRICED_WINDOWS_SQL}, latest AS (
-            SELECT p.provider, p.account_id, p.window, p.resets_at,
+        f"""WITH latest AS (
+            SELECT p.provider, p.account_id, p.window, p.resets_at, p.duration_minutes,
                    MAX(p.observed_at) AS observed_at
-            FROM priced p {where_clause}
+            FROM priced_points p {where_clause}
             GROUP BY p.provider, p.account_id, p.window, p.resets_at
+        ), chosen AS (
+            SELECT l.*,
+                   (SELECT i.id FROM imports i
+                     WHERE i.provider = l.provider AND i.account_id IS l.account_id
+                       AND COALESCE(i.last_seen_at, i.imported_at) <= l.observed_at
+                     ORDER BY COALESCE(i.last_seen_at, i.imported_at) DESC LIMIT 1) AS import_id,
+                   DATE(l.resets_at, '-' || COALESCE(
+                       l.duration_minutes,
+                       CASE l.window WHEN 'five_hour' THEN 300 ELSE 10080 END
+                   ) || ' minutes') AS window_start_date,
+                   DATE(l.resets_at) AS window_end_date
+            FROM latest l
         )
-        SELECT l.provider, l.account_id, l.window, l.resets_at, u.model,
+        SELECT c.provider, c.account_id, c.window, c.resets_at, u.model,
                -- Per-model cost is not available: ccusage reports cost on the aggregate
                -- row and leaves the model breakdowns null, so only tokens are recorded.
                -- Reasoning is a subset of output in both providers' ccusage JSON, so it
@@ -642,17 +659,14 @@ def model_mix(
                -- of input in that JSON.
                SUM(u.input_tokens + u.output_tokens + u.cache_read_tokens
                    + u.cache_write_tokens) AS total_tokens
-        FROM latest l
-        JOIN priced p ON p.provider = l.provider AND p.account_id IS l.account_id
-                     AND p.window = l.window AND p.resets_at IS l.resets_at
-                     AND p.observed_at = l.observed_at
-        JOIN usage_rows u ON u.import_id = p.import_id
+        FROM chosen c
+        JOIN usage_rows u ON u.import_id = c.import_id
         WHERE u.model IS NOT NULL
-          AND (p.window_start_date IS NULL OR DATE(u.period_start) >= p.window_start_date)
-          AND (p.window_end_date IS NULL OR DATE(u.period_start) <= p.window_end_date)
-        GROUP BY l.provider, l.account_id, l.window, l.resets_at, u.model
+          AND (c.window_start_date IS NULL OR DATE(u.period_start) >= c.window_start_date)
+          AND (c.window_end_date IS NULL OR DATE(u.period_start) <= c.window_end_date)
+        GROUP BY c.provider, c.account_id, c.window, c.resets_at, u.model
         HAVING total_tokens > 0
-        ORDER BY l.provider, l.account_id, l.window, l.resets_at, total_tokens DESC""",
+        ORDER BY c.provider, c.account_id, c.window, c.resets_at, total_tokens DESC""",
         params,
     ))
 
