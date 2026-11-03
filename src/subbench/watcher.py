@@ -158,7 +158,8 @@ def refresh_if_due(db, *, last_refreshed: float, now: float, emit) -> float:
 def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
     messages: list[str] = []
     failed = False
-    account_id = account.active_account_id() if target.provider == "codex" else None
+    account_id = (account.active_account_id() if target.provider == "codex"
+                  else account.active_claude_account_id() if target.provider == "claude" else None)
 
     if runner == "native":
         try:

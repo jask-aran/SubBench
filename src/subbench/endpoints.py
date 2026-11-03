@@ -26,7 +26,7 @@ import urllib.error
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import __version__, account
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
@@ -106,23 +106,27 @@ def claude_usage() -> dict[str, Any]:
     # The plan as of this reading. The login file can lag an upgrade by days.
     try:
         profile = _get(os.environ.get("CLAUDE_PROFILE_URL", CLAUDE_PROFILE_URL), headers, credential="claude", purpose="claude plan")
-        tier = (profile.get("organization") or {}).get("rate_limit_tier")
     except EndpointError:
-        tier = None
-    if not (isinstance(tier, str) and tier.strip()):
-        tier = _claude_json_tier()
+        profile = {}
+    tier = _text((profile.get("organization") or {}).get("rate_limit_tier"))
+    # The quota belongs to the user, not the organisation (a Team organisation has many
+    # users, each with a meter). The server pools by this id, hashed, so it can tell two
+    # devices on one account from two people.
+    # The local id comes first: usage imports carry it too, and a reading is priced only
+    # from an import of its own account. The profile's id covers a missing ~/.claude.json.
+    stored = account.claude_oauth_account()
+    tier = tier or _text(stored.get("organizationRateLimitTier"))
+    uuid = account.active_claude_account_id() or _text((profile.get("account") or {}).get("uuid"))
     if tier:
-        payload["organizationRateLimitTier"] = tier.strip()
+        payload["organizationRateLimitTier"] = tier
+    if uuid and "account_uuid" not in payload:
+        payload["account_uuid"] = uuid
     return payload
 
 
-def _claude_json_tier() -> str | None:
-    try:
-        account = json.loads((Path.home() / ".claude.json").read_text()).get("oauthAccount") or {}
-    except (OSError, ValueError, AttributeError):
-        return None
-    tier = account.get("organizationRateLimitTier")
-    return tier if isinstance(tier, str) and tier.strip() else None
+def _text(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
 
 
 # ---------------------------------------------------------------- Codex

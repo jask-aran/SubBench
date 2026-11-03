@@ -29,6 +29,25 @@ def registry_file() -> Path:
     return codex_home() / "accounts" / "registry.json"
 
 
+def claude_oauth_account() -> dict[str, Any]:
+    """Claude Code's record of the signed-in account (~/.claude.json), or {}."""
+    try:
+        account = json.loads((Path.home() / ".claude.json").read_text()).get("oauthAccount") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return account if isinstance(account, dict) else {}
+
+
+def active_claude_account_id() -> str | None:
+    """The uuid of the account Claude Code is signed in to, or None.
+
+    Usage imports and quota readings must carry the same id, because a reading is priced
+    only from an import of its own account. Both therefore take it from here.
+    """
+    value = claude_oauth_account().get("accountUuid")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def active_account_id() -> str | None:
     """Return the chatgpt_account_id currently active for Codex, or None."""
     try:

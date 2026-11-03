@@ -208,6 +208,26 @@ def test_claude_usage_attaches_the_live_plan(tmp_path, monkeypatch):
     assert all(auth == "Bearer tok" for _url, auth in seen)
 
 
+def test_claude_readings_carry_the_account_uuid(tmp_path, monkeypatch):
+    # Without an account id, the server cannot tell two devices on one Claude account from
+    # two different users. The profile names the user; ~/.claude.json is the fallback.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+        "accessToken": "tok", "expiresAt": (time.time() + 3600) * 1000}}))
+    (tmp_path / ".claude.json").write_text(json.dumps({"oauthAccount": {
+        "accountUuid": "file-uuid", "organizationRateLimitTier": "default_claude_pro"}}))
+    usage = {"five_hour": {"utilization": 10, "resets_at": "2026-11-02T15:00:00Z"}}
+    profile = {"account": {"uuid": "profile-uuid"}, "organization": {"uuid": "org-uuid", "rate_limit_tier": "default_claude_pro"}}
+
+    monkeypatch.setattr(endpoints, "_get", lambda url, headers, **kw: dict(profile) if url.endswith("/profile") else dict(usage))
+    # The local id wins: usage imports carry the same one, and pricing joins on it.
+    assert {row.account_id for row in _normalise_claude(endpoints.claude_usage())} == {"file-uuid"}
+    (tmp_path / ".claude.json").unlink()
+    assert {row.account_id for row in _normalise_claude(endpoints.claude_usage())} == {"profile-uuid"}
+
+
 def test_expired_claude_login_is_reported_not_refreshed(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
@@ -246,6 +266,19 @@ def test_watch_once_collects_natively(home, monkeypatch, tmp_path):
     assert ok and "usage recorded" in message and "no price for claude-mystery-9" in message
     ok, message = watcher.collect_target(db, target=watcher.WatchTarget("claude"), runner="native")
     assert "usage unchanged" in message
+    watcher._READERS.clear()
+
+
+def test_claude_imports_carry_the_same_account_as_the_readings(home, monkeypatch, tmp_path):
+    from subbench import account, watcher
+
+    watcher._READERS.clear()
+    monkeypatch.setattr(account, "active_claude_account_id", lambda: "claude-uuid")
+    monkeypatch.setattr(watcher, "collect_entitlements", lambda provider: [])
+    db = connect(tmp_path / "db.sqlite3")
+    watcher.collect_target(db, target=watcher.WatchTarget("claude"), runner="native")
+    assert {row[0] for row in db.execute("SELECT account_id FROM imports")} == {"claude-uuid"}
+    assert {row[0] for row in db.execute("SELECT account_id FROM usage_hourly")} == {"claude-uuid"}
     watcher._READERS.clear()
 
 
