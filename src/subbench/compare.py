@@ -15,7 +15,13 @@ from typing import Any
 
 from .push import VALUE_REPORT_KIND
 
-FIELDS = ("estimate_usd", "lower_usd", "upper_usd")
+BOUNDS = ("lower_usd", "upper_usd")
+
+
+def _drift(before: Any, after: Any) -> float:
+    if before is None or after is None:
+        return 0.0
+    return abs(float(after) - float(before)) / max(abs(float(before)), 1e-9)
 
 
 def _report(path: Path) -> tuple[str, list[dict[str, Any]]] | None:
@@ -56,7 +62,7 @@ def compare(before: Path, after: Path, *, tolerance: float = 0.01) -> dict[str, 
     _, new_rows = new
     cutoff = _moment(taken_at)
     current = {_key(row): row for row in new_rows}
-    closed, still_open, missing, changed = 0, 0, [], []
+    closed, still_open, missing, changed, bounds_changed = 0, 0, [], [], []
     for row in old_rows:
         reset = _moment(row.get("reset_key"))
         if cutoff is None or reset is None or reset > cutoff:
@@ -67,14 +73,16 @@ def compare(before: Path, after: Path, *, tolerance: float = 0.01) -> dict[str, 
         if match is None:
             missing.append(row)
             continue
-        drift = max(
-            abs(float(match[f]) - float(row[f])) / max(abs(float(row[f])), 1e-9)
-            for f in FIELDS if row.get(f) is not None and match.get(f) is not None
-        ) if any(row.get(f) is not None for f in FIELDS) else 0.0
+        # The estimate is the figure the site shows, so it alone decides "changed". A bound
+        # can sit near $0, where a relative move is meaningless (1e-12 -> 0.15 is +1.5e13 %),
+        # so bound moves are listed apart, in dollars.
+        drift = _drift(row.get("estimate_usd"), match.get("estimate_usd"))
         if drift > tolerance:
             changed.append((row, match, drift))
+        elif any(_drift(row.get(f), match.get(f)) > tolerance for f in BOUNDS):
+            bounds_changed.append((row, match))
     return {"taken_at": taken_at, "closed": closed, "open": still_open, "missing": missing,
-            "changed": changed, "new_windows": len(new_rows)}
+            "changed": changed, "bounds_changed": bounds_changed, "new_windows": len(new_rows)}
 
 
 def run(before: Path, after: Path, *, tolerance: float) -> int:
@@ -88,6 +96,13 @@ def run(before: Path, after: Path, *, tolerance: float) -> int:
         print(f"  missing  {row.get('provider')} {row.get('window')} {row.get('plan')} reset {row.get('reset_key')}")
     for old, new, drift in sorted(changed, key=lambda item: -item[2]):
         print(f"  changed  {old.get('provider')} {old.get('window')} {old.get('plan')} reset {old.get('reset_key')}: "
-              f"${float(old['estimate_usd']):.2f} -> ${float(new['estimate_usd']):.2f} ({drift:+.1%})")
+              f"${float(old['estimate_usd']):.2f} -> ${float(new['estimate_usd']):.2f} "
+              f"({(float(new['estimate_usd']) - float(old['estimate_usd'])) / max(abs(float(old['estimate_usd'])), 1e-9):+.1%})")
+    if result["bounds_changed"]:
+        print(f"{len(result['bounds_changed'])} more with the estimate unchanged and a bound changed:")
+        for old, new in result["bounds_changed"]:
+            print(f"  bounds   {old.get('provider')} {old.get('window')} {old.get('plan')} reset {old.get('reset_key')}: "
+                  + ", ".join(f"{f.removesuffix('_usd')} ${float(old[f]):.2f} -> ${float(new[f]):.2f}"
+                              for f in BOUNDS if old.get(f) is not None and new.get(f) is not None))
     print(f"the new report holds {result['new_windows']} window(s) in all")
     return 1 if missing else 0

@@ -10,6 +10,7 @@ import json
 import os
 import plistlib
 import stat
+import subprocess
 import time
 from pathlib import Path
 
@@ -255,6 +256,28 @@ def test_service_units_run_this_executable(monkeypatch):
     assert f"EnvironmentFile=-{config.config_path()}" in unit
     plist = plistlib.loads(service.launchd_plist(["/opt/subbench", "watch", "--provider", "all"]))
     assert plist["ProgramArguments"] == ["/opt/subbench", "watch", "--provider", "all"] and plist["RunAtLoad"]
+
+
+@pytest.mark.parametrize("system", ["Linux", "Darwin"])
+def test_service_install_replaces_a_symlink_and_keeps_its_target(tmp_path, monkeypatch, system):
+    # A unit or plist installed by hand is often a symlink into the checkout. Writing through
+    # the link would overwrite the tracked file in the repository.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(service.platform, "system", lambda: system)
+    monkeypatch.setattr(service.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(service, "executable", lambda: ["/opt/subbench"])
+    monkeypatch.setattr(service, "_run", lambda *a: subprocess.CompletedProcess(a, 0, "", ""))
+    target = tmp_path / "checkout" / "subbench.service"
+    target.parent.mkdir()
+    target.write_text("tracked file\n")
+    path = service.unit_path() if system == "Linux" else service.plist_path()
+    path.parent.mkdir(parents=True)
+    path.symlink_to(target)
+    assert service.install("all") == 0
+    assert not path.is_symlink()
+    assert b"/opt/subbench" in path.read_bytes()
+    assert target.read_text() == "tracked file\n"
 
 
 def test_config_write_keeps_other_lines_and_is_private(tmp_path):

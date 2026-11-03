@@ -75,6 +75,14 @@ def launchd_plist(command: list[str]) -> bytes:
     })
 
 
+def _replace(path: Path, data: bytes) -> None:
+    # A unit installed by hand is often a symlink into the checkout. Writing through it would
+    # overwrite the tracked file in the repository, so remove the link and write a new file.
+    if path.is_symlink():
+        path.unlink()
+    path.write_bytes(data)
+
+
 def _system() -> str:
     name = platform.system()
     if name not in ("Linux", "Darwin"):
@@ -102,7 +110,7 @@ def install(provider: str, *, dry_run: bool = False) -> int:
         if not shutil.which("systemctl"):
             raise SystemExit("systemctl not found. Run `subbench watch` under your own supervisor instead.")
         unit_path().parent.mkdir(parents=True, exist_ok=True)
-        unit_path().write_text(text)
+        _replace(unit_path(), text.encode())
         _run("systemctl", "--user", "daemon-reload")
         result = _run("systemctl", "--user", "enable", UNIT_NAME)
         restart = _run("systemctl", "--user", "restart", UNIT_NAME)
@@ -122,7 +130,7 @@ def install(provider: str, *, dry_run: bool = False) -> int:
     plist_path().parent.mkdir(parents=True, exist_ok=True)
     log_path().parent.mkdir(parents=True, exist_ok=True)
     _run("launchctl", "bootout", domain, str(plist_path()))
-    plist_path().write_bytes(data)
+    _replace(plist_path(), data)
     result = _run("launchctl", "bootstrap", domain, str(plist_path()))
     if result.returncode:
         print(result.stderr.strip(), file=sys.stderr)

@@ -103,14 +103,17 @@ may show an error; note it. STOP on any other error.
 
 ```bash
 UNIT=~/.config/systemd/user/subbench.service
+ls -la "$UNIT"                               # note if it is a symlink into the checkout
 grep -E 'ExecStart|Environment' "$UNIT"      # note it; the token lives in push.env, not here
-cp -p "$UNIT" "$UNIT.0.2"                    # step 9 replaces this file; keep the old one for rollback
 systemctl --user stop subbench.service
 pgrep -af "subbench watch" || echo "no collector running"
 ```
 
-On macOS, copy the old plist aside the same way and use `launchctl bootout gui/$(id -u)
-<the plist>` instead.
+You do not need a copy of the old unit. The rollback takes the 0.2 unit from git. If the
+unit is a symlink into the checkout, step 9 replaces the link with a file and does not
+change the file in the checkout.
+
+On macOS, use `launchctl bootout gui/$(id -u) <the plist>` instead.
 Kill any `subbench watch` started by hand, so nothing else writes while you switch.
 
 ## 7. One collection with 0.3
@@ -151,7 +154,8 @@ running while logged out.
 
 ## 10. Verify
 
-Wait two minutes, then:
+The collector derives and pushes once when it starts, and then every 30 minutes. Wait
+until `subbench service logs` shows a `push:` line, then:
 
 ```bash
 subbench service status
@@ -173,14 +177,23 @@ paths. Do not delete any backup.
 
 ## Rollback
 
+Do a rollback only if the user asks for it. `4e49953` is the last 0.2 commit, and its
+`packaging/systemd/subbench.service` is the 0.2 unit.
+
 ```bash
 subbench service uninstall
-cp -p "$BAK" "$DB"
-git checkout <the commit before the pull>
+cd ~/SubBench
+git switch --detach 4e49953
 uv tool install --force --editable .
-cp -p ~/.config/systemd/user/subbench.service.0.2 ~/.config/systemd/user/subbench.service
+hash -r && subbench version                  # must print "subbench 0.2.0"
+cp packaging/systemd/subbench.service ~/.config/systemd/user/subbench.service   # a copy, not a symlink
 systemctl --user daemon-reload && systemctl --user enable --now subbench.service
 ```
 
-Restoring the backup discards whatever 0.3 recorded after step 2, so roll back only if the
-user asks.
+0.2 ignores the tables that 0.3 added, so the database can stay as it is. The 0.2 unit
+needs `ccusage` (through `npx`) and runs `packaging/claude-usage.py` from the checkout.
+0.2 sends account ids without a hash; the Worker hashes them on arrival.
+
+To restore the backup also (`cp -p "$BAK" "$DB"`, with the collector stopped): this
+discards everything that 0.3 recorded after step 2, and the readings in that time are
+lost. Do it only if the user asks for it by name.

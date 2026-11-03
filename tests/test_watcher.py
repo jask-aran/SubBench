@@ -74,3 +74,25 @@ def test_a_derivation_failure_does_not_stop_collection(monkeypatch):
     messages = []
     assert module.refresh_if_due(None, last_refreshed=0.0, now=1.0, emit=messages.append) == 1.0
     assert "derive failed" in messages[0]
+
+
+def test_watch_flushes_each_line_by_default(monkeypatch) -> None:
+    # Under systemd or launchd, stdout is a pipe, which Python buffers in blocks of about
+    # 8 KB. Without a flush, `subbench service logs` showed no cycle for hours.
+    import io
+    import sys
+
+    class Pipe(io.StringIO):
+        flushes = 0
+
+        def flush(self) -> None:
+            Pipe.flushes += 1
+            super().flush()
+
+    pipe = Pipe()
+    monkeypatch.setattr(sys, "stdout", pipe)
+    with patch("subbench.watcher.collect_target", side_effect=[(True, "claude ok")]), \
+            patch("subbench.watcher.refresh_if_due", side_effect=lambda db, **kw: kw["now"]):
+        watch(object(), targets=[WatchTarget("claude")], runner="native", interval_seconds=60, once=True)
+    assert pipe.getvalue().rstrip().endswith("claude ok")
+    assert Pipe.flushes >= 1

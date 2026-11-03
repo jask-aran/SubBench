@@ -195,9 +195,15 @@ def watch(
     once: bool = False,
     debounce_seconds: float = 60.0,
     reconcile_seconds: float = 21600.0,
-    emit: Callable[[str], None] = print,
+    emit: Callable[[str], None] | None = None,
 ) -> int:
     """Watch local logs cheaply and collect only after changes or reconciliation."""
+    if emit is None:
+        # Under systemd or launchd stdout is a pipe, which Python buffers in blocks, so the
+        # service log stayed empty for hours unless each line is flushed.
+        def emit(message: str) -> None:
+            print(message, flush=True)
+
     if interval_seconds <= 0 or debounce_seconds < 0 or reconcile_seconds <= 0:
         raise ValueError("watch intervals must be positive")
 
