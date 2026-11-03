@@ -181,9 +181,15 @@ subbench privacy preview    # the exact payload of the next push, not sent
   before the payload is built (the same account hashes the same on every machine, so two
   collectors still pool). Emails and names are never sent. Raw daily usage rows are sent
   only with `SUBBENCH_PUSH_RAW_USAGE=1`.
-- **The server hashes too.** The Worker hashes any account id that arrives unhashed, with
-  the same scheme, so even a collector from before 0.3.0 cannot store a raw id. For ids a
-  server already holds, `subbench privacy migration` prints SQL that rewrites them in
+- **The collector hashes; the server checks what it can read.** A collector from this
+  version sends its reports gzipped, and the Worker stores and serves them without opening
+  them, to keep its CPU time low. For those reports the collector's hashing is the only
+  guard, and `tests/test_privacy.py` opens every gzipped report a push carries to check
+  it. The Worker still hashes any account id that arrives unhashed in an uncompressed
+  report or reading, so a collector from before 0.3.0 cannot store a raw id. With one
+  collector, the site serves its report, where every account id is hashed. With several,
+  it serves pooled figures and product names only, and no account id at all.
+  For ids a server already holds, `subbench privacy migration` prints SQL that rewrites them in
   place (idempotent); run it with `npx wrangler d1 execute subbench --remote --file`.
 - **The binary is the source.** Each release is built from a tag by
   `.github/workflows/release.yml`, with a SHA-256 file and a signed build-provenance

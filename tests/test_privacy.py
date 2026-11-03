@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+import base64
+import gzip
 import json
 from pathlib import Path
 
@@ -44,6 +46,11 @@ def test_what_is_sent_is_what_preview_shows(db, monkeypatch):
     push_once(db, url="https://example.test/ingest", token="t",
               sender=lambda url, token, payload, timeout: sent.update(payload=payload) or {})
     assert ACCOUNT not in json.dumps(sent["payload"])
+    # The Worker stores gzipped reports unopened, so the collector's hashing is the only
+    # guard for them: open every one and check it too.
+    opened = [gzip.decompress(base64.b64decode(text)).decode() for text in sent["payload"]["report_gz"].values()]
+    assert opened and all(ACCOUNT not in text and ACCOUNT[:8] not in text and EMAIL not in text for text in opened)
+    assert any(privacy.pseudonym(ACCOUNT) in text for text in opened)
 
 
 def test_pseudonyms_are_stable_and_distinct():
