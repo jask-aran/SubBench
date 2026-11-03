@@ -39,6 +39,37 @@ class CcusageSchemaError(ValueError):
     """Raised when a payload has no recognisable usage rows."""
 
 
+DAILY_TOKEN_CLASSES = ("inputTokens", "outputTokens", "cacheCreationTokens", "cacheReadTokens")
+
+
+def daily_tokens(payload: Any) -> dict[str, dict[str, int]]:
+    """Read daily token totals. Do not compare price tables."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("daily"), list):
+        raise CcusageSchemaError("expected a daily report")
+    days = {}
+    for day in payload["daily"]:
+        if not isinstance(day, dict) or not isinstance(day.get("date"), str):
+            raise CcusageSchemaError("expected a date for each day")
+        date = day["date"]
+        if date in days:
+            raise CcusageSchemaError(f"duplicate day: {date}")
+        counts = {}
+        for name in DAILY_TOKEN_CLASSES:
+            value = day.get(name, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise CcusageSchemaError(f"invalid token count in field {name}")
+            counts[name] = value
+        days[date] = counts
+    return days
+
+
+def compare_daily_tokens(left: Any, right: Any) -> tuple[int, list[str]]:
+    """Return the day count and dates with different tokens, including absent days."""
+    a, b = daily_tokens(left), daily_tokens(right)
+    dates = sorted(a.keys() | b.keys())
+    return len(dates), [date for date in dates if a.get(date) != b.get(date)]
+
+
 @dataclass(frozen=True, slots=True)
 class UsageRow:
     provider: str

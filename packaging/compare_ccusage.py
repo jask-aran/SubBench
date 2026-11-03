@@ -21,15 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from subbench import logs  # noqa: E402
 from subbench.prices import default_prices  # noqa: E402
-
-CLASSES = ("inputTokens", "outputTokens", "cacheCreationTokens", "cacheReadTokens")
+from subbench.ccusage import compare_daily_tokens, daily_tokens  # noqa: E402
 
 
 def days(report: dict) -> dict[str, dict]:
+    tokens = daily_tokens(report)
     out = {}
     for day in report.get("daily", []):
         out[day["date"]] = {"cost": float(day.get("totalCost", day.get("costUSD", 0.0))),
-                            **{name: int(day.get(name, 0)) for name in CLASSES}}
+                            **tokens[day["date"]]}
     return out
 
 
@@ -47,12 +47,15 @@ def main() -> int:
             print(f"{provider}: ccusage failed: {result.stderr.strip()[-400:]}")
             failed = True
             continue
-        theirs = days(json.loads(result.stdout))
-        ours = days(logs.LogReader(provider, prices).daily())
+        ccusage_report = json.loads(result.stdout)
+        native_report = logs.LogReader(provider, prices).daily()
+        _, differing = compare_daily_tokens(ccusage_report, native_report)
+        theirs = days(ccusage_report)
+        ours = days(native_report)
         token_days, cost_days = [], []
         for date in sorted(set(theirs) | set(ours)):
             a, b = theirs.get(date), ours.get(date)
-            if a is None or b is None or any(a[n] != b[n] for n in CLASSES):
+            if date in differing:
                 token_days.append((date, a, b))
             elif abs(a["cost"] - b["cost"]) > 0.01 * max(abs(a["cost"]), 0.01):
                 cost_days.append((date, a["cost"], b["cost"]))

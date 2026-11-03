@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -10,6 +11,7 @@ from typing import Any, Iterable
 
 from . import account
 from .logs import discover as discover_logs
+from .watcher import ccusage_executable
 
 
 @dataclass(frozen=True)
@@ -38,11 +40,42 @@ def run_doctor(db: sqlite3.Connection, database_path: Path, providers: Iterable[
     for provider in selected:
         logs = list(discover_logs(provider))
         checks.append(Check(f"{provider} logs", "ok" if logs else "warn", f"{len(logs)} JSONL files detected" if logs else "no JSONL logs detected"))
+        checks.append(_ccusage_check(db, provider))
         checks.extend(_freshness_checks(db, provider))
         unobserved = _unobserved_quota_check(db, provider)
         if unobserved is not None:
             checks.append(unobserved)
     return checks
+
+
+def _ccusage_check(db: sqlite3.Connection, provider: str) -> Check:
+    name = f"{provider} ccusage"
+    path = ccusage_executable()
+    if path is None:
+        return Check(name, "ok", "not installed (optional backup)")
+    try:
+        row = db.execute("SELECT value FROM meta WHERE key = ?", (f"ccusage.check.{provider}",)).fetchone()
+    except sqlite3.OperationalError as error:
+        if str(error) != "no such table: meta":
+            raise
+        row = None
+    if row is None:
+        return Check(name, "ok", f"installed at {path}; not checked yet")
+    try:
+        check = json.loads(row[0])
+        if (not isinstance(check, dict) or not isinstance(check.get("at"), str)
+                or not isinstance(check.get("days"), int) or isinstance(check["days"], bool)
+                or not isinstance(check.get("differing"), list)
+                or not all(isinstance(date, str) for date in check["differing"])
+                or "error" not in check or not isinstance(check["error"], (str, type(None)))):
+            raise ValueError("invalid check")
+    except (TypeError, ValueError):
+        return Check(name, "warn", "invalid stored ccusage check")
+    if check["error"]:
+        return Check(name, "warn", check["error"])
+    if check["differing"]:
+        return Check(name, "warn", f"differs on {len(check['differing'])} day(s): " + ", ".join(check["differing"]))
+    return Check(name, "ok", f"agrees on {check['days']} days (checked {check['at']})")
 
 
 def exit_code(checks: Iterable[Check]) -> int:

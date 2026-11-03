@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
 
 from . import account
-from .ccusage import CcusageSchemaError, normalise_payload
+from .ccusage import CcusageSchemaError, compare_daily_tokens, normalise_payload
 from .entitlement import collect_entitlements
 from .incremental import AuthFileDetector, LogChangeDetector
 from .logs import LogReader, raw as logs_raw
@@ -53,6 +54,64 @@ def ccusage_command(*, runner: str, provider: str, report: str) -> list[str]:
     else:
         raise ValueError(f"unsupported runner: {runner}")
     return [*prefix, provider, report, "--json"]
+
+
+CCUSAGE_TIMEOUT_SECONDS = 120
+CCUSAGE_CHECK_SECONDS = 3600
+_CCUSAGE_CHECKS: dict[str, float] = {}
+
+
+def ccusage_executable() -> str | None:
+    value = os.environ.get("SUBBENCH_CCUSAGE")
+    if value is not None:
+        if value.lower() in {"off", "0", "false", "no"}:
+            return None
+        return value if os.path.isfile(value) and os.access(value, os.X_OK) else None
+    return shutil.which("ccusage")
+
+
+def _run_ccusage(command: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess:
+    options = {"timeout": timeout} if timeout is not None else {}
+    return subprocess.run(command, check=False, capture_output=True, **options)
+
+
+def _check_ccusage(db, *, provider: str, payload: Any, messages: list[str]) -> None:
+    try:
+        exe = ccusage_executable()
+        if exe is None:
+            return
+        now = time.monotonic()
+        if provider in _CCUSAGE_CHECKS and now - _CCUSAGE_CHECKS[provider] < CCUSAGE_CHECK_SECONDS:
+            return
+        _CCUSAGE_CHECKS[provider] = now
+        check = {"at": datetime.now(timezone.utc).isoformat(), "version": None,
+                 "days": 0, "differing": [], "error": None}
+        try:
+            result = _run_ccusage([exe, provider, "daily", "--json", "--offline"], timeout=CCUSAGE_TIMEOUT_SECONDS)
+            if result.returncode:
+                error = result.stderr.decode("utf-8", errors="replace").strip()
+                raise ValueError(error or f"ccusage exited with status {result.returncode}")
+            check["days"], check["differing"] = compare_daily_tokens(payload, json.loads(result.stdout))
+        except Exception as error:  # The backup must not stop quota collection.
+            check["error"] = str(error).strip().split("\n")[0][:300] or type(error).__name__
+        # regression_points prices each quota reading from the newest provider import.
+        # Save only the check here. Two imports would alternate the price source.
+        with db:
+            db.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (f"ccusage.check.{provider}", json.dumps(check)),
+            )
+        if check["error"]:
+            messages.append(f"ccusage check failed: {check['error']}")
+        elif check["differing"]:
+            messages.append(f"ccusage differs on {len(check['differing'])} day(s): "
+                            + ", ".join(check["differing"][:3]))
+        else:
+            messages.append(f"ccusage agrees ({check['days']} days)")
+    except Exception as error:  # Include detection and database failures.
+        reason = str(error).strip().split("\n")[0][:300] or type(error).__name__
+        messages.append(f"ccusage check failed: {reason}")
 
 
 TRUNCATION_RETRIES = 2
@@ -104,27 +163,44 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
     if runner == "native":
         try:
             raw, payload = native_report(target.provider, target.report)
-            rows = normalise_payload(payload, provider=target.provider, report=target.report) if payload["daily"] else []
-            if rows:
-                import_id, row_count, created = save_import(
-                    db, raw=raw, payload=payload, rows=rows, provider=target.provider, report=target.report,
-                    command=f"subbench {target.provider} logs", account_id=account_id,
-                )
-                messages.append(f"usage {'recorded' if created else 'unchanged'} import {import_id} ({row_count} rows)")
-            else:
-                messages.append("usage: no local sessions yet")
-            hours = save_hourly(db, provider=target.provider, account_id=account_id,
-                                buckets=reader(target.provider).hourly(), now=datetime.now(timezone.utc).isoformat())
-            if hours:
-                messages.append(f"{hours} hour(s) updated")
-            unknown = sorted(reader(target.provider).prices.unknown) if reader(target.provider).prices else []
-            if unknown:
-                messages.append(f"no price for {', '.join(unknown)}")
         except (OSError, CcusageSchemaError, ValueError) as error:
-            messages.append(f"usage error: {error}")
+            exe = ccusage_executable()
             failed = True
+            if exe is not None:
+                failed = _collect_ccusage(
+                    db, target=target, command=[exe, target.provider, target.report, "--json", "--offline"],
+                    account_id=account_id, messages=messages, timeout=CCUSAGE_TIMEOUT_SECONDS,
+                )
+            if failed:
+                messages.append(f"usage error: {error}")
+            else:
+                messages.append(f"usage from ccusage (built-in reader failed: {error})")
+        else:
+            try:
+                rows = normalise_payload(payload, provider=target.provider, report=target.report) if payload["daily"] else []
+                if rows:
+                    import_id, row_count, created = save_import(
+                        db, raw=raw, payload=payload, rows=rows, provider=target.provider, report=target.report,
+                        command=f"subbench {target.provider} logs", account_id=account_id,
+                    )
+                    messages.append(f"usage {'recorded' if created else 'unchanged'} import {import_id} ({row_count} rows)")
+                else:
+                    messages.append("usage: no local sessions yet")
+                hours = save_hourly(db, provider=target.provider, account_id=account_id,
+                                    buckets=reader(target.provider).hourly(), now=datetime.now(timezone.utc).isoformat())
+                if hours:
+                    messages.append(f"{hours} hour(s) updated")
+                unknown = sorted(reader(target.provider).prices.unknown) if reader(target.provider).prices else []
+                if unknown:
+                    messages.append(f"no price for {', '.join(unknown)}")
+            except (OSError, CcusageSchemaError, ValueError) as error:
+                messages.append(f"usage error: {error}")
+                failed = True
+            else:
+                _check_ccusage(db, provider=target.provider, payload=payload, messages=messages)
     else:
-        failed = _collect_ccusage(db, target=target, runner=runner, account_id=account_id, messages=messages)
+        command = ccusage_command(runner=runner, provider=target.provider, report=target.report)
+        failed = _collect_ccusage(db, target=target, command=command, account_id=account_id, messages=messages)
 
     try:
         entitlements = collect_entitlements(target.provider)
@@ -148,15 +224,15 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
     return not failed, f"{target.provider}: " + "; ".join(messages)
 
 
-def _collect_ccusage(db, *, target: WatchTarget, runner: str, account_id: str | None, messages: list[str]) -> bool:
-    """The previous collector: run ccusage and store what it prints. Kept for comparison."""
-    command = ccusage_command(runner=runner, provider=target.provider, report=target.report)
-    result = subprocess.run(command, check=False, capture_output=True)
-    if result.returncode != 0:
-        error = result.stderr.decode("utf-8", errors="replace").strip()
-        messages.append(error or f"ccusage exited with status {result.returncode}")
-        return True
+def _collect_ccusage(db, *, target: WatchTarget, command: list[str], account_id: str | None,
+                     messages: list[str], timeout: int | None = None) -> bool:
+    """Run ccusage and save its report, with retries for absent periods."""
     try:
+        result = _run_ccusage(command, timeout=timeout)
+        if result.returncode != 0:
+            error = result.stderr.decode("utf-8", errors="replace").strip()
+            messages.append(error or f"ccusage exited with status {result.returncode}")
+            return True
         payload = json.loads(result.stdout)
         rows = normalise_payload(payload, provider=target.provider, report=target.report)
         # ccusage sometimes returns fewer days than its own previous run. Retry a
@@ -166,7 +242,7 @@ def _collect_ccusage(db, *, target: WatchTarget, runner: str, account_id: str | 
             if not dropped:
                 break
             messages.append(f"retrying, ccusage dropped {len(dropped)} period(s)")
-            retry = subprocess.run(command, check=False, capture_output=True)
+            retry = _run_ccusage(command, timeout=timeout)
             if retry.returncode != 0:
                 break
             result = retry
@@ -180,7 +256,12 @@ def _collect_ccusage(db, *, target: WatchTarget, runner: str, account_id: str | 
             command=" ".join(command), account_id=account_id,
         )
         messages.append(f"usage {'recorded' if created else 'unchanged'} import {import_id} ({row_count} rows)")
-    except (json.JSONDecodeError, UnicodeDecodeError, CcusageSchemaError, ValueError) as error:
+    except (OSError, subprocess.TimeoutExpired) as error:
+        if timeout is None:
+            raise
+        messages.append(f"usage error: {error}")
+        return True
+    except (UnicodeDecodeError, CcusageSchemaError, ValueError) as error:
         messages.append(f"usage error: {error}")
         return True
     return False

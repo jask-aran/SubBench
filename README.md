@@ -49,6 +49,22 @@ the same things ccusage counts:
 exercise each of these rules (packaging/prices/README.md). `--runner npx` still runs
 ccusage instead.
 
+### Optional ccusage backup
+
+ccusage is optional. The backup does not install it. If `ccusage` is on the PATH (for
+example, after `npm install -g ccusage`), SubBench checks its reader against ccusage
+once an hour, at collection time. It compares daily token counts, not costs. If the
+built-in reader fails, SubBench uses ccusage as the usage source.
+
+`SUBBENCH_CCUSAGE=off` turns this backup off. `SUBBENCH_CCUSAGE=/path` names an
+executable file. The backup runs with `--offline`. It uses cached prices and does
+not fetch a price table.
+
+The systemd unit's PATH is
+`~/.local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin`.
+If you installed ccusage elsewhere, for example under nvm, set `SUBBENCH_CCUSAGE`
+to its full path.
+
 ### The watcher
 
 The watcher scans file metadata every 2 seconds. It does not open or parse the logs. After
