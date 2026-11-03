@@ -534,10 +534,6 @@ pip install -e .             # Python 3.11 or later
 sh packaging/binary/build.sh # or build the single executable: dist/bin/subbench-<os>-<arch>
 ```
 
-A unit installed before 0.3.0 ran `subbench watch` with `SUBBENCH_CLAUDE_USAGE_COMMAND`
-set to `packaging/claude-usage.py`. That still works. `subbench service install` replaces
-it with a unit that needs neither.
-
 ---
 
 ## Commands

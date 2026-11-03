@@ -72,21 +72,6 @@ def test_a_claude_tier_beats_a_stale_declaration(monkeypatch):
     assert module.collect_entitlements("claude")[0].plan == "max_5x"
 
 
-def test_a_live_profile_tier_overrides_the_login_file():
-    import importlib.util
-    from pathlib import Path
-
-    spec = importlib.util.spec_from_file_location(
-        "claude_usage", Path(__file__).resolve().parents[1] / "packaging" / "claude-usage.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    assert module.profile_tier({"organization": {"rate_limit_tier": "default_claude_max_5x"}}) == "default_claude_max_5x"
-    body = module.with_plan('{"five_hour": {"utilization": 0.1}}', live_tier="default_claude_max_20x")
-    assert json.loads(body)["organizationRateLimitTier"] == "default_claude_max_20x"
-
-
 def test_a_declared_plan_fills_in_for_a_provider_that_reports_none(monkeypatch):
     """Claude's usage endpoint returns meters and nothing about the subscription."""
     from subbench import entitlement as module

@@ -127,6 +127,24 @@ and most of those reasons come from a fault that the code had.
 
 ---
 
+## Keeping the reader in step with ccusage
+
+`logs.py` (Claude) and `codex_logs.py` (Codex) are ports of ccusage 20.0.47 (commit
+`d1b84d9`), rule by rule. `prices.py` ports its cost rules, and `data/prices.json` is
+ccusage's own price resolution. `tests/test_parity.py` requires our daily reports to equal
+ccusage's recorded output (`tests/parity/golden`) for 16 generated log sets. When ccusage
+changes:
+
+1. re-record the golden files with a built ccusage (`tests/parity/record.sh`);
+2. regenerate the price table (packaging/prices/README.md);
+3. port whatever the parity test then disagrees on.
+
+`compare_ccusage.py` exiting non-zero on a real machine means the logs contain a shape the
+generator does not produce. Add that shape to `tests/parity/generate.py` before fixing the
+reader.
+
+---
+
 ## The Worker
 
 To run the Worker on your own machine:
