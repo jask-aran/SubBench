@@ -36,7 +36,9 @@ TIMEOUT = 20
 
 
 class EndpointError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def _get(url: str, headers: dict[str, str], *, credential: str, purpose: str) -> dict[str, Any]:
@@ -49,7 +51,7 @@ def _get(url: str, headers: dict[str, str], *, credential: str, purpose: str) ->
         raise EndpointError(str(error)) from None
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace")[:300]
-        raise EndpointError(f"{url} returned {error.code}: {detail}") from None
+        raise EndpointError(f"{url} returned {error.code}: {detail}", status=error.code) from None
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         raise EndpointError(f"{url} unreachable: {error}") from None
     except ValueError as error:
@@ -104,10 +106,7 @@ def claude_usage() -> dict[str, Any]:
         if isinstance(value, str) and value.strip() and key not in payload:
             payload[key] = value.strip()
     # The plan as of this reading. The login file can lag an upgrade by days.
-    try:
-        profile = _get(os.environ.get("CLAUDE_PROFILE_URL", CLAUDE_PROFILE_URL), headers, credential="claude", purpose="claude plan")
-    except EndpointError:
-        profile = {}
+    profile = _claude_profile(headers)
     tier = _text((profile.get("organization") or {}).get("rate_limit_tier"))
     # The quota belongs to the user, not the organisation (a Team organisation has many
     # users, each with a meter). The server pools by this id, hashed, so it can tell two
@@ -122,6 +121,24 @@ def claude_usage() -> dict[str, Any]:
     if uuid and "account_uuid" not in payload:
         payload["account_uuid"] = uuid
     return payload
+
+
+# The profile changes only when the plan does, and each request counts against the same
+# rate limit as the meter (429s cost readings). One fetch an hour is enough.
+PROFILE_SECONDS = 3600.0
+_PROFILE: dict[str, Any] = {}
+
+
+def _claude_profile(headers: dict[str, str]) -> dict[str, Any]:
+    now = time.monotonic()
+    if _PROFILE and now - _PROFILE["at"] < PROFILE_SECONDS:
+        return _PROFILE["value"]
+    try:
+        value = _get(os.environ.get("CLAUDE_PROFILE_URL", CLAUDE_PROFILE_URL), headers, credential="claude", purpose="claude plan")
+    except EndpointError:
+        return _PROFILE.get("value", {})
+    _PROFILE.update(at=now, value=value)
+    return value
 
 
 def _text(value: Any) -> str | None:

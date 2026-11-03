@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -74,7 +75,37 @@ def collect_codex_for(account_id: str | None) -> list[EntitlementWindow]:
     return _normalise_codex(payload, account_id=account_id)
 
 
+class MeterDeferred(RuntimeError):
+    """The meter was not read this cycle, on purpose: spacing, or a rate-limit backoff."""
+
+
+# Anthropic's usage endpoint answers 429 when it is read too often, and a reading it refuses
+# is lost for good. Space the reads, and after a 429 wait, doubling up to half an hour.
+CLAUDE_METER_MIN_SECONDS = 120.0
+CLAUDE_BACKOFF_FIRST_SECONDS = 300.0
+CLAUDE_BACKOFF_MAX_SECONDS = 1800.0
+_CLAUDE_METER: dict[str, float] = {}
+
+
 def collect_claude() -> list[EntitlementWindow]:
+    now = time.monotonic()
+    wait = _CLAUDE_METER.get("next", 0.0) - now
+    if wait > 0:
+        reason = "rate-limit backoff" if _CLAUDE_METER.get("backoff") else "spacing"
+        raise MeterDeferred(f"Claude meter next read in {wait:.0f} s ({reason})")
+    try:
+        rows = _read_claude()
+    except RuntimeError as error:
+        if getattr(error, "status", None) == 429:
+            backoff = min(max(_CLAUDE_METER.get("backoff", 0.0) * 2, CLAUDE_BACKOFF_FIRST_SECONDS),
+                          CLAUDE_BACKOFF_MAX_SECONDS)
+            _CLAUDE_METER.update(backoff=backoff, next=now + backoff)
+        raise
+    _CLAUDE_METER.update(backoff=0.0, next=now + CLAUDE_METER_MIN_SECONDS)
+    return rows
+
+
+def _read_claude() -> list[EntitlementWindow]:
     # An explicit command still wins, for anyone who wired their own reader.
     command = os.environ.get("SUBBENCH_CLAUDE_USAGE_COMMAND")
     if command:
@@ -87,7 +118,9 @@ def collect_claude() -> list[EntitlementWindow]:
     try:
         return _normalise_claude(claude_usage())
     except EndpointError as error:
-        raise RuntimeError(str(error)) from None
+        failure = RuntimeError(str(error))
+        failure.status = error.status  # type: ignore[attr-defined]
+        raise failure from None
 
 
 def _normalise_codex(payload: dict[str, Any], *, account_id: str | None = None) -> list[EntitlementWindow]:

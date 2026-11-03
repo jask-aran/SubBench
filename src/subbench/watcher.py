@@ -11,7 +11,7 @@ from typing import Any, Callable, Sequence
 
 from . import account
 from .ccusage import CcusageSchemaError, compare_daily_tokens, normalise_payload
-from .entitlement import collect_entitlements
+from .entitlement import MeterDeferred, collect_entitlements
 from .incremental import AuthFileDetector, LogChangeDetector
 from .logs import LogReader, raw as logs_raw
 from .push import build_reports, push_all
@@ -209,6 +209,8 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
         messages.extend(plan_moves(db, entitlements))
         count = save_entitlements(db, entitlements, observed_at)
         messages.append(f"entitlement {count} window(s)")
+    except MeterDeferred as error:
+        messages.append(f"entitlement deferred: {error}")
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         messages.append(f"entitlement unavailable: {error}")
 
