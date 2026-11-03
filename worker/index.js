@@ -13,7 +13,7 @@
  * only thing standing between a malformed push and every estimate derived from that
  * window afterwards.
  */
-import { poolHistory } from "./pooling.js";
+import { poolHistory, poolInput } from "./pooling.js";
 
 const SCHEMA_VERSION = 1;
 const MAX_USAGE_ROWS = 5000;
@@ -40,6 +40,8 @@ export async function pseudonym(accountId) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`subbench:v1:${accountId}`));
   return "acct-" + [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
 }
+
+const UNHASHED_ACCOUNT = /"account_id"\s*:\s*"(?!acct-)/;
 
 export async function pseudonymise(value, cache = new Map()) {
   if (Array.isArray(value)) {
@@ -232,13 +234,18 @@ async function ingest(request, env) {
   }
 
   let payload;
+  let body;
   try {
-    payload = await request.json();
+    body = await request.text();
+    payload = JSON.parse(body);
   } catch {
     return json({ error: "body must be JSON" }, 400);
   }
 
-  payload = await pseudonymise(payload);
+  // A collector from 0.3.0 on hashes every account id itself. Walking a 700 KB payload to
+  // find none cost over half of an ingest's CPU, so walk only when the raw text holds an
+  // account id without the hash prefix.
+  if (UNHASHED_ACCOUNT.test(body)) payload = await pseudonymise(payload);
   let batch;
   try {
     batch = parse(payload);
@@ -258,16 +265,18 @@ async function ingest(request, env) {
     statements.push(env.DB.prepare(REPORT_UPSERT).bind(batch.agentId, kind, now, JSON.stringify(report)));
   }
   if (Object.hasOwn(batch.reports, "history")) {
+    // The fields pooling reads, stored beside the full report so a pass parses only these.
+    statements.push(env.DB.prepare(REPORT_UPSERT).bind(
+      batch.agentId, "pool_input", now, JSON.stringify(poolInput(batch.reports.history))));
     statements.push(env.DB.prepare(
       "INSERT INTO pool_state (id, dirty) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET dirty = 1, revision = revision + 1"
     ));
   }
   // One batch. A partial write would leave quota advancing against spend that was never
   // stored, which the estimator reads as unobserved usage and discards.
+  // Accepted pushes are not logged: nothing reads them (health counts rejections, and
+  // agents.last_seen dates the last push), and each was a D1 write per push.
   await env.DB.batch(statements);
-  await env.DB.prepare(
-    "INSERT INTO ingest_log (received_at, agent_id, status, detail) VALUES (?, ?, ?, ?)"
-  ).bind(now, batch.agentId, 200, null).run();
 
   return json({
     accepted: {
@@ -307,7 +316,7 @@ export async function poolIfDirty(env) {
   const limit = Number.isInteger(configured) && configured > 0 ? configured : 500;
   const { results } = await env.DB.prepare(`
     SELECT reports.payload FROM reports JOIN agents ON agents.agent_id = reports.agent_id
-    WHERE reports.kind = 'history' AND agents.last_seen >= ?
+    WHERE reports.kind = 'pool_input' AND agents.last_seen >= ?
     ORDER BY agents.last_seen DESC LIMIT ?
   `).bind(cutoff, limit).all();
   const generatedAt = now.toISOString();

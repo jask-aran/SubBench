@@ -91,8 +91,13 @@ function productLabel(provider, plan) {
   return detail.toLowerCase().startsWith(name.toLowerCase()) ? detail : `${name} ${detail}`;
 }
 
-// Python compares Unicode code points, including characters outside the BMP.
+// Python compares Unicode code points, including characters outside the BMP. Without
+// surrogate pairs, UTF-16 code-unit order (JavaScript's < ) is the same order, and this
+// was 15% of a pooling pass when done the long way for every comparison.
+const SURROGATE = /[\uD800-\uDFFF]/;
+
 function compare(a, b) {
+  if (!SURROGATE.test(a) && !SURROGATE.test(b)) return a < b ? -1 : a > b ? 1 : 0;
   const left = Array.from(a, (c) => c.codePointAt(0));
   const right = Array.from(b, (c) => c.codePointAt(0));
   for (let i = 0; i < Math.min(left.length, right.length); i++) {
@@ -138,7 +143,19 @@ function pool(rows) {
   };
 }
 
+// One pass parses the same reset keys several times (each filter, then each period).
+const MOMENTS = new Map();
+
 function moment(value) {
+  let parsed = MOMENTS.get(value);
+  if (parsed === undefined) {
+    parsed = parseMoment(value);
+    MOMENTS.set(value, parsed);
+  }
+  return parsed;
+}
+
+function parseMoment(value) {
   // Python also accepts ISO week dates, which Date.parse does not accept.
   const week = /^(\d{4})(-?)W(\d{2})(?:\2([1-7]))?(?=$|[^0-9])/.exec(value);
   if (week) {
@@ -212,7 +229,28 @@ function productEstimates(windows, now, tier) {
   })), ["product", "window"]);
 }
 
-export function poolHistory(reports, now) {
+// The window fields pooling reads (subbench.products.POOL_FIELDS). Ingest stores only these
+// per collector, so a pooling pass parses a fraction of each history report.
+const POOL_FIELDS = ["provider", "account_id", "plan", "window", "reset_key", "tier", "estimate_usd",
+  "lower_usd", "upper_usd", "covered_quota_percent", "latest_observed_at"];
+
+export function poolInput(report) {
+  return { windows: (report?.windows || []).map((row) =>
+    Object.fromEntries(POOL_FIELDS.map((field) => [field, row[field] ?? null]))) };
+}
+
+// One row per product and limit, nothing per account (subbench.products.measured_products).
+function measuredProducts(windows) {
+  const seen = new Map();
+  for (const row of windows) {
+    const provider = pyString(row.provider), plan = planOf(row), window = pyString(row.window);
+    const key = JSON.stringify([provider, plan, window]);
+    if (!seen.has(key)) seen.set(key, { provider, plan, product: productLabel(provider, plan), window });
+  }
+  return sorted([...seen.values()], ["product", "window"]);
+}
+
+export function mergeAgentWindows(reports) {
   const best = new Map();
   for (const report of reports) {
     for (const row of report.windows || []) {
@@ -223,7 +261,12 @@ export function poolHistory(reports, now) {
           && compare(pyString(row.latest_observed_at || ""), pyString(seen.latest_observed_at || "")) > 0)) best.set(key, row);
     }
   }
-  const windows = [...best.values()];
+  return [...best.values()];
+}
+
+export function poolHistory(reports, now) {
+  MOMENTS.clear();
+  const windows = mergeAgentWindows(reports);
   const latest = new Map();
   for (const row of directWindows(windows, +now, ["confirmed", "likely", "provisional"], false, null)) {
     if (pyString(row.window) !== "weekly") continue;
@@ -241,7 +284,7 @@ export function poolHistory(reports, now) {
       return { ...identity, estimate_usd, window_count, account_count };
     });
   return {
-    windows,
+    windows: measuredProducts(windows),
     products: productEstimates(windows, +now, "confirmed"),
     products_likely: productEstimates(windows, +now, "likely"),
     products_open: sorted(productsOpen, ["product", "window"]),

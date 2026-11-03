@@ -422,6 +422,8 @@ which copy was correct.
 Estimation runs only on the collector. With several collectors, the server merges their
 windows and pools their finished estimates with weighted medians, at most once per
 10 minutes. With one collector, the site serves its report verbatim.
+The pooled report carries the pooled figures and one row per measured product, never a
+collector's per-account windows.
 `worker/pooling.js` must reproduce `tests/pooling/golden`. Regenerate those cases with
 `tests/pooling/generate.py` only after a deliberate change to `subbench.products.pool_history`.
 

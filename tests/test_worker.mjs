@@ -85,7 +85,7 @@ class FakeD1 {
     this.executed.push({ sql, params });
     if (sql.includes("INSERT INTO reports")) {
       this.reports[params[1]] = JSON.parse(params[3]);
-      if (params[1] === "history") this.agentReports.set(params[0], JSON.parse(params[3]));
+      if (params[1] === "pool_input") this.agentReports.set(params[0], JSON.parse(params[3]));
     } else if (sql.includes("INSERT INTO agents")) {
       this.agents.set(params[0], params[2]);
     } else if (sql.includes("INSERT INTO pool_state")) {
@@ -306,7 +306,10 @@ test("POOL_MAX_AGENTS selects the most recently seen collectors", async () => {
   await poolIfDirty({ ...env(db), POOL_MAX_AGENTS: "2" });
   const payload = JSON.parse(db.pooled.payload);
   assert.equal(payload.agent_count, 2);
-  assert.deepEqual(payload.windows.map((row) => row.account_id), ["acct-new", "acct-middle"]);
+  // Only the two newest collectors went in: the oldest one's 999 would have moved nothing,
+  // but its account would raise the count to 3.
+  assert.equal(payload.products[0].account_count, 2);
+  assert.equal(payload.products[0].estimate_usd >= 100 && payload.products[0].estimate_usd <= 200, true);
 });
 
 test("a history push during pooling keeps its dirty mark and the previous pool", async () => {
@@ -374,6 +377,22 @@ test("an unknown cron does nothing", async () => {
   await worker.scheduled({ cron: "unexpected" }, env(db));
   assert.deepEqual(db.queries, []);
   assert.deepEqual(db.executed, []);
+});
+
+test("ingest stores the compact pool input and logs no accepted push", async () => {
+  const db = new FakeD1();
+  const window = { ...historyWindow("acct-one", 50), extra_field: "not needed by pooling" };
+  const response = await worker.fetch(request("/ingest", {
+    method: "POST",
+    headers: { authorization: "Bearer token", "content-type": "application/json" },
+    body: JSON.stringify({ schema_version: 1, agent_id: "agent-1", entitlements: [], usage: [],
+      reports: { history: { windows: [window] } } }),
+  }), env(db));
+  assert.equal(response.status, 200);
+  const stored = db.agentReports.get("agent-1");
+  assert.equal(stored.windows.length, 1);
+  assert.equal("extra_field" in stored.windows[0], false);
+  assert.equal(db.bound.some((statement) => statement.sql.includes("INSERT INTO ingest_log")), false);
 });
 
 test("a rejected history ingest does not mark the pool dirty", async () => {

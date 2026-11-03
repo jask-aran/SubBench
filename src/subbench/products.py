@@ -369,6 +369,36 @@ def merge_agent_windows(reports: Iterable[dict[str, Any]]) -> list[dict[str, Any
     return list(best.values())
 
 
+# The window fields pooling reads. The server stores only these per collector, so a pass
+# parses a fraction of each history report.
+POOL_FIELDS = ("provider", "account_id", "plan", "window", "reset_key", "tier", "estimate_usd",
+               "lower_usd", "upper_usd", "covered_quota_percent", "latest_observed_at")
+
+
+def pool_input(report: dict[str, Any]) -> dict[str, Any]:
+    """The part of a history report that pooling reads (worker/pooling.js poolInput)."""
+    return {"windows": [{field: row.get(field) for field in POOL_FIELDS} for row in report.get("windows") or []]}
+
+
+def measured_products(windows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per product and limit that any collector measured, with nothing per account.
+
+    The site makes a card for every product being measured, even one with no settled
+    figure yet. The pooled report carries these rows in place of the windows: the windows
+    of every collector would grow with each user past D1's 2 MB row limit, and they would
+    put each account's estimates on a page that shows aggregates only.
+    """
+    seen: dict[tuple, dict[str, Any]] = {}
+    for row in windows:
+        plan = row.get("plan")
+        plan = plan if isinstance(plan, str) and plan else None
+        provider, window = str(row.get("provider")), str(row.get("window"))
+        seen.setdefault((provider, plan, window), {
+            "provider": provider, "plan": plan, "product": product_label(provider, plan), "window": window,
+        })
+    return sorted(seen.values(), key=lambda row: (row["product"], row["window"]))
+
+
 def pool_history(reports: list[dict[str, Any]], *, now: datetime) -> dict[str, Any]:
     """The history report the server serves when more than one collector reports.
 
@@ -378,7 +408,7 @@ def pool_history(reports: list[dict[str, Any]], *, now: datetime) -> dict[str, A
     """
     windows = merge_agent_windows(reports)
     return {
-        "windows": windows,
+        "windows": measured_products(windows),
         "products": [row.as_dict() for row in product_estimates(windows, now=now)],
         "products_likely": [row.as_dict() for row in product_estimates(windows, now=now, tiers=(LIKELY,))],
         "products_open": [row.as_dict() for row in open_estimates(windows, now=now)],

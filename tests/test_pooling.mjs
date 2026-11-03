@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
-import { poolHistory } from "../worker/pooling.js";
+import { mergeAgentWindows, poolHistory } from "../worker/pooling.js";
 
 const directory = new URL("./pooling/golden/", import.meta.url);
 for (const name of readdirSync(directory).filter((name) => /^case-.*\.json$/.test(name)).sort()) {
@@ -23,7 +23,8 @@ test("pooling keeps merge slots, ties, zero bounds, and UTC periods", () => {
   const tied = { ...fuller, estimate_usd: 999 };
   const invalid = { ...row, reset_key: "2026-02-30T00:00:00Z" };
   const output = poolHistory([{ windows: [row, invalid] }, { windows: [fuller, tied] }], new Date("2026-11-03T00:00:00Z"));
-  assert.deepEqual(output.windows, [fuller, invalid]);
+  assert.deepEqual(mergeAgentWindows([{ windows: [row, invalid] }, { windows: [fuller, tied] }]), [fuller, invalid]);
+  assert.deepEqual(output.windows, [{ provider: "claude", plan: "max_5x", product: "Claude Max 5X", window: "five_hour" }]);
   assert.equal(output.products[0].product, "Claude Max 5X");
   assert.equal(output.products[0].account_count, 1);
   assert.equal(output.products[0].lower_usd, 200);
@@ -54,4 +55,15 @@ test("ISO week reset keys accepted by Python contribute to the series", () => {
   const result = poolHistory([{ windows: [row] }], new Date("2026-11-03T00:00:00Z"));
   assert.equal(result.products[0].estimate_usd, 10);
   assert.equal(result.product_series[0].period_start, "2026-11-01");
+});
+
+test("pooling the compact copies that ingest stores gives the same report", async () => {
+  const { poolInput } = await import("../worker/pooling.js");
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const dir = new URL("./pooling/golden/", import.meta.url);
+  for (const name of readdirSync(dir).filter((file) => file.startsWith("case-"))) {
+    const testCase = JSON.parse(readFileSync(new URL(name, dir), "utf8"));
+    const got = JSON.parse(JSON.stringify(poolHistory(testCase.reports.map(poolInput), new Date(testCase.now))));
+    assert.deepStrictEqual(got, testCase.expected, name);
+  }
 });

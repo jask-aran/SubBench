@@ -64,8 +64,9 @@ CREATE INDEX IF NOT EXISTS usage_by_series
     ON usage_rows(agent_id, provider, account_key, last_seen_at);
 CREATE INDEX IF NOT EXISTS usage_by_import
     ON usage_rows(agent_id, import_key);
-CREATE INDEX IF NOT EXISTS entitlement_by_series
-    ON entitlement_snapshots(agent_id, provider, account_key, window, observed_at);
+-- entitlement_by_series had the same columns as the primary key, so every reading paid a
+-- third row write for an index no query needed.
+DROP INDEX IF EXISTS entitlement_by_series;
 -- Health counts rejections on every poll. Without this, that count scans the whole log.
 -- The partial predicate keeps successful ingests from writing the index.
 CREATE INDEX IF NOT EXISTS ingest_log_rejected
