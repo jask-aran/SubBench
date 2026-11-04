@@ -30,7 +30,7 @@ class FakeD1 {
   }
 
   prepare(sql) {
-    this.healthSql = sql.includes("entitlement_snapshots") ? sql : this.healthSql;
+    this.healthSql = sql.includes("AS entitlement_rows") ? sql : this.healthSql;
     const statement = (params) => ({
       sql, params,
       first: async () => this.first(sql, params),
@@ -74,7 +74,7 @@ class FakeD1 {
         ?? (this.reports[params[0]] === undefined ? undefined : JSON.stringify(this.reports[params[0]]));
       return raw === undefined ? null : { payload: raw, generated_at: "2026-08-01T00:00:00Z" };
     }
-    if (sql.includes("MAX(rowid) FROM entitlement_snapshots")) {
+    if (sql.includes("SUM(readings), 0) FROM agents")) {
       return {
         entitlement_rows: 1,
         agents: 1,
@@ -93,7 +93,7 @@ class FakeD1 {
       if (!String(params[3]).startsWith("gz:")) this.reports[params[1]] = JSON.parse(params[3]);
       if (params[1] === "pool_input") this.agentReports.set(params[0], params[3]);
     } else if (sql.includes("INSERT INTO agents")) {
-      this.agents.set(params[0], params[2]);
+      this.agents.set(params[0], params[1]);
     } else if (sql.includes("INSERT INTO pool_state")) {
       this.state = { ...this.state, dirty: 1, revision: this.state ? this.state.revision + 1 : 0 };
     } else if (sql.includes("INSERT INTO pooled_reports")) {
@@ -182,7 +182,7 @@ test("health does not count raw usage rows and the footer does not show them", a
   assert.equal("usage_rows" in body, false);
   assert.equal(db.healthSql.includes("COUNT(*) FROM usage_rows"), false);
   assert.equal(db.healthSql.includes("COUNT(*) FROM entitlement_snapshots"), false);
-  assert.equal(db.healthSql.includes("MAX(rowid) FROM entitlement_snapshots"), true);
+  assert.equal(db.healthSql.includes("SUM(readings), 0) FROM agents"), true);
   assert.equal(page.includes("usage_rows"), false);
   assert.equal(page.includes("document.hidden"), true);
   assert.equal(page.includes("setInterval(refresh, 60000)"), false);
@@ -222,6 +222,26 @@ test("the plan reported beside a meter is stored, and its absence is not guessed
   assert.equal(db.state, null);
   // The plan is the last bound parameter of the upsert.
   assert.deepEqual(inserts.map((statement) => statement.params.at(-1)), ["plus", null, null]);
+});
+
+test("a push counts its readings on the agents row, which runs before the snapshot upserts", async () => {
+  const db = new FakeD1();
+  const reading = (window) => ({ observed_at: "2026-08-01T00:00:00Z", provider: "codex", account_id: "acct-1",
+    window, used_percent: 10, resets_at: null, duration_minutes: null, source: "test" });
+  const response = await worker.fetch(request("/ingest", {
+    method: "POST",
+    headers: { authorization: "Bearer token", "content-type": "application/json" },
+    body: JSON.stringify({ schema_version: 1, agent_id: "agent-1", usage: [],
+      entitlements: [reading("5h"), reading("weekly")] }),
+  }), env(db));
+
+  assert.equal(response.status, 200);
+  assert.equal(db.bound[0].sql.includes("INSERT INTO agents"), true);
+  assert.equal(db.bound[0].sql.includes("readings = readings + excluded.readings"), true);
+  assert.deepEqual(JSON.parse(db.bound[0].params[2]), [
+    ["2026-08-01T00:00:00Z", "codex", "acct-1", "5h"],
+    ["2026-08-01T00:00:00Z", "codex", "acct-1", "weekly"],
+  ]);
 });
 
 test("account ids are hashed on arrival, the same way the collector hashes them", async () => {

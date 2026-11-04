@@ -10,7 +10,13 @@ CREATE TABLE IF NOT EXISTS agents (
     agent_id   TEXT PRIMARY KEY,
     label      TEXT,
     first_seen TEXT NOT NULL,
-    last_seen  TEXT NOT NULL
+    last_seen  TEXT NOT NULL,
+    -- Stored readings for this agent, kept by the Worker's ingest so /api/health need not
+    -- count entitlement_snapshots. A database made before this column needs, once:
+    --   ALTER TABLE agents ADD COLUMN readings INTEGER NOT NULL DEFAULT 0;
+    --   UPDATE agents SET readings = (SELECT COUNT(*) FROM entitlement_snapshots AS e
+    --                                 WHERE e.agent_id = agents.agent_id);
+    readings   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS entitlement_snapshots (
@@ -28,7 +34,10 @@ CREATE TABLE IF NOT EXISTS entitlement_snapshots (
     -- reader must treat a new plan as a new product rather than a continuation.
     plan             TEXT,
     PRIMARY KEY (agent_id, provider, account_key, window, observed_at)
-);
+-- WITHOUT ROWID stores each reading once, in primary-key order: one row write per reading.
+-- A rowid table also writes a separate primary-key index. A database made before this
+-- change is rebuilt with scripts/d1-entitlements-without-rowid.sql.
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS usage_rows (
     agent_id                TEXT NOT NULL,

@@ -187,9 +187,21 @@ INSERT INTO reports (agent_id, kind, generated_at, payload) VALUES (?, ?, ?, ?)
 ON CONFLICT (agent_id, kind) DO UPDATE SET
   generated_at = excluded.generated_at, payload = excluded.payload`;
 
+// agents.readings counts the agent's stored readings, so /api/health does not count the
+// snapshot table. The agents row is written on every push anyway, so the count costs no
+// extra row write. This statement runs before the snapshot upserts in the same batch, and
+// adds only the keys that are not stored yet, so a re-sent reading is not counted again.
+// ?3 is a JSON array of [observed_at, provider, account_key, window].
 const AGENT_UPSERT = `
-INSERT INTO agents (agent_id, label, first_seen, last_seen) VALUES (?, NULL, ?, ?)
-ON CONFLICT (agent_id) DO UPDATE SET last_seen = excluded.last_seen`;
+INSERT INTO agents (agent_id, label, first_seen, last_seen, readings)
+SELECT ?1, NULL, ?2, ?2, COUNT(DISTINCT j.value) FROM json_each(?3) AS j
+WHERE NOT EXISTS (
+  SELECT 1 FROM entitlement_snapshots AS e
+  WHERE e.agent_id = ?1 AND e.provider = json_extract(j.value, '$[1]')
+    AND e.account_key = json_extract(j.value, '$[2]') AND e.window = json_extract(j.value, '$[3]')
+    AND e.observed_at = json_extract(j.value, '$[0]'))
+ON CONFLICT (agent_id) DO UPDATE SET
+  last_seen = excluded.last_seen, readings = readings + excluded.readings`;
 
 function parse(payload) {
   if (typeof payload !== "object" || payload === null) {
@@ -296,7 +308,8 @@ async function ingest(request, env) {
   }
 
   const now = new Date().toISOString();
-  const statements = [env.DB.prepare(AGENT_UPSERT).bind(batch.agentId, now, now)];
+  const keys = JSON.stringify(batch.entitlements.map((row) => [row[1], row[2], row[4], row[5]]));
+  const statements = [env.DB.prepare(AGENT_UPSERT).bind(batch.agentId, now, keys)];
   for (const row of batch.entitlements) statements.push(env.DB.prepare(ENTITLEMENT_UPSERT).bind(...row));
   for (const row of batch.usage) statements.push(env.DB.prepare(USAGE_UPSERT).bind(...row));
   // Reports sent as text are stored as they are: parsing and serialising 700 KB of report
@@ -433,11 +446,10 @@ export async function poolIfDirty(env) {
 }
 
 async function health(env) {
-  // COUNT(*) would read every snapshot, and this route is polled. Snapshots are never
-  // deleted, so the highest rowid is the count and the lookup reads one row. A delete
-  // would make the label drift high; keep a counter then.
+  // COUNT(*) would read every snapshot, and this route is polled. The snapshot table has no
+  // rowid (WITHOUT ROWID), so the count comes from agents.readings (see AGENT_UPSERT).
   const row = await env.DB.prepare(`
-    SELECT COALESCE((SELECT MAX(rowid) FROM entitlement_snapshots), 0) AS entitlement_rows,
+    SELECT (SELECT COALESCE(SUM(readings), 0) FROM agents) AS entitlement_rows,
            (SELECT COUNT(*) FROM agents) AS agents,
            (SELECT MAX(last_seen) FROM agents) AS last_ingest_at,
            (SELECT MAX(generated_at) FROM reports) AS last_report_at,
