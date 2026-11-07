@@ -24,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
+        # An explicit bash adds pipefail, so a failed --check is not hidden by `| tee`.
+        shell: bash
         working-directory: LLM-Pareto
     steps:
       - uses: actions/checkout@v4
@@ -31,18 +33,20 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
+      # The scripts run through uv so that pyproject.toml's dependencies (argcomplete) are
+      # installed; the runner's own Python has none of them.
 
       - name: Check the Artificial Analysis pages still parse
-        run: python artificial_analysis_v2.py --check --compact | tee check.json
+        run: uv run --locked python artificial_analysis_v2.py --check --compact | tee check.json
 
       - name: Collect Artificial Analysis
-        run: python archive.py collect
+        run: uv run --locked python archive.py collect
 
       - name: Refresh DeepSWE and FrontierCode
         run: bash update.sh
 
       - name: Build the site bundle
-        run: python export-web-data.py
+        run: uv run --locked python export-web-data.py
 
       - name: Commit if anything changed
         working-directory: .
