@@ -53,9 +53,9 @@ jobs:
         run: |
           rm -f LLM-Pareto/check.json
           git add LLM-Pareto/leaderboard.json LLM-Pareto/frontiercode-data.json \
-                  LLM-Pareto/frontier-data.json web/public/data/frontier.json \
-                  LLM-Pareto/data/archive.sqlite3
-          git add -f LLM-Pareto/data/json
+                  LLM-Pareto/frontier-data.json web/public/data/frontier.json
+          # LLM-Pareto/data is ignored for local runs; the archive is tracked, so force it.
+          git add -f LLM-Pareto/data/archive.sqlite3 LLM-Pareto/data/json
           if git diff --cached --quiet; then
             echo "No changes"
             exit 0
