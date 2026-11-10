@@ -2,7 +2,9 @@ name: Update frontier data
 
 # Daily refresh of the benchmark bundle the site serves (web/public/data/frontier.json):
 # Artificial Analysis (models and coding agents), DeepSWE and FrontierCode. It commits the
-# refreshed data; the site picks it up on its next `wrangler deploy`.
+# refreshed data and, when anything changed, deploys the Worker and site with `wrangler deploy`.
+# The deploy needs the repository secret CLOUDFLARE_API_TOKEN; without it the job skips the
+# deploy and does not fail.
 #
 # The scraper's --check runs first. A failed check means Artificial Analysis changed its
 # pages: the job stops before writing anything, so a broken scrape never replaces good data.
@@ -27,6 +29,9 @@ jobs:
         # An explicit bash adds pipefail, so a failed --check is not hidden by `| tee`.
         shell: bash
         working-directory: LLM-Pareto
+    env:
+      CLOUDFLARE_ACCOUNT_ID: 2158dea73d15111ed8386b254f69dbb2
+      HAS_CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,6 +54,7 @@ jobs:
         run: uv run --locked python export-web-data.py
 
       - name: Commit if anything changed
+        id: commit
         working-directory: .
         run: |
           rm -f LLM-Pareto/check.json
@@ -64,3 +70,24 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Refresh frontier data [skip ci]"
           git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # Workers deploys and static asset requests are free on the Free plan; the build runs here.
+      - uses: actions/setup-node@v4
+        if: steps.commit.outputs.changed == 'true' && env.HAS_CF_TOKEN == 'true'
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Deploy the Worker and site
+        if: steps.commit.outputs.changed == 'true' && env.HAS_CF_TOKEN == 'true'
+        working-directory: .
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npm ci --no-audit --no-fund
+          npx wrangler deploy
+
+      - name: Note the skipped deploy
+        if: steps.commit.outputs.changed == 'true' && env.HAS_CF_TOKEN != 'true'
+        run: echo "::notice::CLOUDFLARE_API_TOKEN is not set, so the site was not deployed."
