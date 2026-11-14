@@ -13,9 +13,13 @@ export function engine() {
 
 export type Size = { width: number; height: number };
 
+/** What a page can do to a chart after drawing it. */
+export type ChartApi = { snap: (view: { alpha: number; beta: number; distance?: number }) => void };
+
 export function EChart(props: {
   option: (size: Size) => any;
   onClick?: (params: any) => void;
+  api?: (api: ChartApi) => void;
   class?: string;
   label?: string;
 }) {
@@ -37,6 +41,10 @@ export function EChart(props: {
     observer.observe(element);
     setSize({ width: element.clientWidth, height: element.clientHeight });
     setReady(true);
+    // A 3D view turns to a named angle by animating the camera, not by redrawing the chart.
+    props.api?.({ snap: (view) => chart?.setOption({ grid3D: { viewControl: {
+      alpha: view.alpha, beta: view.beta, ...(view.distance ? { distance: view.distance } : {}),
+      animation: true, animationDurationUpdate: 650, animationEasingUpdate: "cubicInOut" } } }) });
     onCleanup(() => observer.disconnect());
   });
 
@@ -44,8 +52,16 @@ export function EChart(props: {
     if (!ready()) return;
     const s = size();
     if (!s.width || !s.height) return;
-    // notMerge: a 2D option and a 3D option share nothing, so each replaces the last outright.
-    chart.setOption(props.option(s), { notMerge: true, lazyUpdate: true });
+    // notMerge: a 2D option and a 3D option share nothing, so each replaces the last outright. A 3D chart drawn again
+    // (a new axis, a filter, a click) keeps the angle the reader turned it to: echarts-gl writes the camera back into
+    // the option as it moves, and that camera is carried into the new option.
+    const next = props.option(s);
+    const camera = next?.grid3D ? chart.getOption?.()?.grid3D?.[0]?.viewControl : null;
+    if (camera && Number.isFinite(camera.alpha)) {
+      next.grid3D.viewControl = { ...next.grid3D.viewControl, alpha: camera.alpha, beta: camera.beta,
+        ...(Number.isFinite(camera.distance) ? { distance: camera.distance } : {}), ...(camera.center ? { center: camera.center } : {}) };
+    }
+    chart.setOption(next, { notMerge: true, lazyUpdate: true });
   });
 
   onCleanup(() => chart?.dispose());

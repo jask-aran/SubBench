@@ -9,6 +9,8 @@ export type Axis = { title: string; log: boolean; unit?: string; percent?: boole
 export type Row = {
   key: string; label: string; short: string; colour: string; group: string; hover: string;
   v: number[]; best: boolean; mine: boolean; pinned: boolean; dim: boolean; named: boolean;
+  /** The best model inside the reader's limits: ringed and named wherever it is. */
+  fit?: boolean;
 };
 
 const fmtFor = (a: Axis) => (v: number) => {
@@ -42,6 +44,8 @@ function tooltip(p: ReturnType<typeof palette>) {
 
 export function option2d(o: {
   rows: Row[]; axes: [Axis, Axis]; colourAxis?: Axis | null; step: boolean; tiers: boolean; labels: boolean; size: Size;
+  /** The reader's limits on a plotted measure: drawn as a dashed line at the value, on axis 0 (across) or 1 (up). */
+  limits?: Array<{ axis: 0 | 1; value: number; label: string }>;
 }) {
   const p = palette();
   const [ax, ay] = o.axes;
@@ -73,7 +77,7 @@ export function option2d(o: {
   const best = o.rows.filter((r) => r.best && !r.dim).sort((a, b) => a.v[0] - b.v[0]);
   if (o.step && best.length > 1) {
     series.push({ type: "line", step: "end", silent: true, symbol: "none", z: 2, animation: false,
-      data: [...best.map((r) => [r.v[0], r.v[1]]), [Math.max(...o.rows.map((r) => r.v[0])), best.at(-1)!.v[1]]],
+      data: [...best.map((r) => [r.v[0], r.v[1]]), [Math.max(...o.rows.filter((r) => !r.dim).map((r) => r.v[0])), best.at(-1)!.v[1]]],
       lineStyle: { color: alpha(p.ink, 0.85), width: 1.8 } });
   }
   const side = false;
@@ -99,15 +103,29 @@ export function option2d(o: {
   series.push({ type: "scatter", z: 3, data: o.rows.filter((r) => !r.best).map(point), emphasis: { scale: 1.5 }, ...labelled });
   series.push({ type: "scatter", z: 4, data: o.rows.filter((r) => r.best).map(point), emphasis: { scale: 1.5 }, ...labelled });
   // Rings: the person's own models, and pinned ones.
-  const ringed = o.rows.filter((r) => (r.mine || r.pinned) && !r.dim);
+  const ringed = o.rows.filter((r) => (r.mine || r.pinned) && !r.dim && !r.fit);
   if (ringed.length) series.push({ type: "scatter", z: 5, silent: true, symbol: "circle", symbolSize: 21,
     data: ringed.map((r) => [r.v[0], r.v[1]]), itemStyle: { color: "rgba(0,0,0,0)", borderColor: p.ink, borderWidth: 1.6, opacity: 0.95 } });
+  if (o.limits?.length) series.push({ type: "line", silent: true, data: [], markLine: {
+    silent: true, symbol: "none", animation: false,
+    lineStyle: { color: alpha(p.ink, 0.55), type: [4, 4], width: 1.2 },
+    label: { color: p.muted, fontFamily: p.data, fontSize: 11, position: "insideEndTop" },
+    data: o.limits.map((l) => ({ ...(l.axis === 0 ? { xAxis: l.value } : { yAxis: l.value }), label: { formatter: l.label } })),
+  } });
+  // The best fit inside the reader's limits: a double ring and its name, whatever else is named.
+  const fit = o.rows.find((r) => r.fit);
+  if (fit) series.push({ type: "scatter", z: 6, silent: true, symbol: "circle", symbolSize: 28,
+    data: [{ value: [fit.v[0], fit.v[1]], label: { show: true, formatter: `Best fit · ${tidy(fit.short)}`, position: "top", distance: 10,
+      color: p.ink, fontFamily: p.sans, fontSize: 12, fontWeight: 600, backgroundColor: p.pop, padding: [3, 6], borderRadius: 6 } }],
+    itemStyle: { color: "rgba(0,0,0,0)", borderColor: p.ink, borderWidth: 2.4 } });
 
   return {
-    backgroundColor: "transparent", animationDuration: 250, animationDurationUpdate: 250,
+    backgroundColor: "transparent", animationDuration: 250,
     textStyle: { fontFamily: p.sans },
     grid: { left: 64, right: gutter, top: o.colourAxis ? 52 : 16, bottom: 52 },
     xAxis, yAxis, tooltip: tooltip(p), series,
+    // Changing a measure redraws at once: points sliding from one meaning to another would suggest a link there is not.
+    animationDurationUpdate: 0,
     // Scroll to zoom, drag to pan; double-click resets.
     dataZoom: [{ type: "inside", xAxisIndex: 0, filterMode: "none" }, { type: "inside", yAxisIndex: 0, filterMode: "none" }],
     ...(o.colourAxis ? { visualMap: {
@@ -168,7 +186,7 @@ export function option3d(o: {
     lineStyle: { color: token(l.colour), width: 3, opacity: l.dash ? 0.7 : 1 } });
   series.push({ type: "scatter3D", data: o.rows.filter((r) => !r.best).map(item), symbolSize: 7,
     emphasis: { itemStyle: { color: p.ink }, label: { show: false } } });
-  const ringed = o.rows.filter((r) => (r.mine || r.pinned) && !r.dim);
+  const ringed = o.rows.filter((r) => (r.mine || r.pinned || r.fit) && !r.dim);
   if (ringed.length) series.push({ type: "scatter3D", silent: true, symbol: "circle", symbolSize: 20,
     data: ringed.map((r) => [fx(r.v[0]), fy(r.v[1]), fz(r.v[2])]), itemStyle: { color: "rgba(0,0,0,0)", borderColor: p.ink, borderWidth: 2 } });
   // Stems: each best trade-off dropped to the floor, which is what places it in depth.
@@ -194,7 +212,7 @@ export function option3d(o: {
   });
   const pos = (r: Row) => [fx(r.v[0]) / span[0], fy(r.v[1]) / span[1], fz(r.v[2]) / span[2]];
   const placed: number[][] = [];
-  const toName = o.rows.filter((r) => r.named && !r.dim).sort((a, b) => Number(b.mine) - Number(a.mine) || b.v[2] - a.v[2]).filter((r) => {
+  const toName = o.rows.filter((r) => (r.named || r.fit) && !r.dim).sort((a, b) => Number(!!b.fit) - Number(!!a.fit) || Number(b.mine) - Number(a.mine) || b.v[2] - a.v[2]).filter((r) => {
     if (placed.length >= 8) return false;
     const q = pos(r);
     if (placed.some((c) => Math.hypot(c[0] - q[0], c[1] - q[1], (c[2] - q[2]) * 2.5) < 0.18)) return false;
@@ -217,7 +235,8 @@ export function option3d(o: {
       environment: "none", light: { main: { intensity: 1.1 }, ambient: { intensity: 0.4 } },
       axisPointer: { show: true, lineStyle: { color: alpha(p.ink, 0.5) } },
       viewControl: { projection: "perspective", alpha: view.alpha, beta: view.beta, distance: Math.round(205 * fit), minDistance: 110, maxDistance: 520,
-        damping: 0.85, rotateSensitivity: 1.2, zoomSensitivity: 1.2, panSensitivity: 1, animationDurationUpdate: 500 },
+        // No inertia: the box turns exactly as far as the pointer moves and stops when it stops.
+        damping: 0, rotateSensitivity: 1, zoomSensitivity: 1, panSensitivity: 1, animation: true, animationDurationUpdate: 650 },
       axisLine: { lineStyle: { color: alpha(p.ink, 0.25) } },
     },
     ...(o.surface ? { visualMap: { show: false, seriesIndex: 0, dimension: 2, min: Math.min(...o.surface.z.flat().filter((v): v is number => v !== null).map(fz)),

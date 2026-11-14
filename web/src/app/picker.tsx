@@ -8,7 +8,7 @@ import { SearchSection, Section, Item } from "../conduit/ui/popover";
  * the popover a search over titled sections. Used for the benchmark and for each chart axis.
  */
 
-export type PickItem = { value: string; label: string; meta?: string; detail?: string };
+export type PickItem = { value: string; label: string; meta?: string; detail?: string; /** A shorter name, where the group title says the rest. */ short?: string };
 export type PickGroup = { title: string; items: PickItem[] };
 
 export function Picker(props: {
