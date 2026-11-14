@@ -46,6 +46,8 @@ export function option2d(o: {
   rows: Row[]; axes: [Axis, Axis]; colourAxis?: Axis | null; step: boolean; tiers: boolean; labels: boolean; size: Size;
   /** The reader's limits on a plotted measure: drawn as a dashed line at the value, on axis 0 (across) or 1 (up). */
   limits?: Array<{ axis: 0 | 1; value: number; label: string }>;
+  /** A fitted trend, as points along the across axis, and its label. */
+  trend?: { points: number[][]; label: string } | null;
 }) {
   const p = palette();
   const [ax, ay] = o.axes;
@@ -80,7 +82,11 @@ export function option2d(o: {
       data: [...best.map((r) => [r.v[0], r.v[1]]), [Math.max(...o.rows.filter((r) => !r.dim).map((r) => r.v[0])), best.at(-1)!.v[1]]],
       lineStyle: { color: alpha(p.ink, 0.85), width: 1.8 } });
   }
-  const side = false;
+  // A name to the right of a point near the right edge would run out of the plot, so those names sit to the left.
+  const place = (v: number) => (ax.log ? Math.log10(Math.max(v, 1e-12)) : v);
+  const shown = o.rows.filter((r) => !r.dim).map((r) => place(r.v[0]));
+  const [x0, x1] = [Math.min(...shown), Math.max(...shown)];
+  const leftOf = (r: Row) => x1 > x0 && (place(r.v[0]) - x0) / (x1 - x0) > 0.72;
   const point = (r: Row) => {
     const named = o.labels && r.named && !r.dim;
     return {
@@ -91,14 +97,13 @@ export function option2d(o: {
         borderColor: r.best && !r.dim ? p.ink : p.card, borderWidth: r.best && !r.dim ? 1.6 : 1,
       },
       // Named points carry their label in a gutter at the right, joined by a faint leader line.
-      label: { show: named, formatter: tidy(r.short), color: o.colourAxis ? p.ink : token(r.colour) },
-      labelLine: { show: named && side },
+      label: { show: named, formatter: tidy(r.short), color: o.colourAxis ? p.ink : token(r.colour), position: leftOf(r) ? "left" : "right" },
     };
   };
   const labelled = {
-    label: { position: "right", fontFamily: p.sans, fontSize: 12, distance: 8 },
-    labelLine: { lineStyle: { color: alpha(p.muted, 0.35), width: 1 }, length2: 4 },
-    labelLayout: { moveOverlap: "shiftY", hideOverlap: true },
+    label: { fontFamily: p.sans, fontSize: 12, distance: 8 },
+    // Names that would cover another are hidden; the hover card still names every point.
+    labelLayout: { hideOverlap: true },
   };
   series.push({ type: "scatter", z: 3, data: o.rows.filter((r) => !r.best).map(point), emphasis: { scale: 1.5 }, ...labelled });
   series.push({ type: "scatter", z: 4, data: o.rows.filter((r) => r.best).map(point), emphasis: { scale: 1.5 }, ...labelled });
@@ -106,6 +111,9 @@ export function option2d(o: {
   const ringed = o.rows.filter((r) => (r.mine || r.pinned) && !r.dim && !r.fit);
   if (ringed.length) series.push({ type: "scatter", z: 5, silent: true, symbol: "circle", symbolSize: 21,
     data: ringed.map((r) => [r.v[0], r.v[1]]), itemStyle: { color: "rgba(0,0,0,0)", borderColor: p.ink, borderWidth: 1.6, opacity: 0.95 } });
+  if (o.trend) series.push({ type: "line", silent: true, symbol: "none", z: 2, animation: false, data: o.trend.points,
+    lineStyle: { color: alpha(p.ink, 0.5), width: 1.4, type: [6, 4] },
+    endLabel: { show: true, formatter: o.trend.label, color: p.muted, fontFamily: p.data, fontSize: 11, distance: 6 } });
   if (o.limits?.length) series.push({ type: "line", silent: true, data: [], markLine: {
     silent: true, symbol: "none", animation: false,
     lineStyle: { color: alpha(p.ink, 0.55), type: [4, 4], width: 1.2 },
@@ -272,7 +280,7 @@ export function optionPlans(o: { plans: PlanSeries[]; score: Axis; labels: boole
         label: { show: o.labels, formatter: tidy(q.short), position: "top", color: p.ink, fontFamily: p.sans, fontSize: 11, distance: 6 } })),
       lineStyle: { color: colour, width: 2.2, type: plan.dash ? "dashed" : "solid" },
       itemStyle: { color: colour, borderColor: p.card, borderWidth: 1.5 },
-      labelLayout: { hideOverlap: true, moveOverlap: "shiftY" },
+      labelLayout: { hideOverlap: true },
       endLabel: { show: true, formatter: plan.name, color: colour, fontFamily: p.sans, fontSize: 13, fontWeight: 600, distance: 10 },
       emphasis: { focus: "series" },
     });

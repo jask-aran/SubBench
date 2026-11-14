@@ -240,6 +240,24 @@ function Models() {
       named: named.has(key(row.p)) || !!me()?.mine.has(row.p.entity.id), fit: fit() !== null && key(fit().p) === key(row.p),
     }));
   });
+  // Two scores against each other: a least-squares line in plotted units, and Pearson's r, say how far they agree.
+  const agreement = createMemo(() => {
+    const [x, y, z] = axes();
+    const isScore = (a: string) => a === "score" || axisKind(a) === "lens";
+    if (z || !isScore(x) || !isScore(y)) return null;
+    const pts = rows().filter((r) => !r.dim).map((r) => [r.v[0], r.v[1]]);
+    const n = pts.length;
+    if (n < 5) return null;
+    const mx = pts.reduce((s, q) => s + q[0], 0) / n, my = pts.reduce((s, q) => s + q[1], 0) / n;
+    let sxy = 0, sxx = 0, syy = 0;
+    for (const [a, b] of pts) { sxy += (a - mx) * (b - my); sxx += (a - mx) ** 2; syy += (b - my) ** 2; }
+    if (!sxx || !syy) return null;
+    const slope = sxy / sxx, r = sxy / Math.sqrt(sxx * syy);
+    const lo = Math.min(...pts.map((q) => q[0])), hi = Math.max(...pts.map((q) => q[0]));
+    return { r, n, points: [[lo, my + slope * (lo - mx)], [hi, my + slope * (hi - mx)]], label: `r ${r.toFixed(2)}` };
+  });
+  const agreeWords = (r: number) => Math.abs(r) >= 0.85 ? "agree closely" : Math.abs(r) >= 0.6 ? "mostly agree" : Math.abs(r) >= 0.3 ? "agree loosely" : "barely agree";
+
   // Plans: every measured plan's tasks per week on the chosen benchmark, with each plan's best trade-offs as its curve.
   const planSeries = createMemo<PlanSeries[]>(() => {
     const seen = new Map<string, number>();
@@ -310,7 +328,8 @@ function Models() {
       return option2d({
         rows: r, axes: [axisMeta(x), axisMeta(y)], colourAxis: z ? axisMeta(z) : null, size, labels: labels(),
         // The staircase reads "nothing above and to the left" only for a cost-like x and a score y, in 2D.
-        step: !z && !higherIsBetter(x) && higherIsBetter(y), tiers: !z && tiers() && mode() === "model",
+        step: !z && !higherIsBetter(x) && higherIsBetter(y), tiers: !z && tiers() && mode() === "model" && !agreement(),
+        trend: z ? null : agreement(),
         limits: LIMITS().flatMap((l) => {
           const v = limitValue(l.key), k = [x, y].indexOf(l.key);
           return v === null || k < 0 ? [] : [{ axis: k as 0 | 1, value: v, label: `${l.floor ? "≥" : "≤"} ${fmtLimit(l.key, v)}` }];
@@ -424,7 +443,7 @@ function Models() {
   const fmtLimit = (key: string, v: number) => key === "score" ? fmtScore(v, meta()?.format) : (RESOURCE_FORMAT[RESOURCES[key.slice(4)]?.unit] ?? String)(v);
 
   // ---- the measures: every one a reader can place, and how many models it shares with what is plotted
-  const placedAs = (a: string) => a === yAxis() ? "Up" : a === xAxis() ? "Across" : a && a === zAxis() ? (orbit() ? "Depth" : "Colour") : null;
+  const placedAs = (a: string) => view() === "plans" ? (a === "score" ? "Up" : isPlanAxis(a) ? "Across" : null) : a === yAxis() ? "Up" : a === xAxis() ? "Across" : a && a === zAxis() ? (orbit() ? "Depth" : "Colour") : null;
   const shared = (a: string) => {
     const others = [xAxis(), yAxis()].filter((o) => o !== a);
     let n = 0;
@@ -571,7 +590,8 @@ function Models() {
           <div class="sb-canvas-title">
             <h2>{asked()?.title ?? (view() === "plans" ? (basis() === "price" ? `${meta()?.label ?? ""} by tasks per week and plan price` : `${meta()?.label ?? ""} by tasks per ${perDollar() ? "dollar" : "week"}`)
               : `${title(yAxis())} against ${title(xAxis())}${is3d() ? (orbit() ? ` and ${title(zAxis())}` : `, coloured by ${title(zAxis())}`) : ""}`)}</h2>
-            <p>{asked() ? `${meta()?.label ?? ""}. ${asked()!.read}` : `${meta()?.label ?? ""}. ${items().length} models have all of these.`}</p>
+            <p>{asked() ? `${meta()?.label ?? ""}. ${asked()!.read}` : `${meta()?.label ?? ""}. ${items().length} models have all of these.`}
+              <Show when={view() === "chart" && agreement()}>{(a) => <> <b>They {agreeWords(a().r)}: r = {a().r.toFixed(2)} over {a().n} models.</b></>}</Show></p>
           </div>
           <div class="sb-chart-legend">
             <Show when={view() === "chart"}>
