@@ -208,7 +208,8 @@ def collect_target(db, *, target: WatchTarget, runner: str) -> tuple[bool, str]:
         observed_at = datetime.now(timezone.utc).isoformat()
         messages.extend(plan_moves(db, entitlements))
         count = save_entitlements(db, entitlements, observed_at)
-        messages.append(f"entitlement {count} window(s)")
+        cached = any(row.source == "claude-code-cache" for row in entitlements)
+        messages.append(f"entitlement {count} window(s)" + (" from Claude Code's cached meter" if cached else ""))
     except MeterDeferred as error:
         messages.append(f"entitlement deferred: {error}")
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:

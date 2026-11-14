@@ -116,3 +116,36 @@ def test_a_deferred_read_is_retried_when_the_wait_ends(monkeypatch):
     # The first pass collects (reconcile due at start), is deferred for 3 s, and the loop
     # collects again once those 3 s have passed, with no log change.
     assert len(collected) == 2 and collected[1] - collected[0] >= 3
+
+
+def _claude_code_cache(home, *, fetched, account="u", percent=40):
+    (home / ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"accountUuid": "u", "organizationRateLimitTier": "default_claude_max_5x"},
+        "cachedUsageUtilization": {"fetchedAtMs": fetched * 1000, "accountUuid": account, "utilization": {
+            "seven_day": {"utilization": percent, "resets_at": "2026-11-16T19:00:00Z"},
+            "limits": [{"kind": "weekly_scoped", "percent": 80, "resets_at": "2026-11-16T19:00:00Z",
+                        "scope": {"model": {"display_name": "Fable"}}}],
+            "weekly_scoped_shares": [{"limit_index": 0, "allowance_percent_of_weekly": 50}]}}}))
+
+
+def test_a_429_falls_back_to_claude_codes_cached_meter(login, monkeypatch, tmp_path):
+    _server(monkeypatch, [429])
+    fetched = time.time() - 120
+    _claude_code_cache(tmp_path, fetched=fetched)
+    rows = {row.window: row for row in entitlement.collect_claude()}
+    assert set(rows) == {"weekly", "weekly_fable"}
+    assert rows["weekly"].used_percent == 40 and rows["weekly"].plan == "max_5x"
+    assert rows["weekly"].source == "claude-code-cache"
+    # The reading keeps the moment Claude Code fetched it, not the moment SubBench read the file.
+    assert rows["weekly"].observed_at.startswith(time.strftime("%Y-%m-%dT%H:%M", time.gmtime(fetched)))
+    assert rows["weekly_fable"].allowance_percent == 50
+    # The same copy is not taken twice, and the backoff still stands.
+    with pytest.raises(entitlement.MeterDeferred):
+        entitlement.collect_claude()
+
+
+def test_claude_codes_cache_is_skipped_when_stale_or_for_another_account(login, monkeypatch, tmp_path):
+    _claude_code_cache(tmp_path, fetched=time.time() - entitlement.CLAUDE_CODE_CACHE_MAX_AGE_SECONDS - 60)
+    assert entitlement.claude_code_cached() == []
+    _claude_code_cache(tmp_path, fetched=time.time() - 60, account="someone-else")
+    assert entitlement.claude_code_cached() == []

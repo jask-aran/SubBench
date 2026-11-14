@@ -116,6 +116,7 @@ serve the old page. The deploy reports success.
 | `src/subbench/entitlement.py` | The Codex and Claude quota collectors. |
 | `src/subbench/store.py` | The SQLite schema, the migrations and the queries. |
 | `src/subbench/regression.py` | The pairwise slopes and the robust estimate. |
+| `src/subbench/scopes.py` | Scoped limits (Fable): each one measured on its own and taken out of the weekly and five-hour windows. |
 | `src/subbench/crosssolve.py` | The window ratios, the account pooling and the divergences. |
 | `src/subbench/timeline.py` | The settled series, the replay series and the estimator version. |
 | `src/subbench/weights.py` | The non-negative least-squares fit for the per-model weights. |

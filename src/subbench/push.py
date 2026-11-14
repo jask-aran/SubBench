@@ -195,7 +195,7 @@ def value_report(db: sqlite3.Connection, *, points: list[dict[str, Any]] | None 
     the site come from one function rather than two that can drift apart.
     """
     from .crosssolve import combined_estimates
-    from .products import open_estimates, product_estimates, product_label, product_series
+    from .products import open_estimates, product_estimates, product_label, product_series, product_view
     from .regression import robust_estimates
     from .server.confidence import LIKELY, classify
     from .ccusage import imported_at
@@ -219,7 +219,7 @@ def value_report(db: sqlite3.Connection, *, points: list[dict[str, Any]] | None 
             **tiers.get(key, {"tier": "provisional", "reason": ""}),
             # The page shows the product, never the raw provider, so the name it displays
             # is decided here from what the provider reported and not hardcoded there.
-            "product": product_label(str(row["provider"]), row.get("plan")),
+            "product": product_label(str(row["provider"]), product_view(row).get("plan")),
         })
     report = {
         "windows": windows,
@@ -251,7 +251,7 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
     """
     from .crosssolve import account_plans, combined_estimates, divergences
     from .regression import robust_estimates
-    from .products import open_estimates, product_estimates, product_label, product_series
+    from .products import open_estimates, product_estimates, product_label, product_series, product_view
     from .server.confidence import LIKELY, classify
     from .store import WindowEstimateStore, model_mix, regression_points
     from .timeline import build_series
@@ -290,7 +290,7 @@ def build_reports(db: sqlite3.Connection) -> dict[str, Any]:
             **tiers.get(key, {"tier": "provisional", "reason": ""}),
             # The page shows the product, never the raw provider, so the name it displays
             # is decided here from what the provider reported and not hardcoded there.
-            "product": product_label(str(row["provider"]), row.get("plan")),
+            "product": product_label(str(row["provider"]), product_view(row).get("plan")),
         })
 
     totals: dict[tuple, int] = {}

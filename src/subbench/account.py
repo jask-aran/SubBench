@@ -29,12 +29,18 @@ def registry_file() -> Path:
     return codex_home() / "accounts" / "registry.json"
 
 
+def claude_code_state() -> dict[str, Any]:
+    """Claude Code's state file (~/.claude.json), or {}."""
+    try:
+        state = json.loads((Path.home() / ".claude.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
 def claude_oauth_account() -> dict[str, Any]:
     """Claude Code's record of the signed-in account (~/.claude.json), or {}."""
-    try:
-        account = json.loads((Path.home() / ".claude.json").read_text()).get("oauthAccount") or {}
-    except (OSError, ValueError, AttributeError):
-        return {}
+    account = claude_code_state().get("oauthAccount") or {}
     return account if isinstance(account, dict) else {}
 
 

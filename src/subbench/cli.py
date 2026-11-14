@@ -691,7 +691,8 @@ def _print_status(db, database: Path, *, as_json: bool, refresh: bool) -> int:
         return 0
     for name in names:
         print(f"\n{name}")
-        for window in ("weekly", "five_hour"):
+        # A scoped limit (" · Fable") is a weekly sub-limit and has no five-hour limit.
+        for window in ("weekly",) if " · " in name else ("weekly", "five_hour"):
             label = WINDOW_NAMES[window]
             row = settled.get((name, window))
             wider = ranged.get((name, window))

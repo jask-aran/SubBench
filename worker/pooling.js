@@ -86,6 +86,10 @@ function pyTitle(value) {
 function productLabel(provider, plan) {
   const name = new Map([["codex", "ChatGPT"], ["claude", "Claude"]]).get(provider)
     ?? pyTitle(provider.replaceAll("_", " "));
+  if (plan && plan.includes("+")) {
+    const at = plan.indexOf("+");
+    return `${productLabel(provider, plan.slice(0, at) || null)} · ${pyTitle(plan.slice(at + 1).replaceAll("_", " "))}`;
+  }
   if (!plan) return name;
   const detail = pyTitle(plan.replaceAll("_", " "));
   return detail.toLowerCase().startsWith(name.toLowerCase()) ? detail : `${name} ${detail}`;
@@ -189,8 +193,17 @@ function parseMoment(value) {
   return +day + (+hour * 3600 + +minute * 60 + +second + Number(fraction.replace(",", "."))) * 1000 - offset;
 }
 
+// A scoped limit ("weekly_fable") is a product of its own: the scope moves into the plan
+// ("max_5x+fable") and the window becomes the weekly one (subbench.products.product_view).
+const SCOPED_PREFIX = "weekly_";
+function productView(row) {
+  const window = typeof row.window === "string" ? row.window : "";
+  if (!window.startsWith(SCOPED_PREFIX) || window.length === SCOPED_PREFIX.length) return row;
+  return { ...row, plan: `${planOf(row) ?? ""}+${window.slice(SCOPED_PREFIX.length)}`, window: "weekly" };
+}
+
 function directWindows(windows, now, tiers, finished = true, withinDays = 35) {
-  return windows.filter((row) => {
+  return windows.map(productView).filter((row) => {
     const key = pyString(row.reset_key || "");
     if (!key || key.includes("~via~") || !tiers.includes(row.tier) || Number(row.estimate_usd || 0) <= 0) return false;
     const reset = moment(key);
@@ -242,7 +255,7 @@ export function poolInput(report) {
 // One row per product and limit, nothing per account (subbench.products.measured_products).
 function measuredProducts(windows) {
   const seen = new Map();
-  for (const row of windows) {
+  for (const row of windows.map(productView)) {
     const provider = pyString(row.provider), plan = planOf(row), window = pyString(row.window);
     const key = JSON.stringify([provider, plan, window]);
     if (!seen.has(key)) seen.set(key, { provider, plan, product: productLabel(provider, plan), window });

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import account
+from .scopes import SCOPED_WINDOW_PREFIX, scope_slug
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,12 @@ class EntitlementWindow:
     # they are the same plan, and the registry that codex-auth maintains is not always
     # present, so the value that comes back with the quota reading is the reliable one.
     plan: str | None = None
+    # Only for a scoped limit (one model's own sub-limit inside the weekly limit): the share
+    # of the weekly limit that 100% of this meter equals. Claude's Fable limit is 50.
+    allowance_percent: float | None = None
+    # When this reading was taken, if not now: a reading from Claude Code's own cache
+    # (claude_code_cached) carries the moment Claude Code fetched it.
+    observed_at: str | None = None
 
 
 # A provider that does not name the plan beside its meter leaves SubBench unable to tell
@@ -84,6 +91,9 @@ class MeterDeferred(RuntimeError):
 CLAUDE_METER_MIN_SECONDS = 120.0
 CLAUDE_BACKOFF_FIRST_SECONDS = 300.0
 CLAUDE_BACKOFF_MAX_SECONDS = 1800.0
+# Claude Code's cached meter is used only while it is this fresh. An older copy may be from
+# before a plan change, and the cache does not say which plan it was read on.
+CLAUDE_CODE_CACHE_MAX_AGE_SECONDS = 3600.0
 _CLAUDE_METER: dict[str, float] = {}
 
 
@@ -93,6 +103,9 @@ def collect_claude() -> list[EntitlementWindow]:
     if wait > 0:
         reason = "rate-limit backoff" if _CLAUDE_METER.get("backoff") else "spacing"
         _CLAUDE_METER["deferred"] = 1.0
+        cached = claude_code_cached()
+        if cached:
+            return cached
         raise MeterDeferred(f"Claude meter next read in {wait:.0f} s ({reason})")
     try:
         rows = _read_claude()
@@ -101,9 +114,47 @@ def collect_claude() -> list[EntitlementWindow]:
             backoff = min(max(_CLAUDE_METER.get("backoff", 0.0) * 2, CLAUDE_BACKOFF_FIRST_SECONDS),
                           CLAUDE_BACKOFF_MAX_SECONDS)
             _CLAUDE_METER.update(backoff=backoff, next=now + backoff, deferred=1.0)
+        cached = claude_code_cached()
+        if cached:
+            return cached
         raise
-    _CLAUDE_METER.update(backoff=0.0, next=now + CLAUDE_METER_MIN_SECONDS, deferred=0.0)
+    _CLAUDE_METER.update(backoff=0.0, next=now + CLAUDE_METER_MIN_SECONDS, deferred=0.0,
+                         last_epoch=time.time())
     return rows
+
+
+def claude_code_cached() -> list[EntitlementWindow]:
+    """The meter as Claude Code last fetched it, if that is newer than SubBench's last read.
+
+    Claude Code keeps the usage endpoint's whole response in ~/.claude.json
+    (cachedUsageUtilization), with the moment it fetched it and the account. Reading it
+    sends no request, so it fills the gap while the endpoint answers 429 or SubBench is
+    spacing its reads. Each reading keeps Claude Code's fetch time, so it is priced at the
+    moment it describes. It is used only for the account Claude Code is signed in to now.
+    """
+    cache = account.claude_code_state().get("cachedUsageUtilization")
+    if not isinstance(cache, dict) or not isinstance(cache.get("utilization"), dict):
+        return []
+    fetched = cache.get("fetchedAtMs")
+    if not isinstance(fetched, (int, float)) or isinstance(fetched, bool):
+        return []
+    fetched_epoch = float(fetched) / 1000.0
+    if fetched_epoch <= _CLAUDE_METER.get("last_epoch", 0.0):
+        return []
+    if not -60 <= time.time() - fetched_epoch <= CLAUDE_CODE_CACHE_MAX_AGE_SECONDS:
+        return []
+    active = account.active_claude_account_id()
+    if not active or cache.get("accountUuid") != active:
+        return []
+    payload = dict(cache["utilization"])
+    payload["account_uuid"] = active
+    # The plan as Claude Code last recorded it. The cache does not repeat it.
+    tier = account.claude_oauth_account().get("organizationRateLimitTier")
+    if isinstance(tier, str) and tier and "organizationRateLimitTier" not in payload:
+        payload["organizationRateLimitTier"] = tier
+    stamp = datetime.fromtimestamp(fetched_epoch, timezone.utc).isoformat()
+    _CLAUDE_METER["last_epoch"] = fetched_epoch
+    return [replace(row, source="claude-code-cache", observed_at=stamp) for row in _normalise_claude(payload)]
 
 
 def meter_retry_in(provider: str) -> float | None:
@@ -203,6 +254,43 @@ def _normalise_claude(payload: dict[str, Any]) -> list[EntitlementWindow]:
         rows.append(EntitlementWindow(
             "claude", label, used, _time_iso(reset), duration, "claude-oauth-usage",
             account_id=account_id, plan=plan,
+        ))
+    rows.extend(_claude_scoped(payload, account_id=account_id, plan=plan))
+    return rows
+
+
+def _claude_scoped(payload: dict[str, Any], *, account_id: str | None, plan: str | None) -> list[EntitlementWindow]:
+    """One model's own weekly sub-limit, from the `limits` list.
+
+    Usage of that model also moves the weekly limit, and its meter reads 0-100% of its own
+    allowance. `weekly_scoped_shares` gives that allowance as a share of the weekly limit,
+    which is what lets the estimator take the model's quota back out of the weekly meter.
+    A limit scoped to a surface (an app, not a model) is skipped: no model id can price it.
+    """
+    limits = payload.get("limits")
+    if not isinstance(limits, list):
+        return []
+    shares = payload.get("weekly_scoped_shares")
+    allowance: dict[int, float] = {}
+    for share in shares if isinstance(shares, list) else []:
+        if isinstance(share, dict) and isinstance(share.get("limit_index"), int):
+            value = share.get("allowance_percent_of_weekly")
+            if isinstance(value, (int, float)) and value > 0:
+                allowance[share["limit_index"]] = float(value)
+    rows: list[EntitlementWindow] = []
+    for index, limit in enumerate(limits):
+        if not isinstance(limit, dict) or limit.get("kind") != "weekly_scoped":
+            continue
+        scope = limit.get("scope")
+        model = scope.get("model") if isinstance(scope, dict) else None
+        name = model.get("display_name") if isinstance(model, dict) else None
+        slug = scope_slug(name) if isinstance(name, str) else ""
+        percent = limit.get("percent")
+        if not slug or not isinstance(percent, (int, float)):
+            continue
+        rows.append(EntitlementWindow(
+            "claude", SCOPED_WINDOW_PREFIX + slug, float(percent), _time_iso(limit.get("resets_at")), 10080,
+            "claude-oauth-usage", account_id=account_id, plan=plan, allowance_percent=allowance.get(index),
         ))
     return rows
 

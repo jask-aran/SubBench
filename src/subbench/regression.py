@@ -115,6 +115,20 @@ METER_RESET_DROP = 50.0
 METER_RESET_FLOOR = 10.0
 METER_RESET_CEILING = 95.0
 
+# A provider can also give back part of a meter without a new end date: a Fable reset
+# returns the Fable share of the weekly limit, so the meter fell from 60% to 11% in one
+# reading. That is not a new window, and the quota before the drop was really used. So the
+# drop is added back to every later reading, which keeps the series cumulative. A step down
+# right after a step up of at least this fraction of its size is a spike that reversed, not
+# a refill, and is left alone.
+PARTIAL_REFILL_MIN_DROP = 5.0
+PARTIAL_REFILL_SPIKE_FRACTION = 0.5
+
+# Spend that cannot be matched to quota on this meter (scopes.separate): a scoped model's
+# usage on a meter that also counts it, with no scoped reading to take its quota out. Two
+# readings whose excluded spend differs by more than this are not comparable.
+EXCLUDED_COST_TOLERANCE_USD = 0.01
+
 
 def _cluster_resets(reset_keys: Iterable[str]) -> dict[str, str]:
     """Map each reset key to the earliest key within the clustering tolerance."""
@@ -164,8 +178,26 @@ def _group_points(points: Iterable[Mapping[str, Any]]) -> dict[SeriesKey, list[d
     split: dict[SeriesKey, list[dict[str, Any]]] = {}
     for key, rows in groups.items():
         for reset_key, segment in _unlabelled_resets(key[4], rows):
-            split[(*key[:4], reset_key)] = segment
+            split[(*key[:4], reset_key)] = _add_back_partial_refills(segment)
     return split
+
+
+def _add_back_partial_refills(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Make a meter cumulative across partial refills (refer to PARTIAL_REFILL_MIN_DROP)."""
+    used = [float(row["used_percent"]) for row in rows]
+    offset = 0.0
+    out = rows
+    for index in range(1, len(rows)):
+        drop = used[index - 1] - used[index]
+        if drop >= PARTIAL_REFILL_MIN_DROP and not _is_ceiling_glitch(used, index):
+            rise = used[index - 1] - used[index - 2] if index >= 2 else 0.0
+            if rise < drop * PARTIAL_REFILL_SPIKE_FRACTION:
+                offset += drop
+        if offset:
+            if out is rows:
+                out = [dict(row) for row in rows]
+            out[index]["used_percent"] = used[index] + offset
+    return out
 
 
 # Providers report quota as a whole integer percent, so a pair one point apart carries
@@ -297,6 +329,13 @@ def _unobserved_intervals(
         rate_min_quota=UNOBSERVED_RATE_MIN_QUOTA, min_minutes=UNOBSERVED_MIN_MINUTES,
         ceiling=QUOTA_CEILING_PERCENT, unmetered_min_value=UNMETERED_MIN_VALUE_USD,
     ).tolist()
+
+    # Spend that this meter cannot be matched to (scopes.separate). Readings on either side
+    # of a change in it count different usage in their quota, so no pair may span one.
+    excluded = [float(row.get("excluded_cost_usd") or 0.0) for row in rows]
+    for index in range(len(rows) - 1):
+        if abs(excluded[index + 1] - excluded[index]) > EXCLUDED_COST_TOLERANCE_USD:
+            flagged[index] = True
 
     counts = [0]
     advanced = 0.0

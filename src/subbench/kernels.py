@@ -61,7 +61,13 @@ def fingerprint(rows: list[Mapping[str, Any]]) -> str:
     """
     digest = hashlib.blake2b(digest_size=16)
     for row in rows:
-        digest.update(f"{row.get('observed_at')}|{float(row['used_percent'])!r}|{float(row['cost_usd'])!r}\n".encode())
+        line = f"{row.get('observed_at')}|{float(row['used_percent'])!r}|{float(row['cost_usd'])!r}"
+        # Excluded spend (scopes.separate) changes which pairs are valid. Added only when
+        # present, so the digest of every other window stays what it was.
+        excluded = float(row.get("excluded_cost_usd") or 0.0)
+        if excluded:
+            line += f"|{excluded!r}"
+        digest.update(f"{line}\n".encode())
     return digest.hexdigest()
 
 

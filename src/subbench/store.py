@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS entitlement_snapshots (
     -- account: a plan change resizes the entitlement, so quota points before and after
     -- measure different things and must never be mixed into one estimate.
     plan TEXT,
+    -- A scoped window only (weekly_<scope>): the share of the weekly limit that 100% of
+    -- this meter equals. NULL for every other window.
+    allowance_percent REAL,
     UNIQUE(provider, account_id, window, observed_at)
 );
 CREATE TABLE IF NOT EXISTS accounts (
@@ -91,6 +94,11 @@ CREATE TABLE IF NOT EXISTS priced_points (
     cost_usd         REAL NOT NULL,
     cost_age_minutes REAL NOT NULL,
     import_seen_at   TEXT NOT NULL,
+    -- The spend of every scoped model family inside this reading's window (0 on a scoped
+    -- window, whose cost_usd is already its own family's spend only). scopes.separate
+    -- takes it out.
+    scoped_cost_usd  REAL NOT NULL DEFAULT 0,
+    allowance_percent REAL,
     PRIMARY KEY (provider, account_key, window, observed_at)
 );
 
@@ -232,6 +240,15 @@ def _migrate(db: sqlite3.Connection) -> None:
         # right, so old rows group together and never merge with a named plan. This runs
         # after the rebuild above, which recreates the table without the column.
         db.execute("ALTER TABLE entitlement_snapshots ADD COLUMN plan TEXT")
+    if not _has_column(db, "entitlement_snapshots", "allowance_percent"):
+        db.execute("ALTER TABLE entitlement_snapshots ADD COLUMN allowance_percent REAL")
+    if not _has_column(db, "priced_points", "scoped_cost_usd"):
+        # A reading priced before this column has no scoped spend, because no scoped meter
+        # was recorded then. The first scoped reading re-prices what it affects
+        # (refresh_priced_points), so the cache is kept rather than priced again in full.
+        db.execute("ALTER TABLE priced_points ADD COLUMN scoped_cost_usd REAL NOT NULL DEFAULT 0")
+    if not _has_column(db, "priced_points", "allowance_percent"):
+        db.execute("ALTER TABLE priced_points ADD COLUMN allowance_percent REAL")
 
 
 def _rebuild_entitlement_snapshots(db: sqlite3.Connection) -> None:
@@ -414,10 +431,11 @@ def save_entitlements(db: sqlite3.Connection, rows: Iterable[EntitlementWindow],
         db.executemany(
             """INSERT OR IGNORE INTO entitlement_snapshots
                (observed_at, provider, account_id, window, used_percent, resets_at,
-                duration_minutes, source, plan)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [(observed_at, row.provider, row.account_id, row.window, row.used_percent,
-              row.resets_at, row.duration_minutes, row.source, row.plan) for row in values],
+                duration_minutes, source, plan, allowance_percent)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(row.observed_at or observed_at, row.provider, row.account_id, row.window, row.used_percent,
+              row.resets_at, row.duration_minutes, row.source, row.plan, row.allowance_percent)
+             for row in values],
         )
     return len(values)
 
@@ -432,7 +450,7 @@ def save_entitlements(db: sqlite3.Connection, rows: Iterable[EntitlementWindow],
 _PRICED_WINDOWS_TEMPLATE = """
     WITH scoped AS (
         SELECT e.provider, e.account_id, e.window, e.observed_at, e.used_percent,
-               e.resets_at, e.duration_minutes, e.plan,
+               e.resets_at, e.duration_minutes, e.plan, e.allowance_percent,
                -- Both columns must describe the same row, so pick that row once by the
                -- moment its contents were last confirmed, and measure the age of that
                -- same confirmation. Ranking by imported_at while ageing by last_seen_at
@@ -460,20 +478,44 @@ _PRICED_WINDOWS_TEMPLATE = """
         {unpriced_only}
     ), priced AS (
         SELECT s.*,
+               CASE WHEN substr(s.window, 1, 7) = 'weekly_' THEN
+               -- A scoped window: the spend of its own model family only.
+               (SELECT COALESCE(SUM({model_cost}), 0.0)
+                  FROM usage_rows u
+                 WHERE u.import_id = s.import_id AND u.model IS NOT NULL
+                   AND instr('-' || lower(u.model) || '-', '-' || replace(substr(s.window, 8), '_', '-') || '-') > 0
+                   AND {in_window})
+               ELSE
                (SELECT COALESCE(SUM(CAST(COALESCE(u.reported_cost_usd, '0') AS REAL)), 0.0)
                   FROM usage_rows u
                  WHERE u.import_id = s.import_id
                    -- An undated row cannot be placed in or out of the window. Counting it
                    -- keeps the numerator whole; dropping it would silently report $0.
-                   AND (u.period_start IS NULL OR (
-                            (s.window_start_date IS NULL OR DATE(u.period_start) >= s.window_start_date)
-                        AND (s.window_end_date IS NULL OR DATE(u.period_start) <= s.window_end_date)
-                   ))
-               ) AS cost_usd
+                   AND (u.period_start IS NULL OR {in_window})
+               ) END AS cost_usd,
+               CASE WHEN substr(s.window, 1, 7) = 'weekly_'
+                      OR NOT EXISTS (SELECT 1 FROM temp.subbench_scopes) THEN 0.0 ELSE
+               -- Every scoped family's spend inside this window, for scopes.separate.
+               (SELECT COALESCE(SUM({model_cost}), 0.0)
+                  FROM usage_rows u
+                 WHERE u.import_id = s.import_id AND u.model IS NOT NULL
+                   AND EXISTS (SELECT 1 FROM temp.subbench_scopes sc
+                                WHERE instr('-' || lower(u.model) || '-', '-' || replace(sc.scope, '_', '-') || '-') > 0)
+                   AND {in_window})
+               END AS scoped_cost_usd
           FROM scoped s
          WHERE s.import_id IS NOT NULL
     )
-"""
+""".replace("{in_window}", """(
+                            (s.window_start_date IS NULL OR DATE(u.period_start) >= s.window_start_date)
+                        AND (s.window_end_date IS NULL OR DATE(u.period_start) <= s.window_end_date))""").replace(
+    # A model's own cost is on its breakdown row only when the day's total has none. Otherwise
+    # it stays in the stored report, at the row's own JSON path, so it is read from there.
+    "{model_cost}", """COALESCE(
+                       CAST(u.reported_cost_usd AS REAL),
+                       CAST(json_extract((SELECT i.raw_json FROM imports i WHERE i.id = u.import_id),
+                                         u.source_path || '.cost') AS REAL),
+                       0.0)""")
 
 # Every reading, for callers that summarise the lot.
 PRICED_WINDOWS_SQL = _PRICED_WINDOWS_TEMPLATE.format(unpriced_only="")
@@ -513,7 +555,7 @@ def regression_points(
     account_id: str | None = None,
     *,
     max_cost_age_minutes: float = MAX_COST_AGE_MINUTES,
-) -> list[sqlite3.Row]:
+) -> list[dict[str, Any]]:
     where = ["p.cost_age_minutes <= ?"]
     params: list[Any] = [max_cost_age_minutes]
     if provider is not None:
@@ -524,9 +566,13 @@ def regression_points(
         params.append(account_id)
     where_clause = "WHERE " + " AND ".join(where)
     refresh_priced_points(db)
-    return list(db.execute(
+    from .scopes import separate
+
+    # Each scoped limit is taken out of the windows that contain it (refer to scopes.py).
+    return separate(db.execute(
         f"""SELECT p.provider, p.account_id, p.window, p.observed_at, p.used_percent,
-               p.resets_at, p.duration_minutes, p.plan, p.cost_usd, p.cost_age_minutes
+               p.resets_at, p.duration_minutes, p.plan, p.cost_usd, p.cost_age_minutes,
+               p.scoped_cost_usd, p.allowance_percent
         FROM priced_points p
         {where_clause}
         ORDER BY p.provider, p.account_id, p.window, p.resets_at, p.observed_at""",
@@ -544,8 +590,55 @@ _IMPORT_ID_WATERMARK = "priced_points.import_id_watermark"
 # Columns of priced_points, in the order the pricing query produces them.
 _PRICED_COLUMNS = (
     "provider, account_key, window, observed_at, account_id, used_percent, resets_at, "
-    "duration_minutes, plan, cost_usd, cost_age_minutes, import_seen_at"
+    "duration_minutes, plan, cost_usd, cost_age_minutes, import_seen_at, scoped_cost_usd, allowance_percent"
 )
+
+# Remembers which scopes priced_points was priced with. A new scope (the first reading of
+# a new sub-limit) changes the scoped spend of readings already priced, so they are priced
+# again once.
+_SCOPES_KEY = "priced_points.scopes"
+
+
+def _load_scopes(db: sqlite3.Connection) -> list[str]:
+    """Fill temp.subbench_scopes with every scope ever recorded, for the pricing query."""
+    from .scopes import scope_of
+
+    windows = db.execute(
+        "SELECT DISTINCT window FROM entitlement_snapshots WHERE substr(window, 1, 7) = 'weekly_'"
+    ).fetchall()
+    scopes = sorted({scope for (window,) in windows if (scope := scope_of(window))})
+    db.execute("CREATE TEMP TABLE IF NOT EXISTS subbench_scopes (scope TEXT PRIMARY KEY)")
+    db.execute("DELETE FROM temp.subbench_scopes")
+    db.executemany("INSERT INTO temp.subbench_scopes (scope) VALUES (?)", [(scope,) for scope in scopes])
+    return scopes
+
+
+def _fill_scoped_cost(db: sqlite3.Connection, since: str) -> None:
+    """Price the scoped spend of the readings already priced since a date, and nothing else."""
+    db.execute("DROP TABLE IF EXISTS temp.unpriced_ids")
+    db.execute(
+        """CREATE TEMP TABLE unpriced_ids AS
+           SELECT e.id FROM entitlement_snapshots e
+            WHERE e.observed_at >= ?
+              AND e.provider IN (SELECT DISTINCT provider FROM entitlement_snapshots
+                                  WHERE substr(window, 1, 7) = 'weekly_')""",
+        (since,),
+    )
+    db.execute("DROP TABLE IF EXISTS temp.scoped_prices")
+    db.execute(
+        f"""CREATE TEMP TABLE scoped_prices AS {_PRICE_UNPRICED_SQL}
+            SELECT p.provider, COALESCE(p.account_id, '') AS account_key, p.window, p.observed_at,
+                   p.scoped_cost_usd
+              FROM priced p"""
+    )
+    db.execute(
+        """UPDATE priced_points SET scoped_cost_usd = s.scoped_cost_usd
+             FROM temp.scoped_prices s
+            WHERE priced_points.provider = s.provider AND priced_points.account_key = s.account_key
+              AND priced_points.window = s.window AND priced_points.observed_at = s.observed_at"""
+    )
+    db.execute("DROP TABLE IF EXISTS temp.scoped_prices")
+    db.execute("DROP TABLE IF EXISTS temp.unpriced_ids")
 
 
 def refresh_priced_points(db: sqlite3.Connection) -> tuple[int, int]:
@@ -565,6 +658,25 @@ def refresh_priced_points(db: sqlite3.Connection) -> tuple[int, int]:
         # anything, and moving last_seen_at forward sets it to now, so nothing that
         # changed can sit below the mark.
         marks = {row["key"]: row["value"] for row in db.execute("SELECT key, value FROM meta")}
+        scopes = ",".join(_load_scopes(db))
+        if marks.get(_SCOPES_KEY, "") != scopes:
+            # A new scope changes the scoped spend of the readings priced since its models
+            # were first used, and of no reading before that day. Only that column is
+            # filled in. Pricing those readings again from scratch would also move their
+            # cost: an import confirmed again later is no longer eligible for a reading it
+            # priced, so a fresh price can pick an older import than the cached one did.
+            first = db.execute(
+                """SELECT MIN(DATE(u.period_start)) FROM usage_rows u
+                    WHERE u.model IS NOT NULL AND EXISTS (
+                        SELECT 1 FROM temp.subbench_scopes sc
+                         WHERE instr('-' || lower(u.model) || '-', '-' || replace(sc.scope, '_', '-') || '-') > 0)"""
+            ).fetchone()[0]
+            if first is not None:
+                _fill_scoped_cost(db, first)
+            db.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_SCOPES_KEY, scopes),
+            )
         seen_before = marks.get(_IMPORT_WATERMARK, "")
         id_before = int(marks.get(_IMPORT_ID_WATERMARK, 0) or 0)
         stale = db.execute(
@@ -590,7 +702,7 @@ def refresh_priced_points(db: sqlite3.Connection) -> tuple[int, int]:
                 INSERT OR REPLACE INTO priced_points ({_PRICED_COLUMNS})
                 SELECT p.provider, COALESCE(p.account_id, ''), p.window, p.observed_at,
                        p.account_id, p.used_percent, p.resets_at, p.duration_minutes, p.plan,
-                       p.cost_usd, p.cost_age_minutes, p.import_seen_at
+                       p.cost_usd, p.cost_age_minutes, p.import_seen_at, p.scoped_cost_usd, p.allowance_percent
                   FROM priced p
                  WHERE p.import_seen_at IS NOT NULL"""
             )
@@ -686,6 +798,7 @@ def estimate_windows(
         where.append("p.account_id IS ?")
         params.append(account_id)
     where_clause = ("AND " + " AND ".join(where)) if where else ""
+    _load_scopes(db)
     return list(db.execute(
         f"""{PRICED_WINDOWS_SQL}, paired AS (
             SELECT p.*,
