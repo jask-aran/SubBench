@@ -117,6 +117,26 @@ class CatalogueTest(unittest.TestCase):
         full = aa.build_model_catalog(eligibility="full", page=page)["data"]["models"]
         self.assertEqual([item["slug"] for item in full], ["new-model"])
 
+    def test_rows_that_name_only_their_release_take_the_slug_of_the_record_with_their_id(self) -> None:
+        # The 2026-11-14 shape: each row has an "id" and its release, but no slug of its own.
+        def row(identifier: str, name: str) -> dict:
+            return {"id": identifier, "release": {"slug": "lab-1", "name": "Lab 1"}, "name": name,
+                    "shortName": name, "intelligenceIndex": 60.0, "intelligenceIndexCostPerTask": 2.0,
+                    "deprecated": False, "modelCreatorName": "Lab"}
+        page = flight_page(row("id-lab-1", "Lab 1 (Max)"), row("id-lab-1-high", "Lab 1 (High)"),
+                           row("id-gone", "Lab 1 (Gone)"))
+        fetched: list[str] = []
+
+        def fetcher(url: str) -> str:
+            fetched.append(url)
+            return flight_page(model_record("lab-1"), model_record("lab-1-high"))
+
+        data = aa.build_model_catalog(eligibility="all", verbose=True, page=page, fetcher=fetcher)["data"]
+        self.assertEqual(fetched, ["https://artificialanalysis.ai/models/lab-1"])
+        self.assertEqual({item["slug"] for item in data["models"]}, {"lab-1", "lab-1-high"})
+        self.assertEqual({item["release_date"] for item in data["models"]}, {"2026-10-01"})
+        self.assertEqual(data["unresolved"], ["Lab 1 (Gone)"])
+
     def test_an_empty_page_is_a_layout_change_not_an_empty_catalogue(self) -> None:
         with self.assertRaises(aa.ExtractionError):
             aa.build_model_catalog(page="<html></html>")

@@ -281,6 +281,59 @@ def _leaderboard_model_record(record: dict[str, Any]) -> bool:
     return {"slug", "name", "intelligenceIndex", "intelligenceIndexCostPerTask"}.issubset(record)
 
 
+def _release_row(record: dict[str, Any]) -> bool:
+    """A leaderboard row in the 2026-11-14 shape: an "id" and a release, but no slug of its own."""
+    return (
+        "slug" not in record
+        and isinstance(record.get("id"), str)
+        and isinstance((record.get("release") or {}).get("slug"), str)
+        and {"name", "intelligenceIndex", "intelligenceIndexCostPerTask"}.issubset(record)
+    )
+
+
+def _resolve_row_slugs(
+    rows: list[dict[str, Any]],
+    known: Iterable[dict[str, Any]],
+    timeout: float,
+    fetcher: Any = None,
+    workers: int = 4,
+) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    """Each row's model slug ("claude-opus-5-5-high"), found by the row's id.
+
+    Since 2026-11-14 a leaderboard row names only its release ("claude-opus-5-5"), which every
+    reasoning-effort variant shares. The full model records on the model pages carry the same
+    ids with the variant slugs, so this reads release pages until every id is matched. It
+    returns the slug for each id and the full records it saw, by slug.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    fetch_page = fetcher or (lambda url: fetch(url, timeout))
+    slugs: dict[str, str] = {}
+    full: dict[str, dict[str, Any]] = {}
+
+    def take(records: Iterable[dict[str, Any]]) -> None:
+        for record in records:
+            if _canonical_model_record(record) and isinstance(record.get("slug"), str):
+                slugs.setdefault(record["id"], record["slug"])
+                full.setdefault(record["slug"], record)
+
+    take(known)
+    tried: set[str] = set()
+    while True:
+        releases = list(dict.fromkeys(
+            row["release"]["slug"] for row in rows
+            if row["id"] not in slugs and row["release"]["slug"] not in tried
+        ))[:workers]
+        if not releases:
+            break
+        tried.update(releases)
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            pages = list(pool.map(lambda slug: fetch_page(f"{BASE}/models/{slug}"), releases))
+        for page in pages:
+            take(extract_embedded_objects(page))
+    return slugs, full
+
+
 def _host_model_slug(record: dict[str, Any]) -> str | None:
     """The host model's slug, given by the record or derived from its display name."""
     if record.get("hostModelSlug"):
@@ -818,6 +871,7 @@ def build_model_catalog(
     verbose: bool = False,
     *,
     page: str | None = None,
+    fetcher: Any = None,
 ) -> dict[str, Any]:
     """The models with an Intelligence Index, from the models leaderboard.
 
@@ -828,8 +882,20 @@ def build_model_catalog(
     collected_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     general_url = CATALOGUE_URL
     objects = extract_embedded_objects(page if page is not None else fetch(general_url, timeout))
+    unresolved: list[str] = []
+    release_rows = [obj for obj in objects if _release_row(obj)]
+    seen_full: dict[str, dict[str, Any]] = {}
+    if release_rows:
+        ids, seen_full = _resolve_row_slugs(release_rows, objects, timeout, fetcher)
+        for row in release_rows:
+            if row["id"] in ids:
+                objects.append({**row, "slug": ids[row["id"]]})
+            else:
+                unresolved.append(row["name"])
     rows = _deduplicate_typed_records(objects, _leaderboard_model_record, "slug")
     full = _deduplicate_typed_records(objects, _canonical_model_record, "slug")
+    # Full records from the model pages supply release dates, which leaderboard rows lack.
+    full = {**{slug: record for slug, record in seen_full.items() if slug in rows}, **full}
     if not rows and not full:
         raise ExtractionError(f"No model rows found on {general_url}; the page layout has changed")
     general = {slug: {**rows.get(slug, {}), **full.get(slug, {})} for slug in {*rows, *full}}
@@ -900,6 +966,7 @@ def build_model_catalog(
             "eligibility": eligibility,
             "include_deprecated": include_deprecated,
             "since": since,
+            "unresolved": unresolved,
             "output_fields": "all" if verbose else selected_fields,
             "sources": {"general": general_url, "coding": coding_url},
         },
@@ -1105,8 +1172,13 @@ def check(timeout: float = 30.0, sample: int = 3) -> dict[str, Any]:
             report["status"] = "warning"
 
     try:
-        catalogue = build_model_catalog(timeout, "general", verbose=True)["data"]["models"]
-        record("catalogue", len(catalogue) >= 20, f"{len(catalogue)} models with general cost data")
+        built = build_model_catalog(timeout, "general", verbose=True)["data"]
+        catalogue = built["models"]
+        unresolved = built.get("unresolved") or []
+        record("catalogue", len(catalogue) >= 20 and not unresolved,
+               f"{len(catalogue)} models with general cost data"
+               + (f"; no model slug for: {', '.join(unresolved)}" if unresolved else ""),
+               warning=len(catalogue) >= 20)
     except ExtractionError as exc:
         catalogue = []
         record("catalogue", False, str(exc))
