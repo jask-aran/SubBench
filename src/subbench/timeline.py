@@ -70,6 +70,11 @@ VERSIONED_CONSTANTS: tuple[tuple[Any, str], ...] = (
     (regression, "METER_RESET_DROP"),
     (regression, "METER_RESET_FLOOR"),
     (regression, "METER_RESET_CEILING"),
+    # A partial refill (a Fable reset) is added back rather than read as a drop in usage.
+    (regression, "PARTIAL_REFILL_MIN_DROP"),
+    (regression, "PARTIAL_REFILL_SPIKE_FRACTION"),
+    # Which pairs a scoped model's unmatched spend makes incomparable.
+    (regression, "EXCLUDED_COST_TOLERANCE_USD"),
     (regression, "MAX_COST_AGE_MINUTES"),
     # The weekly series is partly built from converted short windows, so the threshold
     # that decides when a conversion is trustworthy moves the plotted value too.
@@ -91,7 +96,9 @@ TARGET_WINDOWS = ("weekly", "five_hour")
 # change look like a provider change when the numeric thresholds stay the same.
 # v3: a window's reference rate comes only from windows that closed before it did, so a
 # closed window's estimate is final and can be stored rather than recomputed every cycle.
-ESTIMATOR_POLICY = "closed-peer-reference-v3-unmetered-guard-bootstrap-band"
+# v4: each scoped limit (Fable) is measured on its own and taken out of the weekly and
+# five-hour windows (scopes.py).
+ESTIMATOR_POLICY = "closed-peer-reference-v3-unmetered-guard-bootstrap-band-v4-scoped-limits"
 
 # Replaying every observation is quadratic in pairs and cubic overall. The shape of a
 # convergence curve survives sampling; its cost does not.

@@ -1,0 +1,16 @@
+{
+ "models": {
+  "claude-fable-5-2": {
+   "cache_create": 1e-05,
+   "cache_read": 2e-07,
+   "cache_read_explicit": true,
+   "fast": 1.0,
+   "flex": 1.0,
+   "input": 8e-06,
+   "output": 4e-05,
+   "split_threshold": 200000,
+   "ultrafast": 1.0
+  }
+ },
+ "source": "LiteLLM model_prices_and_context_window.json, as fetched on 2026-11-14; only models newer than the ccusage table in prices.json"
+}

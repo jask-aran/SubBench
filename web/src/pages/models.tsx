@@ -35,11 +35,13 @@ function Models() {
   const me = createMemo(() => (index() ? personal(index()!, reports() ?? null) : null));
   const weekly = () => me()?.products[0]?.headline.value ?? null;
   // Every plan SubBench has measured, pooled across the accounts that report it. A plan covers its provider's models:
-  // Claude plans Anthropic's, ChatGPT plans OpenAI's.
-  type Plan = { name: string; provider: string; value: number; kind: string; accounts: number; monthly: number | null; multiple: number | null };
+  // Claude plans Anthropic's, ChatGPT plans OpenAI's. A scoped limit ("Claude Max 5X · Fable") is a model family's own
+  // sub-limit: it covers that family only, and its plan then covers the provider's other models.
+  type Plan = { name: string; provider: string; scope: string | null; value: number; kind: string; accounts: number; monthly: number | null; multiple: number | null };
+  const scopeOf = (name: string) => name.split(" · ")[1]?.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-") || null;
   const plans = createMemo<Plan[]>(() => (me()?.products ?? [])
     .filter((item: any) => item.card.provider)
-    .map((item: any) => ({ name: item.card.name, provider: item.card.provider, value: item.headline.value, kind: item.headline.kind,
+    .map((item: any) => ({ name: item.card.name, provider: item.card.provider, scope: scopeOf(item.card.name), value: item.headline.value, kind: item.headline.kind,
       accounts: item.headline.row?.account_count ?? 1,
       monthly: planPrice(item.card.name)?.monthly ?? null, multiple: valueMultiple(item.card.name, item.headline.value) }))
     .sort((a: Plan, b: Plan) => a.provider.localeCompare(b.provider) || a.value - b.value));
@@ -47,7 +49,13 @@ function Models() {
     const text = `${entity.provider ?? ""} ${entity.family ?? ""} ${entity.agent ?? ""}`.toLowerCase();
     return text.includes("anthropic") || text.includes("claude") ? "claude" : text.includes("openai") || text.includes("codex") ? "codex" : null;
   };
-  const plansFor = (entity: any) => plans().filter((plan) => plan.provider === providerOf(entity));
+  const inScope = (entity: any, scope: string) =>
+    `-${[entity.id, entity.label, entity.model, entity.host_model_slug].filter(Boolean).join(" ")}-`.toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-").includes(`-${scope}-`);
+  const covers = (plan: Plan, entity: any) => plan.provider === providerOf(entity) && (plan.scope
+    ? inScope(entity, plan.scope)
+    : !plans().some((other) => other.provider === plan.provider && other.scope && inScope(entity, other.scope)));
+  const plansFor = (entity: any) => plans().filter((plan) => covers(plan, entity));
   const planNamed = (axis: string) => plans().find((plan) => `sub:${plan.name}` === axis) ?? null;
   const [onPlans, setOnPlans] = createSignal(false);
   // Chart: any axes. Plans: how much of the chosen benchmark's work each measured plan gets done per week.
@@ -144,7 +152,7 @@ function Models() {
     if (!isPlanAxis(a)) return axisValue(a, p, lookups());
     // A plan counts only the models it covers; a model from another provider has no value on its axis.
     const plan = planNamed(a), cost = p.observation.resources?.cost;
-    return plan && plan.provider === providerOf(p.entity) && cost > 0 ? plan.value / cost : null;
+    return plan && covers(plan, p.entity) && cost > 0 ? plan.value / cost : null;
   };
 
   // ---- the points, with a value on every chosen axis
@@ -219,7 +227,7 @@ function Models() {
     return plans().map((plan) => {
       const n = seen.get(plan.provider) ?? 0;
       seen.set(plan.provider, n + 1);
-      const points = base().filter((p: any) => providerOf(p.entity) === plan.provider && p.observation.resources?.cost > 0
+      const points = base().filter((p: any) => covers(plan, p.entity) && p.observation.resources?.cost > 0
           && !hidden().has(familyGroup(p.entity.family)) && (!needle() || `${p.entity.label} ${p.entity.id}`.toLowerCase().includes(needle())))
         .map((p: any) => {
           const week = plan.value / p.observation.resources.cost;

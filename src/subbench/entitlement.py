@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import account
+from .scopes import SCOPED_WINDOW_PREFIX, scope_slug
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,9 @@ class EntitlementWindow:
     # they are the same plan, and the registry that codex-auth maintains is not always
     # present, so the value that comes back with the quota reading is the reliable one.
     plan: str | None = None
+    # Only for a scoped limit (one model's own sub-limit inside the weekly limit): the share
+    # of the weekly limit that 100% of this meter equals. Claude's Fable limit is 50.
+    allowance_percent: float | None = None
 
 
 # A provider that does not name the plan beside its meter leaves SubBench unable to tell
@@ -203,6 +207,43 @@ def _normalise_claude(payload: dict[str, Any]) -> list[EntitlementWindow]:
         rows.append(EntitlementWindow(
             "claude", label, used, _time_iso(reset), duration, "claude-oauth-usage",
             account_id=account_id, plan=plan,
+        ))
+    rows.extend(_claude_scoped(payload, account_id=account_id, plan=plan))
+    return rows
+
+
+def _claude_scoped(payload: dict[str, Any], *, account_id: str | None, plan: str | None) -> list[EntitlementWindow]:
+    """One model's own weekly sub-limit, from the `limits` list.
+
+    Usage of that model also moves the weekly limit, and its meter reads 0-100% of its own
+    allowance. `weekly_scoped_shares` gives that allowance as a share of the weekly limit,
+    which is what lets the estimator take the model's quota back out of the weekly meter.
+    A limit scoped to a surface (an app, not a model) is skipped: no model id can price it.
+    """
+    limits = payload.get("limits")
+    if not isinstance(limits, list):
+        return []
+    shares = payload.get("weekly_scoped_shares")
+    allowance: dict[int, float] = {}
+    for share in shares if isinstance(shares, list) else []:
+        if isinstance(share, dict) and isinstance(share.get("limit_index"), int):
+            value = share.get("allowance_percent_of_weekly")
+            if isinstance(value, (int, float)) and value > 0:
+                allowance[share["limit_index"]] = float(value)
+    rows: list[EntitlementWindow] = []
+    for index, limit in enumerate(limits):
+        if not isinstance(limit, dict) or limit.get("kind") != "weekly_scoped":
+            continue
+        scope = limit.get("scope")
+        model = scope.get("model") if isinstance(scope, dict) else None
+        name = model.get("display_name") if isinstance(model, dict) else None
+        slug = scope_slug(name) if isinstance(name, str) else ""
+        percent = limit.get("percent")
+        if not slug or not isinstance(percent, (int, float)):
+            continue
+        rows.append(EntitlementWindow(
+            "claude", SCOPED_WINDOW_PREFIX + slug, float(percent), _time_iso(limit.get("resets_at")), 10080,
+            "claude-oauth-usage", account_id=account_id, plan=plan, allowance_percent=allowance.get(index),
         ))
     return rows
 

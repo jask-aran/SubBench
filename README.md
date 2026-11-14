@@ -135,6 +135,13 @@ fails (usually an expired token) and Codex is installed, SubBench asks
 plan, because the login file can lag an upgrade by days. A change of plan on the same
 account is recorded on the next reading, and that reading starts a new series.
 
+The Claude meter also reports **scoped limits**: a sub-limit for one model family inside
+the weekly limit. For example, Fable has its own limit, equal to 50% of the weekly limit.
+SubBench records each model-scoped limit as its own window, `weekly_<scope>` (for example
+`weekly_fable`), with its share of the weekly limit (`allowance_percent`). A limit scoped
+to a surface (an app) and not a model is not recorded, because no model id can price it.
+Refer to "Scoped limits".
+
 SubBench never refreshes or stores a login. A refresh rotates the login, and that would
 sign the agent out. An expired token stops the readings until the agent next refreshes it,
 and `subbench doctor` reports it. `SUBBENCH_CLAUDE_USAGE_COMMAND`, if set, still replaces
@@ -148,7 +155,9 @@ matches the history ccusage priced. Each token class has its own rate; a one-hou
 write costs twice the input rate; a request past a model's long-context threshold pays the
 long-context rates; Fast, Flex and Ultrafast requests pay the model's multiplier. A model
 the table lacks is looked up in LiteLLM's live table, fetched at most once a day
-(`SUBBENCH_OFFLINE=1` never fetches). A model with no price at all costs zero, and the
+(`SUBBENCH_OFFLINE=1` never fetches). If LiteLLM cannot be reached, the collector uses
+`src/subbench/data/prices_fallback.json`: LiteLLM rows for models newer than the ccusage
+table (at present, `claude-fable-5-2`). A model with no price at all costs zero, and the
 collector names it in its log.
 
 ---
@@ -235,7 +244,7 @@ increase implies a value for the full window:
 slope(i, j) = (value_j - value_i) / ((quota_j - quota_i) / 100)
 ```
 
-SubBench rejects a pair in four conditions:
+SubBench rejects a pair in five conditions:
 
 | Condition | Reason |
 |---|---|
@@ -243,6 +252,7 @@ SubBench rejects a pair in four conditions:
 | The value did not move. | This shows an incomplete usage import, and not free quota. |
 | The cost total is more than 30 minutes old. | The quota advances while a stopped collector holds the cost still. |
 | The pair spans an interval of unobserved usage. | Refer to "Usage that local logs cannot see". |
+| The pair spans spend of a scoped model that this meter cannot take out. | Refer to "Scoped limits". |
 
 ### Step 3 — the estimate for the window
 
@@ -287,6 +297,40 @@ Two accounts on one plan are two separate entitlements. SubBench therefore never
 their **pairs**: one percent of each account is a different physical allowance. It does
 pool their **estimates**, because those describe the same product. The plan name must be
 equal, and that name comes from the meter itself.
+
+### Scoped limits
+
+Claude meters Fable two times. Fable usage moves the weekly limit, as all models do. It
+also moves a Fable meter, which shows 0–100% of the Fable allowance (50% of the weekly
+limit). Per API dollar, Fable uses the weekly limit approximately 2.5 times as fast as
+Opus. If SubBench measured the two together, the weekly value would follow the share of
+Fable in the model mix, and not the plan.
+
+Thus SubBench measures each scoped limit separately (`src/subbench/scopes.py`):
+
+| Window | Quota | Value |
+|---|---|---|
+| `weekly_fable` | The Fable meter. | Fable spend only. The estimate is the value of one full Fable allowance. |
+| `weekly` | The weekly meter minus the Fable meter × its share (50%). | Spend on all other models. |
+| `five_hour` | The five-hour meter. No Fable meter is available to subtract. | Spend on all other models. A pair that spans Fable spend is rejected. |
+
+A weekly reading with no Fable reading beside it (for example, before SubBench recorded
+the Fable meter) is treated as the five-hour window is: a pair that spans Fable spend is
+rejected. A model belongs to a scope when its id contains the scope as a word
+(`claude-fable-5-2` is in `fable`).
+
+The site shows each scoped limit as its own product, for example "Claude Max 5X · Fable".
+Its weekly figure is the value of one full Fable allowance. "Claude Max 5X" is then the
+value of the weekly limit on the other models. On the Models page, the Fable product covers
+Fable models only, and the plan covers the other models of its provider.
+
+**A Fable reset.** A subscriber can use a Fable reset. The provider then gives back the
+Fable share of the weekly limit, and the weekly meter drops (on 2026-11-10, from 60% to
+11%) with no change of reset time. With the Fable meter recorded, this drop does not
+change the non-Fable weekly series, because the weekly meter and the Fable share drop by
+the same amount. Without it, SubBench adds the drop back to every later reading in the
+window (`PARTIAL_REFILL_MIN_DROP`, 5 points). A drop that follows a rise of at least half
+its size is a spike that reversed, and SubBench does not add it back.
 
 ### Step 5 — divergence
 

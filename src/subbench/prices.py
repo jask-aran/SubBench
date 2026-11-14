@@ -142,9 +142,20 @@ def _extra(*, now: float | None = None) -> dict[str, Rate]:
     return from_litellm(cached) if isinstance(cached, dict) else {}
 
 
+def _fallback() -> dict[str, Rate]:
+    """LiteLLM rows for models newer than the ccusage table, kept for when LiteLLM is out of reach.
+
+    Without them, such a model costs $0 offline (SUBBENCH_OFFLINE=1) or when the fetch
+    fails, and a window full of it would look like quota spent for nothing. The live table
+    still wins when it has the model, so prices stay what the live table says.
+    """
+    text = resources.files("subbench").joinpath("data/prices_fallback.json").read_text()
+    return {name: Rate.from_row(row) for name, row in json.loads(text)["models"].items()}
+
+
 def load_table(*, now: float | None = None) -> dict[str, Rate]:
     bundled = _bundled()
-    return {**_extra(now=now), **bundled}
+    return {**_fallback(), **_extra(now=now), **bundled}
 
 
 class Prices:

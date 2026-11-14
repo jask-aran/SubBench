@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from .crosssolve import WINDOW_MINUTES
+from .scopes import PARENT_WINDOW, scope_of
 from .regression import weighted_quantile
 from .server.confidence import CONFIRMED, LIKELY, PROVISIONAL
 
@@ -49,8 +50,14 @@ OPEN_WINDOW = "weekly"
 
 
 def product_label(provider: str, plan: str | None) -> str:
-    """Human name for a product, for example "ChatGPT Plus" or "Claude"."""
+    """Human name for a product, for example "ChatGPT Plus" or "Claude".
+
+    A scoped limit's plan is "<plan>+<scope>" (product_view): "Claude Max 5X · Fable".
+    """
     name = PROVIDER_NAMES.get(provider, str(provider).replace("_", " ").title())
+    if plan and "+" in plan:
+        base, scope = plan.split("+", 1)
+        return f"{product_label(provider, base or None)} · {scope.replace('_', ' ').title()}"
     if not plan:
         return name
     detail = str(plan).replace("_", " ").title()
@@ -75,6 +82,23 @@ class ProductEstimate:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def product_view(row: dict[str, Any]) -> dict[str, Any]:
+    """A window as the products see it. A scoped limit is a product of its own.
+
+    The estimator keeps a scoped window ("weekly_fable") apart from the weekly window of the
+    same plan. A product is a plan and a limit, so here the scope moves into the plan
+    ("max_5x+fable") and the window becomes the weekly one it lives inside. The site then
+    shows it as its own card, with a weekly figure: the value of one full Fable allowance.
+    worker/pooling.js productView does the same.
+    """
+    scope = scope_of(row.get("window"))
+    if not scope:
+        return row
+    plan = row.get("plan")
+    plan = plan if isinstance(plan, str) and plan else ""
+    return {**row, "plan": f"{plan}+{scope}", "window": PARENT_WINDOW}
 
 
 def _moment(value: Any) -> datetime | None:
@@ -105,7 +129,7 @@ def direct_windows(
     floor = moment - timedelta(days=within_days) if within_days is not None else None
     rows: list[dict[str, Any]] = []
     for estimate in estimates:
-        row = estimate if isinstance(estimate, dict) else estimate.as_dict()
+        row = product_view(estimate if isinstance(estimate, dict) else estimate.as_dict())
         reset_key = str(row.get("reset_key") or "")
         if not reset_key or "~via~" in reset_key:
             continue
@@ -389,7 +413,7 @@ def measured_products(windows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]
     put each account's estimates on a page that shows aggregates only.
     """
     seen: dict[tuple, dict[str, Any]] = {}
-    for row in windows:
+    for row in map(product_view, windows):
         plan = row.get("plan")
         plan = plan if isinstance(plan, str) and plan else None
         provider, window = str(row.get("provider")), str(row.get("window"))

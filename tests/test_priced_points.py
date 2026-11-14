@@ -7,6 +7,9 @@ from subbench.store import (
     regression_points,
 )
 
+COLUMNS = ("provider", "account_id", "window", "observed_at", "used_percent",
+           "resets_at", "duration_minutes", "plan", "cost_usd", "cost_age_minutes")
+
 DIRECT = PRICED_WINDOWS_SQL + """
     SELECT p.provider, p.account_id, p.window, p.observed_at, p.used_percent,
            p.resets_at, p.duration_minutes, p.plan, p.cost_usd, p.cost_age_minutes
@@ -57,7 +60,7 @@ def _direct(db):
 def test_kept_prices_match_pricing_every_time(tmp_path):
     db = connect(tmp_path / "s.sqlite3")
     _seed(db)
-    assert [tuple(row) for row in regression_points(db)] == _direct(db)
+    assert [tuple(row[name] for name in COLUMNS) for row in regression_points(db)] == _direct(db)
 
 
 def test_a_second_refresh_does_no_work(tmp_path):
@@ -75,7 +78,7 @@ def test_a_new_reading_is_priced_without_repricing_the_rest(tmp_path):
     _reading(db, "2026-08-01T06:00:00+00:00", 70.0)
     db.commit()
     assert refresh_priced_points(db) == (0, 1)
-    assert [tuple(row) for row in regression_points(db)] == _direct(db)
+    assert [tuple(row[name] for name in COLUMNS) for row in regression_points(db)] == _direct(db)
 
 
 def test_an_import_that_overtakes_a_reading_reprices_it(tmp_path):
@@ -103,7 +106,7 @@ def test_an_import_that_overtakes_a_reading_reprices_it(tmp_path):
     assert after["2026-08-01T02:20:00+00:00"] != before["2026-08-01T02:20:00+00:00"]
     # The reading after it was already priced from a newer import and is untouched.
     assert after["2026-08-01T04:00:00+00:00"] == before["2026-08-01T04:00:00+00:00"]
-    assert [tuple(row) for row in regression_points(db)] == _direct(db)
+    assert [tuple(row[name] for name in COLUMNS) for row in regression_points(db)] == _direct(db)
 
 
 def test_pricing_is_kept_per_account(tmp_path):
@@ -112,4 +115,4 @@ def test_pricing_is_kept_per_account(tmp_path):
     _import(db, "2026-08-01T02:00:00+00:00", 99.0, account_id="acct-B")
     _reading(db, "2026-08-01T02:00:00+00:00", 20.0, account_id="acct-B")
     db.commit()
-    assert [tuple(row) for row in regression_points(db)] == _direct(db)
+    assert [tuple(row[name] for name in COLUMNS) for row in regression_points(db)] == _direct(db)

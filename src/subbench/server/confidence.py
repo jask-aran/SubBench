@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from ..regression import RegressionEstimate
+from ..scopes import scope_of
 
 # A window must have measured real quota movement, most of the movement it saw, and
 # enough independent readings that the estimate is not resting on a handful of them.
@@ -86,6 +87,10 @@ def corroboration(
     best: tuple[float, RegressionEstimate] | None = None
     for peer in peers:
         if peer.window == estimate.window or peer.provider != estimate.provider:
+            continue
+        # A scoped limit (weekly_fable) does not advance with the account's other windows:
+        # only one model family moves it, so their quota ratio predicts nothing.
+        if scope_of(peer.window) or scope_of(estimate.window):
             continue
         if peer.account_id != estimate.account_id:
             continue

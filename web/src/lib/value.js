@@ -7,7 +7,9 @@ export const WINDOWS = [
   { key: "five_hour", label: "5-hour limit", short: "5-hour" },
 ];
 
-export const windowLabel = (key) => WINDOWS.find((w) => w.key === key)?.short ?? key;
+// A scoped limit ("weekly_fable") is a weekly limit; its product name carries the scope.
+export const windowLabel = (key) =>
+  WINDOWS.find((w) => w.key === key)?.short ?? (String(key).startsWith("weekly_") ? "Weekly" : key);
 
 // Product names arrive with the data. The collector builds them from the plan the provider
 // reports beside the meter, so an upgrade renames the product without a code change.
@@ -32,7 +34,7 @@ export function visibleEstimates(history, now = Date.now()) {
   return (history || [])
     .filter((row) =>
       row.tier === "confirmed"
-      && (row.window === "weekly" || row.window === "five_hour")
+      && (row.window === "weekly" || row.window === "five_hour" || String(row.window).startsWith("weekly_"))
       && settled(row.reset_key, now)
       && Number(row.estimate_usd) > 0)
     .map((row) => ({

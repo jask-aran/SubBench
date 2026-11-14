@@ -39,14 +39,18 @@ def window_row(rng, provider, account, plan, window, reset):
     return row
 
 
-def case(seed: int) -> dict:
+def case(seed: int, *, scoped: bool = False) -> dict:
     rng = random.Random(seed)
     accounts = [f"acct-{rng.getrandbits(64):016x}" for _ in range(rng.randint(1, 4))] + ([None] if rng.random() < 0.3 else [])
     owner = {a: (rng.choice(["claude", "codex"]), None) for a in accounts}
     owner = {a: (p, rng.choice(PLANS[p])) for a, (p, _) in owner.items()}
     shared = []
     for account, (provider, plan) in owner.items():
-        for window, minutes in (("five_hour", 300), ("weekly", 10080)):
+        windows = [("five_hour", 300), ("weekly", 10080)]
+        if scoped and provider == "claude":
+            # A scoped limit (products.product_view): its own product, a weekly figure.
+            windows.append(("weekly_fable", 10080))
+        for window, minutes in windows:
             for _ in range(rng.randint(0, 8)):
                 reset = NOW + timedelta(minutes=rng.randint(-60 * 24 * 45, minutes))
                 reset = reset.replace(second=0, microsecond=0)
@@ -69,6 +73,9 @@ def case(seed: int) -> dict:
 def main() -> None:
     for seed in range(1, 17):
         (OUT / f"case-{seed}.json").write_text(json.dumps(case(seed), sort_keys=True) + "\n")
+    # Cases with scoped limits. Separate seeds, so the cases above stay as they were.
+    for seed in range(17, 21):
+        (OUT / f"case-{seed}.json").write_text(json.dumps(case(seed, scoped=True), sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":
