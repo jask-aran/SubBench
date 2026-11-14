@@ -518,6 +518,93 @@ def evaluation_schema(
     }
 
 
+# Each evaluation of the Intelligence Index: its weight in the index, its task count, its key in
+# canonicalEvalTokenCounts, and where a model record holds its score. Since 2026-11-14 the site
+# publishes no per-evaluation cost, time or tokens; it computes them in the browser from these.
+# Checked against the 2026-11-13 archive (103 models), where AA still published them: cost =
+# weighted cost / weight, and tokens = token count / tasks, are exact for every model; time =
+# tokens / the index's own output speed is exact for all 102 models with a time.
+INDEX_EVALUATIONS: dict[str, tuple[float, int, str, tuple[str, ...]]] = {
+    "aa-briefcase": (0.15, 91, "briefcase", ("briefcaseBreakdown", "overall", "elo")),
+    "automationbench-aa": (0.05, 657, "automationBench", ("automationBenchPartialScore",)),
+    "terminalbench-4-0": (0.10, 66, "terminalBench40", ("terminalBench40",)),
+    "frontiercode-2-0": (0.15, 132, "frontierCode20", ("frontierCode20",)),
+    "omniscience": (0.15, 3000, "omniscience", ("omniscience",)),
+    "gdp-pdf": (0.05, 100, "gdpPdf", ("gdpPdfAllPass",)),
+    "hle-diamond": (0.10, 1000, "hleDiamond", ("hleDiamond",)),
+    "critpt-v2-hard": (0.10, 40, "critptAgenticHard", ("critptAgenticHard",)),
+    "terminal-bench-science": (0.15, 70, "terminalBenchScience", ("terminalBenchScience",)),
+}
+
+
+# Where a record keeps the tokens per task carried forward from an earlier collection.
+CARRIED_TOKENS_KEY = "subbenchCarriedOutputTokensPerTask"
+
+
+def carry_eval_tokens(record: dict[str, Any], known: dict[str, float] | None) -> bool:
+    """Give a record the per-evaluation output tokens of an earlier collection, if still true.
+
+    A model's tokens per task change only when AA re-runs it. Its record still publishes the
+    index's output tokens per task, which is the weighted sum of the per-evaluation tokens; the
+    earlier tokens are used only when they reproduce that sum, so a re-run model gets None.
+    """
+    if not known or "canonicalEvalTokenCounts" in record or "intelligenceIndexEvaluations" in record:
+        return False
+    output = (record.get("intelligenceIndexOutputTokensPerTask") or {}).get("output")
+    if not isinstance(output, (int, float)) or output <= 0 or set(known) != set(INDEX_EVALUATIONS):
+        return False
+    total = sum(INDEX_EVALUATIONS[slug][0] * tokens for slug, tokens in known.items())
+    if abs(total / output - 1) > 1e-6:
+        return False
+    record[CARRIED_TOKENS_KEY] = dict(known)
+    return True
+
+
+def _dig(record: dict[str, Any], path: tuple[str, ...]) -> Any:
+    value: Any = record
+    for key in path:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value if isinstance(value, (int, float)) else None
+
+
+def _rebuilt_index_evaluations(model: dict[str, Any], weighted: dict[str, Any]) -> list[dict[str, Any]]:
+    """The per-evaluation rows, computed as the site computes them (see INDEX_EVALUATIONS).
+
+    Cost and score come from every model record. Tokens and time need canonicalEvalTokenCounts,
+    which AA's pages carry only for the ~29 models its charts show by default; for the others
+    they are None.
+    """
+    counts = model.get("canonicalEvalTokenCounts") or {}
+    carried = model.get(CARRIED_TOKENS_KEY) or {}
+    output = (model.get("intelligenceIndexOutputTokensPerTask") or {}).get("output")
+    index_time = model.get("intelligenceIndexTimePerTask")
+    speed = output / index_time if output and index_time else None
+    rows = []
+    for slug, weighted_cost in weighted.items():
+        if not slug:
+            continue
+        known = INDEX_EVALUATIONS.get(slug)
+        if known is None:
+            raise ExtractionError(f"Unknown Intelligence Index evaluation {slug!r}; add it to INDEX_EVALUATIONS")
+        weight, tasks, token_key, score_path = known
+        tokens = counts.get(token_key) or {}
+        per_task = (
+            (tokens["answer"] + tokens["reasoning"]) / tasks
+            if isinstance(tokens.get("answer"), (int, float)) and isinstance(tokens.get("reasoning"), (int, float))
+            else carried.get(slug)
+        )
+        rows.append({
+            "slug": slug,
+            "label": INDEX_EVALUATION_LABELS.get(slug) or slug.replace("-", " ").title(),
+            "score": _dig(model, score_path),
+            "cost_per_task": weighted_cost / weight if isinstance(weighted_cost, (int, float)) else None,
+            "time_per_task": per_task / speed if per_task is not None and speed else None,
+            "output_tokens_per_task": per_task,
+            "weighted_cost_per_task": weighted_cost,
+        })
+    return rows
+
+
 def index_evaluations(model: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Each evaluation of the Intelligence Index with its own score and resources."""
     if not model:
@@ -526,6 +613,8 @@ def index_evaluations(model: dict[str, Any] | None) -> list[dict[str, Any]]:
         item.get("slug"): item.get("weightedCostPerTask")
         for item in ((model.get("intelligenceIndexCostPerTask") or {}).get("evaluations") or [])
     }
+    if "intelligenceIndexEvaluations" not in model:
+        return _rebuilt_index_evaluations(model, weighted)
     rows = []
     for item in model.get("intelligenceIndexEvaluations") or []:
         slug = item.get("slug")
@@ -541,6 +630,28 @@ def index_evaluations(model: dict[str, Any] | None) -> list[dict[str, Any]]:
             "weighted_cost_per_task": weighted.get(slug),
         })
     return rows
+
+
+EVAL_TOKENS_URL = f"{BASE}/evaluations/terminalbench-4-0"
+
+
+def _attach_eval_token_counts(records: dict[str, dict[str, Any]], timeout: float, fetcher: Any = None) -> None:
+    """Add canonicalEvalTokenCounts to the records that an evaluation page carries it for.
+
+    The model pages leave it out; an evaluation page has it for the models its chart shows by
+    default (all evaluation pages show the same set). Without it a model keeps its cost and
+    score per evaluation, but not its tokens or time, so a failed fetch is not fatal.
+    """
+    if all({"canonicalEvalTokenCounts", "intelligenceIndexEvaluations"} & set(record) for record in records.values()):
+        return
+    try:
+        page = (fetcher or (lambda url: fetch(url, timeout)))(EVAL_TOKENS_URL)
+    except ExtractionError:
+        return
+    for obj in extract_embedded_objects(page):
+        slug = obj.get("slug")
+        if slug in records and isinstance(obj.get("canonicalEvalTokenCounts"), dict):
+            records[slug].setdefault("canonicalEvalTokenCounts", obj["canonicalEvalTokenCounts"])
 
 
 def collect_model_records(
@@ -1083,7 +1194,11 @@ def extract_models(
     *,
     workers: int = 4,
     fetcher: Any = None,
+    known_tokens: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
+    """Full records for the models. `known_tokens` (model slug -> evaluation slug -> output tokens
+    per task, from an earlier collection) fills tokens and time where AA's pages no longer give
+    them; see carry_eval_tokens."""
     if not slugs:
         raise ExtractionError("At least one model slug is required")
     for slug in slugs:
@@ -1093,6 +1208,9 @@ def extract_models(
     collected_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     wanted = list(dict.fromkeys((*slugs, *([evaluation_reference_model] if evaluation_reference_model else []))))
     records, sources = collect_model_records(wanted, timeout, workers=workers, fetcher=fetcher)
+    _attach_eval_token_counts(records, timeout, fetcher)
+    for slug, record in records.items():
+        carry_eval_tokens(record, (known_tokens or {}).get(slug))
     evaluation_fields = evaluation_schema({slug: records[slug] for slug in slugs if slug in records} | (
         {evaluation_reference_model: records[evaluation_reference_model]}
         if evaluation_reference_model in records else {}

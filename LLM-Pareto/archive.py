@@ -303,6 +303,7 @@ def collect(args: argparse.Namespace) -> tuple[list[Path], dict[str, Any]]:
         elif not args.no_model_details:
             raise ArchiveError("Automatic model discovery requires the catalogue")
 
+        known_tokens = latest_eval_tokens(paths(args.data_dir)[1])
         for batch_number, slugs in enumerate(batch_slugs(selected_slugs), start=1):
             job = {
                 "type": "models", "slugs": slugs,
@@ -312,6 +313,7 @@ def collect(args: argparse.Namespace) -> tuple[list[Path], dict[str, Any]]:
             response = scraper.extract_models(
                 slugs, timeout=args.timeout,
                 evaluation_reference_model=args.evaluation_reference_model, verbose=True,
+                known_tokens=known_tokens,
             )
             persisted = persist(args.data_dir, job, response)
             written.append(persisted.path)
@@ -362,6 +364,29 @@ def collect(args: argparse.Namespace) -> tuple[list[Path], dict[str, Any]]:
     if failure:
         raise ArchiveError(f"Frontier collection {collection_id} was incomplete: {failure}")
     return written, manifest
+
+
+def latest_eval_tokens(json_dir: Path) -> dict[str, dict[str, float]]:
+    """Each model's newest complete per-evaluation output tokens per task in the archive.
+
+    Since 2026-11-14 AA publishes these only for the models its charts show by default, so a
+    collection carries the archived ones forward (the scraper checks they still hold).
+    """
+    known: dict[str, dict[str, float]] = {}
+    if not json_dir.exists():
+        return known
+    for path in sorted(json_dir.rglob("*_models_*.json"), key=lambda p: p.name, reverse=True):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))["response"]["data"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            continue
+        for model in data.get("models") or ([data["model"]] if data.get("model") else []):
+            slug = model.get("slug")
+            rows = model.get("index_evaluations") or []
+            if slug in known or not rows or any(row.get("output_tokens_per_task") is None for row in rows):
+                continue
+            known[slug] = {row["slug"]: row["output_tokens_per_task"] for row in rows}
+    return known
 
 
 def load_json_records(json_dir: Path) -> list[tuple[Path, dict[str, Any]]]:

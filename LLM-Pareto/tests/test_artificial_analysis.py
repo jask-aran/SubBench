@@ -102,6 +102,48 @@ class ModelDetailsTest(unittest.TestCase):
             aa.extract_models(["a", "missing"], workers=1, fetcher=lambda url: flight_page(model_record("a")))
 
 
+class RebuiltEvaluationsTest(unittest.TestCase):
+    """Since 2026-11-14 the records carry no intelligenceIndexEvaluations; the rows are rebuilt."""
+
+    def record(self, **extra) -> dict:
+        record = model_record("m", **extra)
+        del record["intelligenceIndexEvaluations"]
+        record["intelligenceIndexCostPerTask"]["evaluations"] = [{"slug": "terminalbench-4-0", "weightedCostPerTask": 0.25}]
+        # 5000 output tokens per task over 600 s: the index's own speed is 25/3 tokens a second.
+        return record
+
+    def test_cost_and_score_come_from_every_record(self) -> None:
+        [row] = aa.index_evaluations(self.record())
+        self.assertAlmostEqual(row["cost_per_task"], 2.5)  # 0.25 weighted / weight 0.1
+        self.assertEqual(row["score"], 0.5)
+        self.assertIsNone(row["time_per_task"])
+        self.assertIsNone(row["output_tokens_per_task"])
+
+    def test_token_counts_give_tokens_and_time(self) -> None:
+        counts = {"terminalBench40": {"answer": 6600, "reasoning": 59400, "input": 1}}
+        [row] = aa.index_evaluations(self.record(canonicalEvalTokenCounts=counts))
+        self.assertAlmostEqual(row["output_tokens_per_task"], 1000.0)  # 66000 tokens / 66 tasks
+        self.assertAlmostEqual(row["time_per_task"], 120.0)  # 1000 tokens at 25/3 a second
+
+    def test_archived_tokens_are_carried_only_while_they_reproduce_the_index_tokens(self) -> None:
+        # Index output tokens per task are the weighted sum of the per-evaluation tokens.
+        known = {slug: 1000.0 for slug in aa.INDEX_EVALUATIONS}
+        record = self.record(intelligenceIndexOutputTokensPerTask={"output": 1000.0})
+        self.assertTrue(aa.carry_eval_tokens(record, known))
+        [row] = aa.index_evaluations(record)
+        self.assertEqual(row["output_tokens_per_task"], 1000.0)
+        self.assertAlmostEqual(row["time_per_task"], 600.0)  # the index's own 1000 tokens / 600 s
+        rerun = self.record(intelligenceIndexOutputTokensPerTask={"output": 1200.0})
+        self.assertFalse(aa.carry_eval_tokens(rerun, known))
+        self.assertIsNone(aa.index_evaluations(rerun)[0]["time_per_task"])
+
+    def test_an_unknown_evaluation_stops_the_scrape(self) -> None:
+        record = self.record()
+        record["intelligenceIndexCostPerTask"]["evaluations"].append({"slug": "new-eval", "weightedCostPerTask": 0.1})
+        with self.assertRaises(aa.ExtractionError):
+            aa.index_evaluations(record)
+
+
 class CatalogueTest(unittest.TestCase):
     def test_leaderboard_rows_give_the_catalogue(self) -> None:
         # Leaderboard rows: no "id", and the cost per task as a plain number.
