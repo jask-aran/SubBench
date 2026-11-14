@@ -433,7 +433,7 @@ def save_entitlements(db: sqlite3.Connection, rows: Iterable[EntitlementWindow],
                (observed_at, provider, account_id, window, used_percent, resets_at,
                 duration_minutes, source, plan, allowance_percent)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [(observed_at, row.provider, row.account_id, row.window, row.used_percent,
+            [(row.observed_at or observed_at, row.provider, row.account_id, row.window, row.used_percent,
               row.resets_at, row.duration_minutes, row.source, row.plan, row.allowance_percent)
              for row in values],
         )

@@ -142,6 +142,13 @@ SubBench records each model-scoped limit as its own window, `weekly_<scope>` (fo
 to a surface (an app) and not a model is not recorded, because no model id can price it.
 Refer to "Scoped limits".
 
+Claude Code keeps its own copy of the last meter response in `~/.claude.json`
+(`cachedUsageUtilization`), with the time it was fetched and the account. When the
+endpoint answers 429, or SubBench waits between reads, SubBench uses this copy if it is
+newer than its own last reading, less than 1 hour old, and for the account that Claude
+Code uses now. The reading keeps the time that Claude Code fetched it. This sends no
+request. Such a reading has the source `claude-code-cache`.
+
 SubBench never refreshes or stores a login. A refresh rotates the login, and that would
 sign the agent out. An expired token stops the readings until the agent next refreshes it,
 and `subbench doctor` reports it. `SUBBENCH_CLAUDE_USAGE_COMMAND`, if set, still replaces
