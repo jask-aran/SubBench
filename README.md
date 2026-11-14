@@ -520,9 +520,8 @@ minutes while the tab is visible.
 
 | Page | Contents |
 |---|---|
-| `/` Overview | The weekly value of each product, then one large chart with three views: weekly value, score against cost, and tasks per weekly limit. |
-| `/subscriptions/` | One block per provider (its plans side by side, then its model mix), the value over time, the consistency checks and the completed windows. |
-| `/models/` | Every public benchmark in one chart the size of the window. Pick a benchmark, then any two axes (its score, its cost, time or tokens, or another benchmark's score); a third axis makes the chart 3D, or colours the 2D chart. The side panel holds the best trade-offs (non-dominated on the chosen axes), the cheapest model at a target score, and in 3D the camera and a budget. Every measured plan (pooled across the accounts that report it) covers its provider's models (Claude plans Anthropic's, ChatGPT plans OpenAI's): each plan is an axis ("Tasks / week · Claude Max 5X"), "Plan-covered" filters to the models some plan covers, and every hover lists tasks per week on each covering plan. The site presents aggregates only: no page names or identifies an account. The **Plans** view plots the same join: x is tasks per weekly limit, y the benchmark score, and each measured plan's best trade-offs form its own curve, so a plan's leverage shows as its curve's shift to the right. **Per $** divides by the plan's list price (`web/src/lib/plans.js`, a dated table: Claude Pro $20, Max 5x $100, Max 20x $200, ChatGPT Go $8, Plus $20, Pro $200 a month), so plans at different prices compare on tasks per dollar; the Subscriptions and Overview pages show each plan's weekly value as a multiple of its price. **× Price 3D** plots tasks per week × the plan's weekly price × the score: each plan's curve sits at its price, and the surface is the best score reachable for a workload at or under a given weekly spend.
+| `/` Subscriptions | The figure strip (each plan's weekly value, ≈ monthly value and multiple of its price, and the most-used model). Below, one column holds the plans' limits table (weekly and 5-hour value, windows, the week in progress), the model mix per provider and the checks. The other column holds views composed from the Models page and seen through the plans: tasks a week and tasks per dollar on a chosen benchmark, and value over time. Pointing at a plan anywhere brings its line forward; **Open in Models** opens the view in the Models workbench. The completed windows table is last. `/subscriptions/` redirects here. |
+| `/models/` | Every public benchmark in one chart the size of the window. A row of questions opens ready-made views. Otherwise the reader composes one: drag a measure from the Measures pane (this benchmark's score, its cost, time or tokens, a plan's tasks a week, or another benchmark's score) onto Up, Across or the third place, or click it. Each measure shows how many models it shares with the plotted pair. A third measure colours the 2D chart or adds depth (3D, with Angle, Front, Side and Top views). **Your limits** (cost, time, a score floor) fade the models out of reach and ring the best fit; a limit on a plotted measure is drawn on the chart. Two scores against each other get a trend line and Pearson's r. Every measured plan (pooled across the accounts that report it) covers its provider's models (Claude plans Anthropic's, ChatGPT plans OpenAI's), and every hover lists tasks per week on each covering plan. The site presents aggregates only: no page names or identifies an account. The **Plans** view plots the same join: x is tasks per weekly limit, y the benchmark score, and each measured plan's best trade-offs form its own curve, so a plan's leverage shows as its curve's shift to the right. **Per $** divides by the plan's list price (`web/src/lib/plans.js`, a dated table: Claude Pro $20, Max 5x $100, Max 20x $200, ChatGPT Go $8, Plus $20, Pro $200 a month), so plans at different prices compare on tasks per dollar; the Subscriptions page shows each plan's weekly value as a multiple of its price. **× Price 3D** plots tasks per week × the plan's weekly price × the score: each plan's curve sits at its price, and the surface is the best score reachable for a workload at or under a given weekly spend.
 
 **How a plan and a benchmark meet.** Both sides are priced in API dollars: SubBench measures what a plan's weekly limit delivers at public API prices, and each benchmark measures what one task costs at the same prices. Tasks per week is their ratio. Token counts are not divided directly, because the two sides spend different token classes (a week of agent use is mostly cache reads; a benchmark's tokens per task are mostly output), and the price table is what makes the classes comparable. A per-class allowance reported by the collector would allow a token-based conversion as well. `/frontier/` and `/surface/` redirect here. |
 
@@ -531,7 +530,7 @@ confirmed window. A window that passed every check except the width of its inter
 a range only. A product that is measured but has nothing settled still gets a card. A
 stale report or an unreachable API is said in the sidebar and the footer.
 
-**What one week buys.** The overview divides the measured weekly value of a product by the
+**What one week buys.** Tasks a week divides the measured weekly value of a product by the
 measured cost of one benchmark task. The result is a throughput and not a promise: a real
 workload uses different tokens for each task than a benchmark does. `subbench frontier`
 prints the same table in the terminal.
@@ -548,14 +547,14 @@ look dominated in a two-axis chart, because it wins on the axis that the chart h
 |---|---|
 | `web/src/lib/` | The display rules and the frontier arithmetic. Plain modules; `node --test` covers them. |
 | `web/src/pages/` | One SolidJS module for each page. |
-| `web/src/app/` | The shell, the data loading and the Plotly charts. |
+| `web/src/app/` | The shell, the data loading, the charts, and `plans.ts` (the measured plans and the models each covers, shared by both pages). |
 | `web/src/conduit/` | Conduit components v2, copied from the Conduit repository. AGPL-3.0; refer to its README. |
 | `web/public/data/frontier.json` | The benchmark bundle. `LLM-Pareto/export-web-data.py` writes it. |
 
 The chrome uses Conduit's tokens only. The chart series use one validated categorical
 palette, because Conduit's category palette fails the colour-vision checks as scatter
 series. The Models chart is ECharts, with echarts-gl for 3D, so 2D and 3D are one engine on one canvas and switching
-redraws in place. The overview and subscription trend charts use Plotly's basic bundle. Both load on demand.
+redraws in place. The value-over-time chart uses Plotly's basic bundle. Both load on demand.
 
 ### Local preview
 

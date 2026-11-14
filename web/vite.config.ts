@@ -64,7 +64,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 4000,
     rollupOptions: {
       input: {
-        overview: path.join(root, "index.html"),
+        home: path.join(root, "index.html"),
         subscriptions: path.join(root, "subscriptions/index.html"),
         models: path.join(root, "models/index.html"),
         frontier: path.join(root, "frontier/index.html"),

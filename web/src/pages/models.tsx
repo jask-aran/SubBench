@@ -6,10 +6,9 @@ import { ArrowLeftRightIcon, XIcon, SlidersHorizontalIcon, LinkIcon, CheckIcon, 
 import { hoverHTML } from "../app/charts";
 import { EChart, type ChartApi } from "../app/echart";
 import { option2d, option3d, optionPlans, VIEWS3D, type Row, type PlanSeries } from "../app/modelchart";
-// @ts-ignore
-import { planPrice, valueMultiple } from "../lib/plans.js";
 import { RESOURCE_FORMAT } from "../app/points";
 import { loadFrontier, loadReports, personal } from "../app/data";
+import { measuredPlans, covers as coversPlan, planSeries as planSeriesOf, pointKey, pointLabel, weekPrice, type Plan } from "../app/plans";
 import { Segmented, Input, Swatch } from "../conduit/ui/controls";
 // @ts-ignore
 import { price, duration, integer, score as fmtScore } from "../lib/format.js";
@@ -31,42 +30,14 @@ type Mode = "model" | "agent";
 const params = new URLSearchParams(location.search);
 const toLog = (pos: number, [lo, hi]: [number, number]) => 10 ** (Math.log10(lo) + (Math.log10(hi) - Math.log10(lo)) * pos / 1000);
 const NONE = "";
-// Colours for a provider's second and later plans: chart series slots no provider uses.
-const PLAN_COLOURS = ["var(--series-5)", "var(--series-7)", "var(--series-4)", "var(--series-8)", "var(--series-1)"];
 
 function Models() {
   const [index] = createResource(loadFrontier);
   const [reports] = createResource(loadReports);
   const me = createMemo(() => (index() ? personal(index()!, reports() ?? null) : null));
   const weekly = () => me()?.products[0]?.headline.value ?? null;
-  // Every plan SubBench has measured, pooled across the accounts that report it. A plan covers its provider's models:
-  // Claude plans Anthropic's, ChatGPT plans OpenAI's. A scoped limit ("Claude Max 5X · Fable") is a model family's own
-  // sub-limit: it covers that family only, and its plan then covers the provider's other models.
-  type Plan = { name: string; provider: string; scope: string | null; value: number; kind: string; accounts: number; monthly: number | null; multiple: number | null; colour: string };
-  const provider = (key: string) => (key === "claude" ? "Anthropic" : key === "codex" ? "OpenAI" : key);
-  const scopeOf = (name: string) => name.split(" · ")[1]?.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-") || null;
-  const plans = createMemo<Plan[]>(() => (me()?.products ?? [])
-    .filter((item: any) => item.card.provider)
-    .map((item: any) => ({ name: item.card.name, provider: item.card.provider, scope: scopeOf(item.card.name), value: item.headline.value, kind: item.headline.kind,
-      accounts: item.headline.row?.account_count ?? 1,
-      monthly: planPrice(item.card.name)?.monthly ?? null, multiple: valueMultiple(item.card.name, item.headline.value), colour: "" }))
-    .sort((a: Plan, b: Plan) => a.provider.localeCompare(b.provider) || a.value - b.value)
-    // Each plan its own colour, so two plans of one provider can be told apart. The provider's first full plan (not a
-    // scoped limit such as Fable) keeps the provider's colour.
-    .map((plan: Plan, i: number, all: Plan[]) => {
-      const main = all.findIndex((other) => other.provider === plan.provider && !other.scope) === i;
-      return { ...plan, colour: main ? familyColor(provider(plan.provider)) : PLAN_COLOURS[i % PLAN_COLOURS.length] };
-    }));
-  const providerOf = (entity: any) => {
-    const text = `${entity.provider ?? ""} ${entity.family ?? ""} ${entity.agent ?? ""}`.toLowerCase();
-    return text.includes("anthropic") || text.includes("claude") ? "claude" : text.includes("openai") || text.includes("codex") ? "codex" : null;
-  };
-  const inScope = (entity: any, scope: string) =>
-    `-${[entity.id, entity.label, entity.model, entity.host_model_slug].filter(Boolean).join(" ")}-`.toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-").includes(`-${scope}-`);
-  const covers = (plan: Plan, entity: any) => plan.provider === providerOf(entity) && (plan.scope
-    ? inScope(entity, plan.scope)
-    : !plans().some((other) => other.provider === plan.provider && other.scope && inScope(entity, other.scope)));
+  const plans = createMemo<Plan[]>(() => measuredPlans(me()?.products ?? []));
+  const covers = (plan: Plan, entity: any) => coversPlan(plans(), plan, entity);
   const plansFor = (entity: any) => plans().filter((plan) => covers(plan, entity));
   const planNamed = (axis: string) => plans().find((plan) => `sub:${plan.name}` === axis) ?? null;
   const [onPlans, setOnPlans] = createSignal(false);
@@ -117,7 +88,7 @@ function Models() {
       ] },
       ...(plans().length && own().includes("cost") ? [{ title: "Your plans · tasks a week", items: plans().map((plan) => ({
         value: `sub:${plan.name}`, label: `Tasks / week · ${plan.name}`, short: plan.name,
-        detail: `${provider(plan.provider)} models · $${Math.round(plan.value).toLocaleString()} per week`,
+        detail: `${plan.provider === "claude" ? "Anthropic" : plan.provider === "codex" ? "OpenAI" : plan.provider} models · $${Math.round(plan.value).toLocaleString()} per week`,
       })) }] : []),
       ...[...others.entries()].map(([group, list]) => ({ title: `${group} score`, items: list.map((m: any) => ({ value: `lens:${m.id}`, label: m.label, meta: String(m.count) })) })),
     ];
@@ -168,8 +139,8 @@ function Models() {
   };
 
   // ---- the points, with a value on every chosen axis
-  const key = (p: any) => p.entity.id + "|" + (p.observation.variant || "");
-  const label = (p: any) => p.entity.label + (p.observation.variant && !p.entity.label.includes(p.observation.variant) ? ` (${p.observation.variant})` : "");
+  const key = pointKey;
+  const label = pointLabel;
   const needle = () => search().trim().toLowerCase();
   const items = createMemo(() => base()
     .filter((p: any) => !hidden().has(familyGroup(p.entity.family)) && (!onPlans() || plansFor(p.entity).length > 0)
@@ -259,30 +230,10 @@ function Models() {
   const agreeWords = (r: number) => Math.abs(r) >= 0.85 ? "agree closely" : Math.abs(r) >= 0.6 ? "mostly agree" : Math.abs(r) >= 0.3 ? "agree loosely" : "barely agree";
 
   // Plans: every measured plan's tasks per week on the chosen benchmark, with each plan's best trade-offs as its curve.
-  const planSeries = createMemo<PlanSeries[]>(() => {
-    const seen = new Map<string, number>();
-    return plans().map((plan) => {
-      const n = seen.get(plan.provider) ?? 0;
-      seen.set(plan.provider, n + 1);
-      const points = base().filter((p: any) => covers(plan, p.entity) && p.observation.resources?.cost > 0
-          && !hidden().has(familyGroup(p.entity.family)) && (!needle() || `${p.entity.label} ${p.entity.id}`.toLowerCase().includes(needle())))
-        .map((p: any) => {
-          const week = plan.value / p.observation.resources.cost;
-          const dollar = plan.monthly ? week / (plan.monthly * 12 / 52) : null;
-          const tasks = perDollar() ? dollar ?? 0 : week;
-          return { key: key(p), label: label(p), short: p.entity.label, tasks, score: p.observation.score,
-            hover: hoverHTML(label(p), [["Plan", plan.name + (plan.monthly ? ` · $${plan.monthly}/mo` : "")], ["Tasks / week", integer(week)],
-              ...(dollar ? [["Tasks / $", dollar < 10 ? dollar.toFixed(1) : integer(dollar)] as [string, string]] : []),
-              [meta()?.label ?? "Score", fmtScore(p.observation.score, meta()?.format)], ["Cost / task", price(p.observation.resources.cost)]]), best: false };
-        });
-      const keep = new Set(paretoN(points, [(q: any) => q.tasks, (q: any) => q.score], [true, true]).map((q: any) => q.key));
-      for (const q of points) q.best = keep.has(q.key);
-      return { name: plan.name, colour: plan.colour, dash: n > 0, points: points.filter((q: any) => q.tasks > 0) };
-    }).filter((s) => s.points.length);
-  });
+  const planSeries = createMemo<PlanSeries[]>(() => planSeriesOf(plans(), base(), { perDollar: perDollar(), metric: meta(),
+    keep: (p: any) => !hidden().has(familyGroup(p.entity.family)) && (!needle() || `${p.entity.label} ${p.entity.id}`.toLowerCase().includes(needle())) }));
   // Plans in 3D: tasks per week, the plan's weekly price, the score. Each plan's curve sits at its price, and the
   // surface is the best score reachable at a given workload for at most a given weekly spend.
-  const weekPrice = (plan: Plan) => plan.monthly ? plan.monthly * 12 / 52 : null;
   const plans3d = () => {
     const priced = planSeries().map((s, i) => ({ s, plan: plans().find((p) => p.name === s.name)! })).filter((x) => x.plan && weekPrice(x.plan));
     if (!priced.length) return null;
@@ -625,12 +576,12 @@ function Models() {
         </div>
 
         <Show when={view() === "chart"}>
-          <div class="sb-limits" aria-label="Your limits">
-            <span class="sb-limits-name">Your limits</span>
+          <div class="sb-your-limits" aria-label="Your limits">
+            <span class="sb-your-limits-name">Your limits</span>
             <For each={LIMITS()}>{(l) => {
               const value = () => limitValue(l.key);
               const pos = () => limitAt()[l.key] ?? (l.floor ? 0 : 1000);
-              return <label class="sb-limit" data-set={value() !== null ? "" : undefined}>
+              return <label class="sb-your-limit" data-set={value() !== null ? "" : undefined}>
                 <span>{l.label} {l.floor ? "≥" : "≤"} <b>{value() === null ? "any" : fmtLimit(l.key, value()!)}</b></span>
                 <input type="range" min="0" max="1000" value={pos()} aria-label={`${l.label} limit`}
                   onInput={(e) => setLimitAt({ ...limitAt(), [l.key]: Number(e.currentTarget.value) })} />
@@ -653,7 +604,7 @@ function Models() {
           </div>
         </Show>
         <Show when={view() === "plans"}>
-          <div class="sb-limits">
+          <div class="sb-your-limits">
             <For each={plans()}>{(plan) =>
               <span class="sb-plan-key"><Swatch colour={plan.colour} />{plan.name}<span class="muted">
                 {plan.monthly ? ` $${plan.monthly}/mo · ${plan.multiple?.toFixed(1)}× its price` : ` $${Math.round(plan.value).toLocaleString()} of API value a week`}</span></span>}</For>

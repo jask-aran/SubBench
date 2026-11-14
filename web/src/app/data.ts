@@ -2,6 +2,8 @@ import { createSignal } from "solid-js";
 // @ts-ignore -- plain JS modules shared with the Node tests
 import { indexBundle, matchModel, familySlot } from "../lib/frontier.js";
 // @ts-ignore
+import { planPrice } from "../lib/plans.js";
+// @ts-ignore
 import { summaryCards, headline, modelTotals, freshness } from "../lib/value.js";
 
 /*
@@ -91,11 +93,23 @@ export const PROVIDER_NAME: Record<string, string> = { codex: "OpenAI", claude: 
 
 /** Products take their provider's colour, so every Anthropic plan reads as Anthropic and every OpenAI plan as
  *  OpenAI. Plans of one provider are told apart by line style: the first solid, the next dashed, then dotted. */
+// Each plan its own colour, the same on every page, so two plans of one provider can be told apart. A provider's
+// cheapest full plan keeps the provider's colour; its other plans, and scoped limits such as "Claude Max 5X · Fable",
+// take chart slots no provider uses.
+const PLAN_COLOURS = ["var(--series-5)", "var(--series-7)", "var(--series-4)", "var(--series-8)", "var(--series-1)"];
 export function productColors(names: Array<{ name: string; provider: string | null }>) {
   const out = new Map<string, string>();
-  for (const { name, provider } of names) {
+  const monthly = (name: string) => planPrice(name)?.monthly ?? Infinity;
+  const ordered = [...names].sort((a, b) => (a.provider ?? "").localeCompare(b.provider ?? "")
+    || Number(a.name.includes(" · ")) - Number(b.name.includes(" · ")) || monthly(a.name) - monthly(b.name) || a.name.localeCompare(b.name));
+  const main = new Set<string>();
+  let spare = 0;
+  for (const { name, provider } of ordered) {
     const slot = familySlot(PROVIDER_FAMILY[provider ?? ""] ?? provider ?? "");
-    out.set(name, slot ? `var(--series-${slot})` : "var(--series-other)");
+    if (!main.has(provider ?? "") && !name.includes(" · ")) {
+      main.add(provider ?? "");
+      out.set(name, slot ? `var(--series-${slot})` : "var(--series-other)");
+    } else out.set(name, PLAN_COLOURS[spare++ % PLAN_COLOURS.length]);
   }
   return out;
 }

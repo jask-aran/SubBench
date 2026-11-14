@@ -1,6 +1,6 @@
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
 import { render } from "solid-js/web";
-import { HouseIcon, WalletIcon, ChartScatterIcon, MenuIcon, ExternalLinkIcon, XIcon, PanelLeftCloseIcon, PanelLeftOpenIcon } from "lucide-solid";
+import { WalletIcon, ChartScatterIcon, MenuIcon, ExternalLinkIcon, XIcon, PanelLeftCloseIcon, PanelLeftOpenIcon } from "lucide-solid";
 import { NavPane, NavBrand, NavGroup, NavRow, NavRail, NavRailSection, RailButton } from "../conduit/ui/nav";
 import { Header, HeaderCrumb, HeaderButton, HeaderNote } from "../conduit/ui/header";
 import { health, healthState, refreshHealth, poll } from "./data";
@@ -8,11 +8,10 @@ import { health, healthState, refreshHealth, poll } from "./data";
 import { ago } from "../lib/format.js";
 import "./styles";
 
-export type PageKey = "overview" | "subscriptions" | "models" | "notfound";
+export type PageKey = "subscriptions" | "models" | "notfound";
 
 const PAGES: Array<{ key: PageKey; href: string; label: string; icon: () => JSX.Element }> = [
-  { key: "overview", href: "/", label: "Overview", icon: () => <HouseIcon /> },
-  { key: "subscriptions", href: "/subscriptions/", label: "Subscriptions", icon: () => <WalletIcon /> },
+  { key: "subscriptions", href: "/", label: "Subscriptions", icon: () => <WalletIcon /> },
   { key: "models", href: "/models/", label: "Models", icon: () => <ChartScatterIcon /> },
 ];
 

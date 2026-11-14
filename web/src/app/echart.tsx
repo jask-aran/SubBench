@@ -14,7 +14,11 @@ export function engine() {
 export type Size = { width: number; height: number };
 
 /** What a page can do to a chart after drawing it. */
-export type ChartApi = { snap: (view: { alpha: number; beta: number; distance?: number }) => void };
+export type ChartApi = {
+  snap: (view: { alpha: number; beta: number; distance?: number }) => void;
+  /** Bring one named series forward and fade the rest; null restores them all. */
+  focus: (series: string | null) => void;
+};
 
 export function EChart(props: {
   option: (size: Size) => any;
@@ -42,9 +46,15 @@ export function EChart(props: {
     setSize({ width: element.clientWidth, height: element.clientHeight });
     setReady(true);
     // A 3D view turns to a named angle by animating the camera, not by redrawing the chart.
-    props.api?.({ snap: (view) => chart?.setOption({ grid3D: { viewControl: {
-      alpha: view.alpha, beta: view.beta, ...(view.distance ? { distance: view.distance } : {}),
-      animation: true, animationDurationUpdate: 650, animationEasingUpdate: "cubicInOut" } } }) });
+    props.api?.({
+      snap: (view) => chart?.setOption({ grid3D: { viewControl: {
+        alpha: view.alpha, beta: view.beta, ...(view.distance ? { distance: view.distance } : {}),
+        animation: true, animationDurationUpdate: 650, animationEasingUpdate: "cubicInOut" } } }),
+      focus: (series) => {
+        chart?.dispatchAction({ type: "downplay" });
+        if (series) chart?.dispatchAction({ type: "highlight", seriesName: series });
+      },
+    });
     onCleanup(() => observer.disconnect());
   });
 
