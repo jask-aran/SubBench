@@ -371,3 +371,29 @@ def test_an_unwritable_database_is_a_message_not_a_traceback(tmp_path, monkeypat
     monkeypatch.setattr(cli, "connect", refuse)
     assert cli.main(["--database", str(tmp_path / "db.sqlite3"), "doctor"]) == 2
     assert "needs write access" in capsys.readouterr().err
+
+
+def test_a_codex_app_server_that_never_answers_times_out():
+    import sys
+    import time as clock
+
+    from subbench import endpoints
+
+    # Reads its requests and then says nothing, as a hung app-server would.
+    silent = (sys.executable, "-c", "import sys, time\nfor _ in sys.stdin: pass\ntime.sleep(60)")
+    started = clock.monotonic()
+    with pytest.raises(endpoints.EndpointError, match="within"):
+        endpoints.codex_app_server(command=silent, timeout=0.5)
+    assert clock.monotonic() - started < 5
+
+
+def test_codex_app_server_skips_log_lines_and_returns_the_answer():
+    import sys
+
+    from subbench import endpoints
+
+    answer = ("import sys, json\nprint('starting up', flush=True)\n"
+              "print(json.dumps({'id': 2, 'result': {'rateLimits': {'planType': 'plus'}}}), flush=True)\n"
+              "sys.stdin.read()")
+    assert endpoints.codex_app_server(command=(sys.executable, "-c", answer), timeout=5) == {
+        "rateLimits": {"planType": "plus"}}

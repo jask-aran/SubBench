@@ -19,8 +19,10 @@ import json
 import math
 import os
 import platform
+import queue
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 from pathlib import Path
@@ -221,13 +223,28 @@ def wham_to_protocol(payload: dict[str, Any], *, now: float | None = None) -> di
     return {"rateLimits": limits}
 
 
-def codex_app_server() -> dict[str, Any]:
+# The whole exchange with `codex app-server`. It runs inside the collection loop, so an
+# app-server that starts and then never answers would stop every collector, Claude too.
+APP_SERVER_TIMEOUT_SECONDS = 10.0
+
+
+def codex_app_server(*, command: tuple[str, ...] = ("codex", "app-server"),
+                     timeout: float = APP_SERVER_TIMEOUT_SECONDS) -> dict[str, Any]:
     """Ask a local Codex install. Used only when the direct request fails."""
-    if not shutil.which("codex"):
+    if not shutil.which(command[0]):
         raise EndpointError("codex is not installed")
-    process = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, bufsize=1)
+    process = subprocess.Popen(list(command), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True, bufsize=1)
     assert process.stdin is not None and process.stdout is not None
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def read(stream) -> None:
+        for line in stream:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=read, args=(process.stdout,), daemon=True).start()
+    deadline = time.monotonic() + timeout
     try:
         for request in (
             {"method": "initialize", "id": 1, "params": {"clientInfo": {"name": "subbench", "title": "SubBench", "version": __version__}, "capabilities": {}}},
@@ -236,11 +253,19 @@ def codex_app_server() -> dict[str, Any]:
         ):
             process.stdin.write(json.dumps(request) + "\n")
             process.stdin.flush()
-        for line in process.stdout:
-            message = json.loads(line)
-            if message.get("id") == 2:
+        while True:
+            try:
+                line = lines.get(timeout=max(deadline - time.monotonic(), 0.0))
+            except queue.Empty:
+                raise EndpointError(f"codex app-server did not return rate limits within {timeout:.0f} s") from None
+            if line is None:
+                raise EndpointError("codex app-server ended before returning rate limits")
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue  # a log line, not a message
+            if isinstance(message, dict) and message.get("id") == 2:
                 return message.get("result", {})
-        raise EndpointError("codex app-server ended before returning rate limits")
     finally:
         process.terminate()
         try:
